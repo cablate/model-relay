@@ -2,6 +2,7 @@
 // Pure view function: receives resolved UI elements, snapshot data, and action callbacks.
 import type { EngineInterface } from 'claude-code'
 import type { PanelData, PanelUi } from '../types'
+import { fit, pingText, statText } from './logic'
 
 type Elements = ReturnType<EngineInterface['ui']['resolve']>
 
@@ -19,39 +20,14 @@ export type PanelActions = {
 
 const ACCENT = 'cyan'
 const FRAME_CELLS = 4
-const cells = (ch: string) => ((ch.codePointAt(0) ?? 0) >= 0x1100 ? 2 : 1)
-
-export function fit(s: string, width: number): string {
-  const text = s.replace(/\s+/g, ' ').trim()
-  let used = 0
-  let out = ''
-  for (const ch of text) {
-    const w = cells(ch)
-    if (used + w > width - 1) return `${out}…`
-    used += w
-    out += ch
-  }
-  return out
-}
-
-function formatStat(st: { status: number; ms: number } | undefined, lang: 'zh' | 'en'): { text: string; color: string } | null {
-  if (!st) return null
-  const sec = st.ms >= 1000 ? `${(st.ms / 1000).toFixed(1)}s` : `${st.ms}ms`
-  if (st.status >= 200 && st.status < 300) {
-    return { text: `200 · ${sec}`, color: 'green' }
-  }
-  if (st.status === 0) {
-    return { text: lang === 'en' ? `offline · ${sec}` : `未連線 · ${sec}`, color: 'red' }
-  }
-  return { text: `HTTP ${st.status} · ${sec}`, color: 'red' }
-}
 
 export function panelTree(ui: Elements, v: PanelView, act: PanelActions) {
   const { Box, Text, Button } = ui
   const inner = Math.max(32, v.columns - FRAME_CELLS)
   const en = v.lang === 'en'
 
-  const foModel = v.providers[v.failoverProvider] ?? v.failoverProvider
+  const fo = v.failoverProvider
+  const foText = fo ? `${fo} (${v.providers[fo] ?? fo})` : (en ? 'nobody to hand over to' : '沒有接手者')
   const mins = v.failoverSince ? Math.max(0, Math.round((v.nextClaudeTry - v.now) / 60000)) : 0
   const aliases = v.aliases ?? {}
   const aliasPairs = Object.entries(aliases)
@@ -67,8 +43,8 @@ export function panelTree(ui: Elements, v: PanelView, act: PanelActions) {
         : (v.direct ? '轉發站離線・主線暫時直連 Claude' : '轉發站離線・每 10 秒自動重啟中…'))
     : v.failoverSince
       ? (en
-          ? `Claude 429 limit active · Failover → ${v.failoverProvider} (${foModel}) · Retry in ~${mins}m`
-          : `Claude 429 額度冷卻中・自動備援 → ${v.failoverProvider} (${foModel})・約 ${mins} 分鐘後重試`)
+          ? `Claude 429 limit active · Failover → ${foText} · Retry in ~${mins}m`
+          : `Claude 429 額度冷卻中・自動備援 → ${foText}・約 ${mins} 分鐘後重試`)
       : (en
           ? `Aliases: ${aliasText} · Pinned chats: ${v.sessionsOnCustom}`
           : `別名分流：${aliasText}・固定中對話：${v.sessionsOnCustom}`)
@@ -119,7 +95,7 @@ export function panelTree(ui: Elements, v: PanelView, act: PanelActions) {
   // One row per switch: what it is, whether it is on, and what flipping it does. failover and retry apply on the
   // router's next request; the proxy rewrites settings.json, so it asks first and only reaches new sessions.
   const sw = v.switches
-  const chainText = v.failoverChain.join(' → ')
+  const chainText = v.failoverChain.length ? v.failoverChain.join(' → ') : (en ? 'nobody to hand over to' : '沒有接手者')
   const switchRow = (
     id: 'failover' | 'retry' | 'proxy',
     name: string,
@@ -232,6 +208,17 @@ export function panelTree(ui: Elements, v: PanelView, act: PanelActions) {
         </Box>
       ) : null}
 
+      {(v.hints ?? []).slice(0, 2).map((hint, i) => (
+        <Box key={`hint:${i}`}>
+          <Text color="yellow">{fit(`⚠ ${hint}`, inner)}</Text>
+        </Box>
+      ))}
+      {providerEntries.length === 0 && v.online ? (
+        <Box>
+          <Text dimColor>{fit(en ? 'No provider is usable yet: every request goes to Claude; /provider setup adds one' : '還沒有可用的供應商：所有請求都走 Claude；/provider setup 可以新增', inner)}</Text>
+        </Box>
+      ) : null}
+
       <Box flexDirection="column">
         {claudeRow}
         {providerEntries.map(([name, model], idx) => {
@@ -247,7 +234,8 @@ export function panelTree(ui: Elements, v: PanelView, act: PanelActions) {
             .filter(([, target]) => target === name)
             .map(([slot]) => (en ? `${slot} alias` : `${slot} 別名`))
           const aliasBadge = myAliases.length > 0 ? ` [${myAliases.join(' · ')}]` : null
-          const st = formatStat(v.stats[name], v.lang)
+          // the last real request and the last test are shown apart: a long reply is not a slow provider
+          const notes = [statText(v.stats[name], v.lang), pingText(v.ping?.[name], v.lang)].filter((x) => x !== null)
           const hk = String(idx + 2)
           return (
             <Box key={`route:${name}`}>
@@ -260,7 +248,7 @@ export function panelTree(ui: Elements, v: PanelView, act: PanelActions) {
                   <Text color={active ? ACCENT : undefined}>{model}</Text>
                   {aliasBadge ? <Text color="cyan">{aliasBadge}</Text> : null}
                   {foBadge ? <Text color="magenta">{foBadge}</Text> : null}
-                  {st ? <Text color={st.color}>{` · ${st.text}`}</Text> : null}
+                  {notes.map((n, i) => <Text key={`note:${i}`} color={n.color}>{` · ${n.text}`}</Text>)}
                 </Text>
               </Box>
               {active

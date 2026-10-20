@@ -4,12 +4,21 @@ export type ProviderStat = {
   at: number
 }
 
+// The last test of a provider (/provider ping): ok | key | model | quota | not-running | unreachable | timeout | error
+export type PingStat = {
+  verdict: string
+  status: number
+  firstByteMs: number
+  at: number
+  detail: string
+}
+
 export type PanelData = {
   online: boolean
   direct: boolean
   port: number
   session: string // 'claude' or provider name
-  failoverProvider: string
+  failoverProvider: string | null // null when failover has nobody to hand over to
   failoverSince: number
   nextClaudeTry: number
   sessionsOnCustom: number
@@ -19,6 +28,8 @@ export type PanelData = {
   // The router's own view of its switches; null when it is offline or too old to report them
   switches: { failover: boolean; retry: boolean; proxy: boolean; proxyReady: boolean } | null
   stats: Record<string, ProviderStat>
+  ping: Record<string, PingStat>
+  hints: string[] // things to act on: an older config, a provider the router skips
   lang: 'zh' | 'en'
   now: number
 }

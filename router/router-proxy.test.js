@@ -111,6 +111,7 @@ async function setup(t, opts = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'relay-proxy-'))
   const port = await freePort()
   fs.writeFileSync(path.join(dir, 'model-relay.json'), JSON.stringify({
+    format: 2,
     port,
     claudeUrl: `http://127.0.0.1:${anthropicPort}`,
     proxy: { enabled: opts.proxy === false ? false : true },

@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Runs all repository checks: syntax check, router unit tests, TypeScript typecheck, and bilingual docs check.
+// Runs all repository checks: syntax check, router tests, hook logic tests, the neutral-names gate, and the bilingual docs check.
 
 import { execFileSync } from 'node:child_process'
 import path from 'node:path'
@@ -12,10 +12,10 @@ function step(label, cmd, args) {
   execFileSync(cmd, args, { cwd: root, stdio: 'inherit' })
 }
 
-step('Syntax check (router)', process.execPath, ['--check', 'router/logic.js'])
-step('Syntax check (router server)', process.execPath, ['--check', 'router/router.js'])
-step('Syntax check (certificates)', process.execPath, ['--check', 'router/pki.js'])
-step('Router unit tests', process.execPath, ['--test', 'router/logic.test.js', 'router/pki.test.js', 'router/failover.test.js'])
+for (const f of ['router/logic.js', 'router/router.js', 'router/pki.js', 'router/ping.js', 'router/migrate.js']) step(`Syntax check (${f})`, process.execPath, ['--check', f])
+step('Router unit tests', process.execPath, ['--test', 'router/logic.test.js', 'router/pki.test.js', 'router/failover.test.js', 'router/ping.test.js', 'router/migrate.test.js'])
 step('Router end-to-end tests (HTTPS proxy, setup CLI, install flow)', process.execPath, ['--test', 'router/router-proxy.test.js', 'router/setup-proxy.test.js', 'router/setup-config.test.js', 'router/stream.test.js', 'router/router-diagnostics.test.js', 'router/install-flow.test.js'])
+step('Hook logic tests (plain Node)', process.execPath, ['tools/test-hooks.mjs'])
+step('No provider named outside legacy blocks', process.execPath, ['tools/neutral.mjs'])
 step('Bilingual docs check', process.execPath, ['tools/docs.mjs', 'check'])
 console.log('All checks passed.')

@@ -1,37 +1,25 @@
 {
+  "format": 2,
   "port": 8950,
   "failover": {
     "enabled": true,
-    "chain": ["glm"],
+    "chain": ["backup"],
     "cooldownMs": 600000
   },
   "providers": {
-    "glm": {
-      "baseUrl": "https://api.z.ai/api/anthropic",
-      "token": "env:ZAI_API_KEY",
-      "model": "glm-5.3[1m]",
-      "matchModels": ["^glm", "haiku"],
-      "stripToolSearch": true,
-      "stripCacheControl": false,
-      "authHeader": "both"
+    "backup": {
+      "preset": "deepseek",
+      "token": "env:BACKUP_API_KEY",
+      "model": "your-model-id"
     },
-    "deepseek": {
-      "baseUrl": "https://api.deepseek.com/anthropic",
-      "token": "env:DEEPSEEK_API_KEY",
-      "model": "deepseek-chat",
-      "matchModels": ["^deepseek"],
-      "stripToolSearch": true,
-      "stripCacheControl": false,
-      "authHeader": "bearer"
-    },
-    "gemini": {
-      "baseUrl": "http://127.0.0.1:3425",
-      "token": "env:GEMINI_GATEWAY_TOKEN",
-      "model": "gemini-4-argon",
-      "matchModels": ["^gemini"],
-      "stripToolSearch": true,
+    "local": {
+      "baseUrl": "http://127.0.0.1:4000",
+      "token": "env:LOCAL_GATEWAY_TOKEN",
+      "model": "your-local-model-id",
+      "matchModels": ["^local"],
       "stripCacheControl": true,
-      "authHeader": "bearer"
+      "authHeader": "bearer",
+      "launch": { "command": "my-gateway", "args": ["serve", "--port", "4000"] }
     }
   }
 }

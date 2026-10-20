@@ -1,6 +1,6 @@
 'use strict'
-// Local relay router for Claude Code: routes requests across Claude and custom providers
-// (GLM, Gemini, DeepSeek, Kimi, MiniMax, OpenRouter, etc.), with sticky session cache protection and 429 failover.
+// Local relay router for Claude Code: routes requests across Claude and Anthropic-compatible providers, with sticky
+// sessions that protect the prompt cache and an optional failover chain for Claude's usage-limit 429.
 // Usage: node router.js <config-dir>
 const http = require('http')
 const https = require('https')
@@ -11,6 +11,7 @@ const tls = require('tls')
 const { pipeline } = require('stream')
 const L = require('./logic')
 const PKI = require('./pki')
+const P = require('./ping')
 
 // This process is itself the HTTPS proxy: it must never send its own traffic, or its children's, through a proxy
 // setting inherited from Claude Code, which would loop back into it.
@@ -36,22 +37,10 @@ const holdTunnel = (sock) => {
   sock.once('close', () => tunnels--)
 }
 
-function resolveCfgPath() {
-  const relay = path.join(dir, 'model-relay.json')
-  if (fs.existsSync(relay)) return relay
-  return path.join(dir, 'custom-agent.json')
-}
-
-function resolveStatePath() {
-  const relay = path.join(dir, 'model-relay-state.json')
-  if (fs.existsSync(relay)) return relay
-  const legacy = path.join(dir, 'custom-agent-state.json')
-  if (fs.existsSync(legacy)) return legacy
-  return relay
-}
-
-const LOG_FILE = path.join(dir, 'custom-agent-router.log')
-const REQLOG = path.join(dir, 'custom-agent-requests.log')
+const CFG_FILE = path.join(dir, 'model-relay.json')
+const STATE_FILE = path.join(dir, 'model-relay-state.json')
+const LOG_FILE = path.join(dir, 'model-relay.log')
+const REQLOG = path.join(dir, 'model-relay-requests.log')
 
 // The file is re-read on every request so edits apply at once. A read that fails (an editor mid-save, a typo) keeps
 // the last good config instead of failing requests; "doctor" is what tells a person the file is broken.
@@ -61,11 +50,12 @@ let unresolved = []
 const readCfg = () => {
   unresolved = [] // a file that cannot be read or parsed must not be blamed on an env var
   try {
-    const raw = JSON.parse(fs.readFileSync(resolveCfgPath(), 'utf8'))
+    const raw = JSON.parse(fs.readFileSync(CFG_FILE, 'utf8'))
     unresolved = L.unresolvedEnv(raw)
     const parsed = L.parseCfg(raw)
     if (parsed) lastGoodCfg = parsed
-    return parsed || lastGoodCfg
+    // A file that reads fine but has no usable provider (keys not exported yet) still lets Claude through
+    return parsed || L.bareCfg(raw)
   } catch {
     return lastGoodCfg
   }
@@ -75,14 +65,27 @@ const cfgMissing = () => L.cfgMissingMessage(unresolved)
 
 let state = (() => {
   try {
-    return L.parseState(JSON.parse(fs.readFileSync(resolveStatePath(), 'utf8')))
+    return L.parseState(JSON.parse(fs.readFileSync(STATE_FILE, 'utf8')))
   } catch {
     return L.emptyState()
   }
 })()
 
-// In-memory runtime latency/status per provider
+// Per provider: the last real request ({ status, ms, at }) and the last test ({ verdict, status, firstByteMs, at,
+// detail }), kept apart so a long reply never reads as a slow provider
 const providerStats = {}
+const pingStats = {}
+// When each model id (lower case, without a [1m]-style suffix) was last asked for: lets the plugin check that a
+// model-relay:<name> subagent really reached the relay with its model, which Claude Code can swap silently
+const seenModels = {}
+const sawModel = (model) => {
+  if (typeof model !== 'string' || !model) return
+  const key = L.wireModel(model).toLowerCase()
+  delete seenModels[key]
+  seenModels[key] = Date.now()
+  const keys = Object.keys(seenModels)
+  if (keys.length > 100) delete seenModels[keys[0]]
+}
 
 // Logs are capped at 5 MB: past that the file is emptied and starts over
 const capLog = (file) => {
@@ -101,7 +104,7 @@ const log = (line) => {
 const save = () => {
   state = L.pruneSticky(state, Date.now())
   try {
-    fs.writeFileSync(resolveStatePath(), JSON.stringify({ ...state, updatedAt: Date.now() }, null, 2) + '\n')
+    fs.writeFileSync(STATE_FILE, JSON.stringify({ ...state, updatedAt: Date.now() }, null, 2) + '\n')
   } catch {}
 }
 
@@ -168,63 +171,15 @@ function send(base, req, res, body, headers, onResponse, onError) {
   up.end(body)
 }
 
-function buildAuthHeaders(provider, baseHeaders = {}) {
-  const headers = { ...baseHeaders }
-  delete headers['x-api-key']
-  delete headers['authorization']
-  if (provider.authHeader === 'bearer' || provider.authHeader === 'both') {
-    headers['authorization'] = `Bearer ${provider.token}`
+// A test of one provider. One with `launch` whose local port is closed is started first and given 10 seconds.
+async function pingOne(provider) {
+  const u = new URL(provider.url)
+  if (provider.launch && P.isLocal(provider.url) && !(await P.portOpen(u.hostname, Number(u.port) || 80))) {
+    launchIfDown(provider)
+    for (let i = 0; i < 20 && !(await P.portOpen(u.hostname, Number(u.port) || 80)); i++) await new Promise((r) => setTimeout(r, 500))
   }
-  if (provider.authHeader === 'x-api-key' || provider.authHeader === 'both') {
-    headers['x-api-key'] = provider.token
-  }
-  return headers
-}
-
-function pingOne(provider) {
-  return new Promise((resolve) => {
-    const t0 = Date.now()
-    const u = new URL(provider.url)
-    const lib = u.protocol === 'http:' ? http : https
-    const payload = Buffer.from(JSON.stringify({
-      model: L.wireModel(provider.model),
-      max_tokens: 1,
-      messages: [{ role: 'user', content: 'hi' }],
-    }))
-    const headers = buildAuthHeaders(provider, {
-      'content-type': 'application/json',
-      'anthropic-version': '2023-06-01',
-      'content-length': payload.length,
-      host: u.host,
-    })
-    const up = lib.request({
-      hostname: u.hostname,
-      port: u.port || (u.protocol === 'http:' ? 80 : 443),
-      path: L.upstreamPath(provider.url, '/v1/messages'),
-      method: 'POST',
-      headers,
-      timeout: 8000,
-    }, (ur) => {
-      ur.resume()
-      ur.on('end', () => {
-        const entry = { status: ur.statusCode || 0, ms: Date.now() - t0, at: Date.now() }
-        providerStats[provider.name] = entry
-        resolve(entry)
-      })
-    })
-    up.on('timeout', () => {
-      up.destroy()
-      const entry = { status: 0, ms: Date.now() - t0, at: Date.now() }
-      providerStats[provider.name] = entry
-      resolve(entry)
-    })
-    up.on('error', () => {
-      const entry = { status: 0, ms: Date.now() - t0, at: Date.now() }
-      providerStats[provider.name] = entry
-      resolve(entry)
-    })
-    up.end(payload)
-  })
+  pingStats[provider.name] = await P.ping(provider)
+  return pingStats[provider.name]
 }
 
 // tried: providers this request already gave up on, so a fallback never loops back to one of them
@@ -243,7 +198,7 @@ function toProvider(provider, req, res, body, rewrite, sid, attempt = 0, tried =
       if (rewrite) return apiError(res, 400, `could not rewrite request for provider "${provider.name}"`)
     }
   }
-  const headers = buildAuthHeaders(provider, req.headers)
+  const headers = P.authHeaders(provider, req.headers)
   // Per-provider switch: retryCfg === null means this provider never retries
   const retryCfg = provider.retryCfg !== undefined ? provider.retryCfg : null
 
@@ -285,8 +240,7 @@ function toProvider(provider, req, res, body, rewrite, sid, attempt = 0, tried =
         providerStats[provider.name] = { status, ms: Date.now() - t0, at: Date.now() }
         const all = [...tail.matchAll(/"input_tokens"\s*:\s*(\d+)/g)]
         const last = all.length ? Number(all[all.length - 1][1]) : null
-        const tag = provider.name === 'glm' ? 'zai' : provider.name
-        logReq({ to: `${tag}-reply`, sid: short(sid), rewrite, status, bytes: out.length, inputTokens: last, attempt })
+        logReq({ to: `${provider.name}-reply`, sid: short(sid), rewrite, status, bytes: out.length, inputTokens: last, attempt })
       })
       return relay(ur, res)
     }
@@ -317,7 +271,7 @@ function toClaude(cfg, req, res, body, trial, sid) {
     ur.on('data', (c) => chunks.push(c))
     ur.on('end', () => {
       const text = Buffer.concat(chunks).toString('utf8')
-      const foProvider = cfg.providers[cfg.failoverProvider]
+      const foProvider = cfg.failoverProvider ? cfg.providers[cfg.failoverProvider] : null
       if (cfg.failoverEnabled && foProvider && L.isUsageLimit(429, ur.headers, text)) {
         setState(L.onLimited(state, cfg, Date.now()), `claude usage limit${trial ? ' (still)' : ''}: using ${foProvider.name} (${foProvider.model})`)
         stick(sid, foProvider.name, 'usage limit')
@@ -348,13 +302,15 @@ function control(req, res, body) {
       tunnels,
       failoverSince: state.failoverSince,
       nextClaudeTry: state.nextClaudeTry,
-      failoverProvider: cfg ? cfg.failoverProvider : 'glm',
+      failoverProvider: cfg ? cfg.failoverProvider : null,
       failoverChain: cfg ? cfg.failoverChain : [],
       aliases: cfg ? L.detectAliases(cfg) : {},
       config: cfg ? { failoverEnabled: cfg.failoverEnabled, retryEnabled: cfg.retry.enabled, proxyEnabled: cfg.proxy.enabled } : null,
       providers,
       unresolved,
       stats: providerStats,
+      ping: pingStats,
+      seenModels,
       sessionsOnCustom: Object.keys(state.sticky || {}).length,
       session: L.getSessionProvider(state, cfg, sid),
       proxy: { enabled: Boolean(cfg && cfg.proxy.enabled), certificate: Boolean(mitmServer()), ...proxyStats },
@@ -386,9 +342,10 @@ function control(req, res, body) {
       target = String(JSON.parse(body.toString('utf8')).provider || '').trim().toLowerCase()
     } catch {}
     const list = target && cfg.providers[target] ? [cfg.providers[target]] : Object.values(cfg.providers)
-    Promise.all(list.map(pingOne)).then(() => {
-      json(res, { ok: true, stats: providerStats })
-    })
+    Promise.all(list.map(pingOne)).then(
+      () => json(res, { ok: true, ping: pingStats, stats: providerStats }),
+      (e) => apiError(res, 500, `the test failed: ${e.message}`),
+    )
     return
   }
   return apiError(res, 404, 'unknown control path')
@@ -444,6 +401,7 @@ function dispatch(req, res, tunneled) {
         nMsgs = (j.messages || []).length
       } catch {}
     }
+    sawModel(model)
     const route = L.decide(state, cfg, model, sid, Date.now())
     logReq({ sid: short(sid), model, nMsgs, route, ...(tunneled ? { via: 'proxy' } : {}) })
     const parsed = L.parseRoute(route, cfg)
@@ -582,7 +540,7 @@ const PORT = cfg0
   ? cfg0.port
   : (() => {
       try {
-        const p = JSON.parse(fs.readFileSync(resolveCfgPath(), 'utf8')).port
+        const p = JSON.parse(fs.readFileSync(CFG_FILE, 'utf8')).port
         return L.isPort(p) ? p : 8950
       } catch {
         return 8950
@@ -626,34 +584,26 @@ server.listen(PORT, '127.0.0.1', () => {
   setInterval(superviseLaunchers, 30000).unref()
 })
 
-// Any local provider with `launch: {command, args}` is automatically started when its local port is closed.
+// Any local provider with `launch: {command, args}` is started when its local port is closed
 function superviseLaunchers() {
   const cfg = readCfg()
   if (!cfg) return
-  for (const p of Object.values(cfg.providers)) {
-    const l = p.launch
-    if (!l || typeof l.command !== 'string' || !/^http:\/\/(127\.0\.0\.1|localhost)(:\d+)?/i.test(p.url)) continue
-    const u = new URL(p.url)
-    const port = Number(u.port) || 80
-    const sock = require('net').connect({ host: '127.0.0.1', port })
-    sock.setTimeout(2000)
-    sock.on('connect', () => sock.destroy())
-    const down = () => {
-      sock.destroy()
-      try {
-        const c = require('child_process').spawn(l.command, Array.isArray(l.args) ? l.args : [], {
-          detached: true,
-          stdio: 'ignore',
-          windowsHide: true,
-        })
-        c.on('error', (e) => log(`launch [${p.name}] failed: ${e.message}`))
-        c.unref()
-        log(`launched [${p.name}] ${l.command} (port ${port} was closed)`)
-      } catch (e) {
-        log(`launch [${p.name}] failed: ${e.message}`)
-      }
+  for (const p of Object.values(cfg.providers)) launchIfDown(p)
+}
+
+function launchIfDown(p) {
+  const l = p.launch
+  if (!l || typeof l.command !== 'string' || !P.isLocal(p.url)) return
+  const port = Number(new URL(p.url).port) || 80
+  P.portOpen('127.0.0.1', port, 2000).then((up) => {
+    if (up) return
+    try {
+      const c = require('child_process').spawn(l.command, Array.isArray(l.args) ? l.args : [], { detached: true, stdio: 'ignore', windowsHide: true })
+      c.on('error', (e) => log(`launch [${p.name}] failed: ${e.message}`))
+      c.unref()
+      log(`launched [${p.name}] ${l.command} (port ${port} was closed)`)
+    } catch (e) {
+      log(`launch [${p.name}] failed: ${e.message}`)
     }
-    sock.on('error', down)
-    sock.on('timeout', down)
-  }
+  })
 }

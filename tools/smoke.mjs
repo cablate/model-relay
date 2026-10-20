@@ -52,14 +52,18 @@ const check = (ok, what, detail = '') => {
 
 // Config for the throwaway router: a stub provider that is never called, or your config for --provider
 const port = await freePort()
-let config = { port, failover: { enabled: false }, providers: { smoke: { baseUrl: 'http://127.0.0.1:9', token: 'unused', model: 'smoke-stub' } } }
+let config = { format: 2, port, failover: { enabled: false }, providers: { smoke: { baseUrl: 'http://127.0.0.1:9', token: 'unused', model: 'smoke-stub' } } }
 let providerModel = ''
 if (providerArg) {
-  const file = ['model-relay.json', 'custom-agent.json'].map((n) => path.join(cfgDir, n)).find((f) => fs.existsSync(f))
-  const mine = file ? JSON.parse(fs.readFileSync(file, 'utf8')) : null
+  const file = path.join(cfgDir, 'model-relay.json')
+  const mine = fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, 'utf8')) : null
+  if (mine && mine.format !== 2) {
+    console.error(`${file} is from an older version of model-relay; run "node tools/setup.mjs migrate --go" first.`)
+    process.exit(2)
+  }
   const key = Object.keys(mine?.providers || {}).find((k) => k.trim().toLowerCase() === providerArg)
   if (!key || !mine.providers[key].model) {
-    console.error(`No provider "${providerArg}" with a model in ${file || `${cfgDir}/model-relay.json`}.`)
+    console.error(`No provider "${providerArg}" with a model in ${file}.`)
     process.exit(2)
   }
   providerModel = String(mine.providers[key].model).replace(/\[[^\]]*\]$/, '')
@@ -120,7 +124,7 @@ try {
   }
   const requests = () => {
     try {
-      return fs.readFileSync(path.join(dir, 'custom-agent-requests.log'), 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l))
+      return fs.readFileSync(path.join(dir, 'model-relay-requests.log'), 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l))
     } catch {
       return []
     }

@@ -4,11 +4,15 @@ const assert = require('node:assert')
 const os = require('node:os')
 const L = require('./logic')
 
-const cfg = L.parseCfg({ baseUrl: 'https://api.z.ai/api/anthropic', token: 't', model: 'glm-5.3[1m]' })
+const cfg = L.parseCfg({
+  format: 2,
+  failover: { chain: ['glm'] },
+  providers: { glm: { baseUrl: 'https://api.z.ai/api/anthropic', token: 't', model: 'glm-5.3[1m]', matchModels: ['^glm'] } },
+})
 const OPUS = 'claude-opus-5-5'
 
-test('config defaults and legacy compatibility', () => {
-  assert.strictEqual(L.parseCfg({ baseUrl: 'ftp://x', token: 't', model: 'm' }), null)
+test('config defaults', () => {
+  assert.strictEqual(L.parseCfg({ format: 2, providers: { glm: { baseUrl: 'ftp://x', token: 't', model: 'm' } } }), null)
   assert.strictEqual(cfg.port, 8950)
   assert.strictEqual(cfg.claudeUrl, 'https://api.anthropic.com')
   assert.strictEqual(cfg.cooldownMs, 600000)
@@ -16,14 +20,30 @@ test('config defaults and legacy compatibility', () => {
   assert.ok(cfg.providers.glm)
 })
 
+test('the router reads format 2 only: anything else gives no providers, and no env var of it counts as missing', () => {
+  const providers = { glm: { baseUrl: 'https://api.z.ai/api/anthropic', token: 'env:OLD_KEY', model: 'glm-5.3' } }
+  assert.strictEqual(L.parseCfg(null), null)
+  assert.strictEqual(L.parseCfg({}), null)
+  for (const format of [undefined, 1, '2', null, 3]) {
+    const raw = { format, port: 8999, providers }
+    assert.strictEqual(L.parseCfg(raw, { OLD_KEY: 'k' }), null, `format ${JSON.stringify(format)}`)
+    assert.strictEqual(L.parseShape(raw), null)
+    assert.deepStrictEqual(L.unresolvedEnv(raw, {}), [], 'an older file is not used at all, so nothing in it is "unset"')
+    assert.strictEqual(L.bareCfg(raw).port, 8999, 'the router still keeps its port and sends everything to Claude')
+  }
+  assert.strictEqual(L.parseCfg({ baseUrl: 'https://api.z.ai/api/anthropic', token: 't', model: 'glm-5.3' }), null, 'the top-level layout is not read either')
+  assert.notStrictEqual(L.parseShape({ format: 2, providers }), null, 'the same providers under format 2 are')
+})
+
 test('multi-provider config and env:VAR token resolution', () => {
   const multi = L.parseCfg({
+    format: 2,
     port: 8955,
-    failover: { enabled: true, provider: 'deepseek', probeEveryMin: 5 },
+    failover: { enabled: true, chain: ['deepseek'], cooldownMs: 300000 },
     providers: {
-      glm: { token: 'env:' + 'T_VAR' }, // uses built-in glm preset
-      deepseek: { token: 'ds' }, // uses built-in deepseek preset
-      gemini: { token: 'gw', launch: { command: 'magpie', args: ['web'] } }, // uses built-in gemini preset
+      glm: { preset: 'zai', token: 'env:' + 'T_VAR', model: 'glm-5.3[1m]' }, // address and switches from the zai preset
+      deepseek: { preset: 'deepseek', token: 'ds', model: 'deepseek-chat' }, // address and switches from the deepseek preset
+      gemini: { baseUrl: 'http://127.0.0.1:4000', token: 'gw', model: 'gemini-4-argon', matchModels: ['^gemini'], stripCacheControl: true, authHeader: 'both', launch: { command: 'magpie', args: ['web'] } },
     },
   }, { T_VAR: 'resolved-val' })
 
@@ -37,7 +57,7 @@ test('multi-provider config and env:VAR token resolution', () => {
 
   // Model matching routes directly to the matching provider
   assert.strictEqual(L.decide(L.emptyState(), multi, 'deepseek-reasoner', 's1', 0), 'deepseek')
-  assert.strictEqual(L.decide(L.emptyState(), multi, 'glm-5.3', 's1', 0), 'zai')
+  assert.strictEqual(L.decide(L.emptyState(), multi, 'glm-5.3', 's1', 0), 'glm')
   assert.strictEqual(L.decide(L.emptyState(), multi, 'gemini-4-argon', 's1', 0), 'gemini')
 
   // Sticky session on custom provider
@@ -46,14 +66,14 @@ test('multi-provider config and env:VAR token resolution', () => {
 })
 
 test('glm models always go to the custom endpoint', () => {
-  assert.strictEqual(L.decide(L.emptyState(), cfg, 'glm-5.3', 'a', 0), 'zai')
+  assert.strictEqual(L.decide(L.emptyState(), cfg, 'glm-5.3', 'a', 0), 'glm')
 })
 
 test('failover: new sessions trial Claude when due, otherwise failover provider', () => {
   const s = L.emptyState()
   assert.strictEqual(L.decide(s, cfg, OPUS, 'a', 0), 'claude')
   const limited = L.onLimited(s, cfg, 1000)
-  assert.strictEqual(L.decide(limited, cfg, OPUS, 'a', 1000 + 599999), 'zai-rewrite')
+  assert.strictEqual(L.decide(limited, cfg, OPUS, 'a', 1000 + 599999), 'glm-rewrite')
   assert.strictEqual(L.decide(limited, cfg, OPUS, 'a', 1000 + 600000), 'claude-trial')
   assert.strictEqual(L.decide(limited, { ...cfg, failoverEnabled: false }, OPUS, 'a', 1000), 'claude')
   const again = L.onLimited(limited, cfg, 700000)
@@ -65,7 +85,7 @@ test('a session that moved to GLM stays there after Claude recovers', () => {
   let s = L.onLimited(L.emptyState(), cfg, 1000)
   s = L.setSticky(s, 'long', 'glm', 1000)
   s = L.onClaudeOk(s)
-  assert.strictEqual(L.decide(s, cfg, OPUS, 'long', 5e6), 'zai-rewrite', 'sticky session keeps GLM')
+  assert.strictEqual(L.decide(s, cfg, OPUS, 'long', 5e6), 'glm-rewrite', 'sticky session keeps GLM')
   assert.strictEqual(L.decide(s, cfg, OPUS, 'fresh', 5e6), 'claude', 'other sessions back on Claude')
   assert.strictEqual(L.decide(s, cfg, OPUS, undefined, 5e6), 'claude', 'no session id: no stickiness')
   s = L.setSticky(s, 'long', 'claude', 6e6)
@@ -96,7 +116,7 @@ test('model rewrite and upstream path', () => {
   // A provider's own sub-model (e.g. deepseek-reasoner) is preserved when only defaultModel is set
   const native = JSON.parse(L.rewriteBody(Buffer.from('{"model":"deepseek-reasoner"}'), { defaultModel: 'deepseek-chat', stripToolSearch: false }).toString())
   assert.strictEqual(native.model, 'deepseek-reasoner')
-  assert.deepStrictEqual(L.detectAliases(L.parseCfg({ providers: { glm: { token: 't' } } })), { haiku: 'glm' })
+  assert.deepStrictEqual(L.detectAliases(L.parseCfg({ format: 2, providers: { glm: { preset: 'zai', token: 't', model: 'glm-5.3[1m]', matchModels: ['^glm', 'haiku'] } } })), { haiku: 'glm' })
   assert.strictEqual(L.upstreamPath('https://api.z.ai/api/anthropic', '/v1/messages?beta=true'), '/api/anthropic/v1/messages?beta=true')
   assert.strictEqual(L.upstreamPath('https://api.anthropic.com', '/v1/messages'), '/v1/messages')
 })
@@ -111,7 +131,8 @@ test('z.ai requests lose ToolSearch and deferred placeholders', () => {
 })
 
 test('provider retry waits: statuses, backoff, Retry-After, exhaustion', () => {
-  const cfg = L.parseCfg({ providers: { glm: { token: 't' } } })
+  const providers = { glm: { preset: 'zai', token: 't', model: 'glm-5.3[1m]' } }
+  const cfg = L.parseCfg({ format: 2, providers })
   assert.strictEqual(cfg.retry.attempts, 3, 'retry defaults: 3 attempts')
   assert.strictEqual(cfg.retry.delayMs, 2000, 'retry defaults: 2s base delay')
   assert.strictEqual(cfg.retry.failover, false, 'retry defaults: same-provider only, failover opt-in')
@@ -124,22 +145,23 @@ test('provider retry waits: statuses, backoff, Retry-After, exhaustion', () => {
   assert.strictEqual(L.retryWaitMs(503, {}, 0, cfg.retry), 2000, '5xx retried like 429')
   assert.strictEqual(L.retryWaitMs(429, { 'retry-after': '1' }, 0, cfg.retry), 2000, 'Retry-After below base uses the base delay')
   assert.strictEqual(L.retryWaitMs(429, { 'retry-after': ['3600'] }, 0, cfg.retry), 10000, 'Retry-After beyond budget keeps polling at maxDelayMs')
-  const fast = L.parseCfg({ providers: { glm: { token: 't' } }, retry: { attempts: 1, delayMs: 500, backoff: 3, maxDelayMs: 700, failover: true } })
+  const fast = L.parseCfg({ format: 2, providers, retry: { attempts: 1, delayMs: 500, backoff: 3, maxDelayMs: 700, failover: true } })
   assert.strictEqual(fast.retry.attempts, 1, 'attempts configurable')
   assert.strictEqual(L.retryWaitMs(429, {}, 0, fast.retry), 500, 'custom base delay')
   assert.strictEqual(L.retryWaitMs(429, {}, 1, fast.retry), null, 'single attempt then stop')
   assert.strictEqual(fast.retry.failover, true, 'failover can be turned on')
-  const endless = L.parseCfg({ providers: { glm: { token: 't', retry: { attempts: 0, maxDelayMs: 30000 } } } })
+  const endless = L.parseCfg({ format: 2, providers: { glm: { ...providers.glm, retry: { attempts: 0, maxDelayMs: 30000 } } } })
   assert.strictEqual(L.retryWaitMs(429, {}, 500, endless.providers.glm.retryCfg), 30000, 'attempts:0 retries without end, polling at maxDelayMs')
 })
 
 test('per-provider retry switch: off, inherit, and partial override', () => {
   const cfg = L.parseCfg({
+    format: 2,
     retry: { attempts: 4, delayMs: 3000, failover: true },
     providers: {
-      glm: { token: 't', retry: false },
-      deepseek: { token: 't' },
-      kimi: { token: 't', retry: { attempts: 1, failover: false } },
+      glm: { preset: 'zai', token: 't', model: 'glm-5.3[1m]', retry: false },
+      deepseek: { token: 't', model: 'deepseek-chat' },
+      kimi: { token: 't', model: 'kimi-k2', retry: { attempts: 1, failover: false } },
     },
   })
   assert.strictEqual(cfg.providers.glm.retryCfg, null, 'retry:false never retries')
@@ -157,12 +179,18 @@ test('state parsing tolerates junk and old files', () => {
   const old = L.parseState({ mode: 'glm', failoverSince: 5, onGlm: { a: 1, b: 'x' } })
   assert.strictEqual(old.failoverSince, 5)
   assert.ok(!('onGlm' in old), 'the legacy per-provider views are gone')
-  assert.strictEqual(old.sticky.a.provider, 'glm')
+  assert.deepStrictEqual(Object.keys(old.sticky), [], 'and are not turned into sticky sessions any more')
   assert.ok(!('mode' in old), 'global mode no longer exists')
 })
 
 test('gemini route: model name or sticky session, off without config', () => {
-  const g = L.parseCfg({ baseUrl: 'https://api.z.ai/api/anthropic', token: 't', model: 'glm-5.3[1m]', gemini: { baseUrl: 'https://x', token: 'k', model: 'gemini-4-argon-lb' } })
+  const g = L.parseCfg({
+    format: 2,
+    providers: {
+      glm: { baseUrl: 'https://api.z.ai/api/anthropic', token: 't', model: 'glm-5.3[1m]', matchModels: ['^glm'] },
+      gemini: { baseUrl: 'https://x', token: 'k', model: 'gemini-4-argon-lb', matchModels: ['^gemini'] },
+    },
+  })
   assert.strictEqual(L.decide(L.emptyState(), g, 'gemini-4-argon-lb', 'a', 0), 'gemini')
   let s = L.setSticky(L.setSticky(L.emptyState(), 'a', 'glm', 1), 'a', 'gemini', 2)
   assert.strictEqual(s.sticky.a.provider, 'gemini', 'moving to another provider replaces the pin')
@@ -179,7 +207,7 @@ test('gemini requests lose cache_control everywhere', () => {
 })
 
 test('proxy config: off unless explicitly enabled', () => {
-  const base = { baseUrl: 'https://api.z.ai/api/anthropic', token: 't', model: 'm' }
+  const base = { format: 2, providers: { glm: { baseUrl: 'https://api.z.ai/api/anthropic', token: 't', model: 'm' } } }
   assert.deepStrictEqual(cfg.proxy, { enabled: false }, 'default')
   for (const raw of [false, true, {}, { enabled: false }, { enabled: 'yes' }, 1, null]) {
     assert.strictEqual(L.parseCfg({ ...base, proxy: raw }).proxy.enabled, false, JSON.stringify(raw))
@@ -217,10 +245,10 @@ test('inside the opened tunnel only model calls are routed', () => {
 })
 
 test('unset env:VAR tokens are reported by name, and explained when no provider is usable', () => {
-  const raw = { providers: { Gemini: { token: 'env:K1', baseUrl: 'http://127.0.0.1:1', model: 'gemini-4' }, glm: { token: 'lit', baseUrl: 'http://127.0.0.1:1', model: 'glm-5.3' } } }
+  const raw = { format: 2, providers: { Gemini: { token: 'env:K1', baseUrl: 'http://127.0.0.1:1', model: 'gemini-4' }, glm: { token: 'lit', baseUrl: 'http://127.0.0.1:1', model: 'glm-5.3' } } }
   assert.deepStrictEqual(L.unresolvedEnv(raw, {}), [{ provider: 'gemini', env: 'K1' }])
   assert.deepStrictEqual(L.unresolvedEnv(raw, { K1: 'v' }), [])
-  const msg = L.cfgMissingMessage(L.unresolvedEnv({ providers: { gemini: raw.providers.Gemini } }, {}))
+  const msg = L.cfgMissingMessage(L.unresolvedEnv({ format: 2, providers: { gemini: raw.providers.Gemini } }, {}))
   assert.match(msg, /gemini \(K1 is unset in the router process\)/)
   assert.match(msg, /restart the router/)
   assert.ok(!msg.includes('config missing'))
@@ -228,9 +256,9 @@ test('unset env:VAR tokens are reported by name, and explained when no provider 
 
 test('unresolvedEnv skips keys parseCfg ignores and flags a bare "env:"', () => {
   const p = (token) => ({ token, baseUrl: 'http://127.0.0.1:1', model: 'm' })
-  assert.deepStrictEqual(L.unresolvedEnv({ providers: { claude: p('env:A'), ' ': p('env:B'), x: p('env:') } }, {}), [{ provider: 'x', env: '' }])
+  assert.deepStrictEqual(L.unresolvedEnv({ format: 2, providers: { claude: p('env:A'), ' ': p('env:B'), x: p('env:') } }, {}), [{ provider: 'x', env: '' }])
   assert.match(L.cfgMissingMessage([{ provider: 'x', env: '' }]), /x \(its token "env:" names no variable\)/)
-  assert.deepStrictEqual(L.unresolvedEnv({ baseUrl: 'http://127.0.0.1:1', token: 'env:LEG', model: 'm' }, {}).map((u) => u.env), ['LEG'])
+  assert.deepStrictEqual(L.unresolvedEnv({ baseUrl: 'http://127.0.0.1:1', token: 'env:LEG', model: 'm' }, {}), [], 'a top-level token belongs to an older layout, which is not used at all')
 })
 
 test('the plain-HTTP side answers only local programs: loopback Host on the bound port, no browser markers', () => {
@@ -258,7 +286,7 @@ test('the plain-HTTP side answers only local programs: loopback Host on the boun
 })
 
 test('a session id of "__proto__" is an ordinary sticky entry', () => {
-  const c = L.parseCfg({ providers: { glm: { token: 't' } } })
+  const c = L.parseCfg({ format: 2, providers: { glm: { preset: 'zai', token: 't', model: 'glm-5.3[1m]' } } })
   let s = L.setSticky(L.emptyState(), '__proto__', 'glm', 1)
   assert.strictEqual(L.getSessionProvider(s, c, '__proto__'), 'glm')
   assert.deepStrictEqual(Object.keys(s.sticky), ['__proto__'])
@@ -270,7 +298,7 @@ test('a session id of "__proto__" is an ordinary sticky entry', () => {
 })
 
 test('Object.prototype names never resolve to a provider', () => {
-  const c = L.parseCfg({ providers: { glm: { token: 't' } } })
+  const c = L.parseCfg({ format: 2, providers: { glm: { preset: 'zai', token: 't', model: 'glm-5.3[1m]' } } })
   for (const name of ['constructor', 'toString', '__proto__', 'hasOwnProperty']) {
     assert.strictEqual(c.providers[name], undefined, name)
     const s = L.setSticky(L.emptyState(), 'sid', name, 1)
@@ -288,4 +316,50 @@ test('directories compare by real path, and case-insensitively only on Windows',
   assert.strictEqual(L.sameDir('/tmp/Relay-A', '/tmp/relay-a', false), false)
   assert.strictEqual(L.sameDir(os.tmpdir(), os.tmpdir() + '/', false), true)
   assert.strictEqual(L.isPort(1025) && L.isPort(65535) && !L.isPort(1024) && !L.isPort(65536) && !L.isPort('8950'), true)
+})
+
+// ---------- format 2: no private defaults; what the older versions filled in lives in migrate.js ----------
+
+test('format 2 has no built-in models, no haiku capture, no Gemini guesses and no implicit failover chain', () => {
+  const env = { A: 'a', B: 'b' }
+  const cfg = L.parseCfg({
+    format: 2,
+    failover: { enabled: true },
+    providers: {
+      alpha: { preset: 'zai', token: 'env:A', model: 'glm-9' },
+      gemini: { baseUrl: 'https://gw.example/anthropic', token: 'env:B', model: 'gemini-9' },
+      glm: { token: 'env:A' }, // no preset of that name any more, and no model
+      beta: { preset: 'gemini', baseUrl: 'https://b.example', token: 'env:B', model: 'beta-1' },
+    },
+  }, env)
+  assert.deepStrictEqual(Object.keys(cfg.providers).sort(), ['alpha', 'beta', 'gemini'])
+  assert.deepStrictEqual(cfg.providers.alpha.matchSources, ['^glm'], 'the zai preset no longer claims haiku')
+  assert.strictEqual(L.matchProviderByModel(cfg, 'claude-haiku-5-5'), null)
+  assert.strictEqual(cfg.providers.gemini.stripCacheControl, false, 'a Gemini-like name changes nothing')
+  assert.strictEqual(cfg.providers.gemini.authHeader, 'bearer')
+  assert.strictEqual(cfg.providers.beta.stripCacheControl, false, 'the private gemini preset is gone')
+  assert.deepStrictEqual(cfg.failoverChain, [])
+  assert.strictEqual(cfg.failoverProvider, null)
+  const limited = L.onLimited(L.emptyState(), cfg, 1000)
+  assert.strictEqual(L.decide(limited, cfg, 'claude-opus-5-5', 's', 2000), 'claude', 'a 429 with no chain stays with Claude')
+  assert.strictEqual(L.parseCfg({ format: 2, providers: { glm: { token: 't' } } }), null)
+})
+
+test('with no usable provider the router still has a config that sends everything to Claude', () => {
+  const raw = { format: 2, port: 9123, claudeUrl: 'https://claude.example', providers: { a: { token: 'env:UNSET_KEY', model: 'm', baseUrl: 'https://a.example' } } }
+  assert.strictEqual(L.parseCfg(raw, {}), null)
+  const bare = L.bareCfg(raw)
+  assert.strictEqual(bare.port, 9123)
+  assert.strictEqual(bare.claudeUrl, 'https://claude.example')
+  assert.strictEqual(L.decide(L.emptyState(), bare, 'claude-haiku-5-5', 's', 0), 'claude')
+  assert.strictEqual(L.decide(L.onLimited(L.emptyState(), bare, 0), bare, 'claude-opus-5-5', 's', 1), 'claude')
+})
+
+test('the example config in the repository is format 2 and names no model of its own', () => {
+  const raw = JSON.parse(require('node:fs').readFileSync(require('node:path').join(__dirname, '..', 'model-relay.example.json'), 'utf8'))
+  assert.strictEqual(L.isFormat2(raw), true)
+  const c = L.parseCfg(raw, { BACKUP_API_KEY: 'k', LOCAL_GATEWAY_TOKEN: 'k' })
+  assert.deepStrictEqual(Object.keys(c.providers), ['backup', 'local'])
+  assert.deepStrictEqual(c.failoverChain, ['backup'])
+  assert.strictEqual(L.decide(L.emptyState(), c, 'claude-haiku-5-5', 's', 0), 'claude', 'haiku stays on Claude unless an alias says otherwise')
 })

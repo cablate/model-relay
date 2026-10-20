@@ -1,5 +1,5 @@
 'use strict'
-// Config migration, the failover chain and the retry switch: pure logic plus one end-to-end chain test.
+// The failover chain, the cooldown and the retry switch: pure logic plus end-to-end chain tests.
 const test = require('node:test')
 const assert = require('node:assert')
 const fs = require('node:fs')
@@ -12,65 +12,16 @@ const L = require('./logic')
 
 const OPUS = 'claude-opus-5-5'
 
-// The shape of a config file that grew over time: providers AND the same data again at the top level
-const LEGACY = {
-  port: 8950,
-  nodePath: 'node',
-  failover: { enabled: true, provider: 'glm', cooldownMs: 600000 },
-  providers: {
-    glm: { baseUrl: 'https://api.z.ai/api/anthropic', token: 'tok-glm', model: 'glm-5.3[1m]', matchModels: ['^glm', 'haiku'] },
-    gemini: { baseUrl: 'http://127.0.0.1:3425', token: 'tok-gem', model: 'gemini-4-argon', stripCacheControl: true, authHeader: 'both', retry: { attempts: 0 } },
-  },
-  baseUrl: 'https://api.z.ai/api/anthropic',
-  token: 'tok-glm',
-  model: 'glm-5.3[1m]',
-  failoverEnabled: true,
-  probeEveryMin: 10,
-  gemini: { baseUrl: 'http://127.0.0.1:3425', token: 'tok-gem', model: 'gemini-4-argon' },
-}
-
-// What the router will actually do with a config, without functions or regex objects, to compare two files
-const effective = (raw) => {
-  const c = L.parseCfg(raw)
-  const providers = Object.fromEntries(Object.entries(c.providers).map(([k, p]) => [k, { ...p, matchRegexes: p.matchRegexes.map(String) }]))
-  return { ...c, providers }
-}
-
-test('migrating a legacy file changes the layout but not what the router does', () => {
-  const { config, notes } = L.migrateConfig(LEGACY)
-  assert.deepStrictEqual(effective(config), effective(LEGACY))
-  for (const gone of ['baseUrl', 'token', 'model', 'gemini', 'failoverEnabled', 'probeEveryMin']) assert.ok(!(gone in config), gone)
-  assert.deepStrictEqual(config.failover, { enabled: true, chain: ['glm'], cooldownMs: 600000 })
-  assert.ok(notes.length >= 3)
-  assert.strictEqual(config.providers.gemini.token, 'tok-gem', 'secrets are copied through untouched')
-})
-
-test('migrating twice changes nothing more, and an already clean file reports no notes', () => {
-  const once = L.migrateConfig(LEGACY).config
-  const twice = L.migrateConfig(once)
-  assert.deepStrictEqual(twice.config, once)
-  assert.deepStrictEqual(twice.notes, [])
-})
-
-test('the original single-GLM layout still works and migrates into providers.glm', () => {
-  const old = { baseUrl: 'https://api.z.ai/api/anthropic', token: 't', model: 'glm-5.3[1m]', gemini: { baseUrl: 'http://127.0.0.1:3425', token: 'g', model: 'gemini-4-argon' } }
-  const c = L.parseCfg(old)
-  assert.deepStrictEqual(Object.keys(c.providers).sort(), ['gemini', 'glm'])
-  assert.strictEqual(c.providers.gemini.stripCacheControl, true, 'the old gemini block keeps its old defaults')
-  assert.deepStrictEqual(effective(L.migrateConfig(old).config), effective(old))
-  assert.strictEqual(L.parseCfg(null), null)
-  assert.strictEqual(L.parseCfg({}), null)
-})
-
-test('failover.cooldownMs is honoured (the legacy probeEveryMin still works)', () => {
-  const base = { providers: { glm: { baseUrl: 'https://x.example', token: 't', model: 'm' } } }
+test('failover.cooldownMs is honoured, and never drops below a minute', () => {
+  const base = { format: 2, providers: { glm: { baseUrl: 'https://x.example', token: 't', model: 'm' } } }
   assert.strictEqual(L.parseCfg({ ...base, failover: { cooldownMs: 120000 } }).cooldownMs, 120000)
-  assert.strictEqual(L.parseCfg({ ...base, failover: { probeEveryMin: 5 } }).cooldownMs, 300000)
+  assert.strictEqual(L.parseCfg({ ...base, failover: { probeEveryMin: 5 } }).cooldownMs, 600000, 'probeEveryMin belongs to an older layout and is no longer read')
   assert.strictEqual(L.parseCfg({ ...base }).cooldownMs, 600000)
   assert.strictEqual(L.parseCfg({ ...base, failover: { cooldownMs: 1 } }).cooldownMs, 60000, 'never hammers Claude faster than once a minute')
 })
 
 const two = () => L.parseCfg({
+  format: 2,
   providers: {
     glm: { baseUrl: 'https://a.example', token: 't', model: 'glm-5.3' },
     gemini: { baseUrl: 'https://b.example', token: 't', model: 'gemini-4' },
@@ -84,7 +35,10 @@ test('the failover chain keeps order, drops unknown names and duplicates, and le
   const c = two()
   assert.deepStrictEqual(c.failoverChain, ['gemini', 'glm'])
   assert.strictEqual(c.failoverProvider, 'gemini')
-  assert.deepStrictEqual(L.parseCfg({ providers: { x: { baseUrl: 'https://x.example', token: 't', model: 'm' } }, failover: { chain: ['ghost'] } }).failoverChain, ['x'], 'an empty chain falls back to a configured provider')
+  const lone = L.parseCfg({ format: 2, providers: { x: { baseUrl: 'https://x.example', token: 't', model: 'm' } }, failover: { chain: ['ghost'] } })
+  assert.deepStrictEqual(lone.failoverChain, [], 'a chain naming nobody usable is empty: there is no implicit one')
+  assert.strictEqual(lone.failoverProvider, null)
+  assert.deepStrictEqual(L.parseCfg({ format: 2, providers: { x: { baseUrl: 'https://x.example', token: 't', model: 'm' } } }).failoverChain, [], 'and so is no chain at all')
 })
 
 test('a failing provider hands over to the next link, never back to one already tried', () => {
@@ -99,7 +53,7 @@ test('a failing provider hands over to the next link, never back to one already 
 })
 
 test('the retry switch turns retrying off everywhere without touching the other settings', () => {
-  const raw = { providers: { glm: { baseUrl: 'https://a.example', token: 't', model: 'm', retry: { attempts: 9 } }, b: { baseUrl: 'https://b.example', token: 't', model: 'n' } } }
+  const raw = { format: 2, providers: { glm: { baseUrl: 'https://a.example', token: 't', model: 'm', retry: { attempts: 9 } }, b: { baseUrl: 'https://b.example', token: 't', model: 'n' } } }
   assert.strictEqual(L.parseCfg(raw).retry.enabled, true)
   assert.ok(L.parseCfg(raw).providers.glm.retryCfg)
   const off = L.parseCfg({ ...raw, retry: { enabled: false, attempts: 7 } })
@@ -107,7 +61,7 @@ test('the retry switch turns retrying off everywhere without touching the other 
   assert.strictEqual(off.retry.attempts, 7, 'the other retry settings are kept for when it is switched back on')
   assert.strictEqual(off.providers.glm.retryCfg, null)
   assert.strictEqual(off.providers.b.retryCfg, null)
-  assert.strictEqual(L.parseCfg({ providers: { glm: { baseUrl: 'https://a.example', token: 't', model: 'm', retry: { enabled: false } } } }).providers.glm.retryCfg, null, 'one provider can opt out')
+  assert.strictEqual(L.parseCfg({ format: 2, providers: { glm: { baseUrl: 'https://a.example', token: 't', model: 'm', retry: { enabled: false } } } }).providers.glm.retryCfg, null, 'one provider can opt out')
 })
 
 test('decide() follows the first link of the chain while Claude is out', () => {
@@ -141,6 +95,7 @@ async function startRouter(t, { chain, retryFailover, fallbackOff = false }) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'relay-chain-'))
   const file = path.join(dir, 'model-relay.json')
   fs.writeFileSync(file, JSON.stringify({
+    format: 2,
     port,
     claudeUrl: `http://127.0.0.1:${pc}`,
     failover: { enabled: true, chain },

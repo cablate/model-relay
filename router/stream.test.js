@@ -34,6 +34,7 @@ async function startRouter(t, onRequest) {
   const port = await freePort()
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'relay-stream-'))
   fs.writeFileSync(path.join(dir, 'model-relay.json'), JSON.stringify({
+    format: 2,
     port,
     failover: { enabled: false },
     retry: { attempts: 1, delayMs: 10, maxDelayMs: 10 },

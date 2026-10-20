@@ -1,15 +1,16 @@
 #!/usr/bin/env node
 // Setup, preset management, and doctor CLI for model-relay.
 // Usage:
-//   node tools/setup.mjs init [--fix]
+//   node tools/setup.mjs init [--fix]                                   an empty config (and, with --fix, the settings.json wiring)
 //   node tools/setup.mjs presets
-//   node tools/setup.mjs add <name> --token <token|env:VAR> [--preset <p>] [--model <m>] [--url <u>]
+//   node tools/setup.mjs add <name> --model <m> --token <token|env:VAR> (--preset <p> | --url <u>)
 //   node tools/setup.mjs providers                                    list providers, routes, aliases, failover and retry
 //   node tools/setup.mjs alias [haiku|sonnet|opus|subagent] [target]  inspect or point a Claude model alias at a provider (or back to claude)
 //   node tools/setup.mjs set <key> <value>                            failover.enabled|chain|cooldownMs, retry.enabled|failover|..., providers.<name>.fallback|retry|matchModels
 //   node tools/setup.mjs remove <name> [--go]
-//   node tools/setup.mjs migrate [--go]                               tidy an old config layout (same behaviour, tokens untouched)
-//   node tools/setup.mjs doctor [--fix] [--ping]   (alias: check)
+//   node tools/setup.mjs migrate [--go]                               bring an older config to format 2 (same behaviour, tokens untouched)
+//   node tools/setup.mjs doctor [--fix] [--ping] [--json]   (alias: check)
+//   node tools/setup.mjs restart [--if-stale] [--if-idle]             run the router shipped with this copy of the tool
 //   node tools/setup.mjs proxy [status|enable|disable|renew] [--go]   HTTPS proxy mode, needed by Remote Control
 //   node tools/setup.mjs rc [claude remote-control options]           start the router if needed, then Remote Control
 
@@ -26,18 +27,22 @@ import { createRequire } from 'node:module'
 const require = createRequire(import.meta.url)
 const L = require('../router/logic.js')
 const PKI = require('../router/pki.js')
+const P = require('../router/ping.js')
+const M = require('../router/migrate.js')
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const home = process.env.USERPROFILE || process.env.HOME || ''
 const cfgDir = process.env.CLAUDE_CONFIG_DIR || path.join(home, '.claude')
 const relayCfgPath = path.join(cfgDir, 'model-relay.json')
-const legacyCfgPath = path.join(cfgDir, 'custom-agent.json')
 const settingsPath = path.join(cfgDir, 'settings.json')
-const examplePath = path.join(root, 'model-relay.example.json')
+const BACKUP = 'model-relay-backup'
+// an older config under its older name: never read, only pointed at and moved by "migrate --go"
+const oldCfgPath = path.join(cfgDir, M.OLD_FILES[0][0])
 
 const args = process.argv.slice(2)
 const cmd = args[0] || 'doctor'
 const hasFlag = (f) => args.includes(f)
+const isObj = (v) => typeof v === 'object' && v !== null && !Array.isArray(v)
 const getOpt = (f) => {
   const i = args.indexOf(f)
   return i >= 0 && i + 1 < args.length ? args[i + 1] : null
@@ -61,10 +66,21 @@ function writeFileAtomic(file, text) {
   }
 }
 
-function resolveActiveCfgPath() {
-  if (fs.existsSync(relayCfgPath)) return relayCfgPath
-  if (fs.existsSync(legacyCfgPath)) return legacyCfgPath
-  return relayCfgPath
+// Every command but migrate and doctor stops at an older config: this version's router does not read it, so editing
+// it changes nothing, and starting that router would drop what an older router still does with it
+function refuseOutdated(file) {
+  console.error(`${file} is from an older version of model-relay, which this version does not read. Run "migrate" to see what it becomes, then "migrate --go".`)
+  process.exit(1)
+}
+function refuseIfOutdated() {
+  if (!fs.existsSync(relayCfgPath)) {
+    if (fs.existsSync(oldCfgPath)) refuseOutdated(oldCfgPath)
+    return
+  }
+  try {
+    const raw = JSON.parse(fs.readFileSync(relayCfgPath, 'utf8'))
+    if (isObj(raw) && !L.isFormat2(raw)) refuseOutdated(relayCfgPath)
+  } catch {} // a file that does not parse is doctor's to report
 }
 
 const NO_PROXY_LOCAL = '127.0.0.1,localhost,::1'
@@ -87,7 +103,7 @@ function writeSettings(next) {
   fs.mkdirSync(cfgDir, { recursive: true })
   let backup = null
   if (fs.existsSync(settingsPath)) {
-    backup = `${settingsPath}.relay-backup`
+    backup = `${settingsPath}.${BACKUP}`
     fs.copyFileSync(settingsPath, backup)
   }
   writeFileAtomic(settingsPath, JSON.stringify(next, null, 2) + '\n')
@@ -103,8 +119,7 @@ function ensureSettingsWiring(port, fix) {
   }
   if (!fs.existsSync(settingsPath)) {
     if (!fix) return { ok: false, msg: `Missing ${settingsPath} (run with --fix to wire ANTHROPIC_BASE_URL=${expectedUrl})` }
-    fs.mkdirSync(cfgDir, { recursive: true })
-    fs.writeFileSync(settingsPath, JSON.stringify({ env: { ANTHROPIC_BASE_URL: expectedUrl } }, null, 2) + '\n')
+    writeSettings({ env: { ANTHROPIC_BASE_URL: expectedUrl } })
     return { ok: true, msg: `Created ${settingsPath} with ANTHROPIC_BASE_URL=${expectedUrl}` }
   }
   let s = {}
@@ -117,6 +132,12 @@ function ensureSettingsWiring(port, fix) {
   if (cur === expectedUrl) {
     return { ok: true, msg: `settings.json ANTHROPIC_BASE_URL=${cur}` }
   }
+  // Another gateway (LiteLLM, a company proxy) is someone's choice: say so, and never replace it. A loopback address
+  // on another port is most likely this relay before "set port", so --fix still moves that one
+  const ours = !cur || /^http:\/\/(127\.0\.0\.1|localhost):\d+\/?$/i.test(cur)
+  if (!ours) {
+    return { ok: false, msg: `settings.json env.ANTHROPIC_BASE_URL is "${cur}", which is not this relay; Claude Code talks to that address, not to ${expectedUrl}. Nothing was changed: remove it yourself if model-relay should take over` }
+  }
   if (!fix) {
     return {
       ok: false,
@@ -124,99 +145,81 @@ function ensureSettingsWiring(port, fix) {
     }
   }
   s.env = { ...(s.env || {}), ANTHROPIC_BASE_URL: expectedUrl }
-  fs.writeFileSync(settingsPath, JSON.stringify(s, null, 2) + '\n')
+  writeSettings(s)
   return { ok: true, msg: `Updated settings.json env.ANTHROPIC_BASE_URL=${expectedUrl}` }
 }
 
-function pingProvider(p) {
-  return new Promise((resolve) => {
-    const start = Date.now()
-    const u = new URL(p.url)
-    const lib = u.protocol === 'http:' ? http : https
-    const payload = Buffer.from(JSON.stringify({
-      model: L.wireModel(p.model),
-      max_tokens: 1,
-      messages: [{ role: 'user', content: 'hi' }],
-    }))
-    const headers = {
-      'content-type': 'application/json',
-      'anthropic-version': '2023-06-01',
-      'content-length': payload.length,
-    }
-    if (p.authHeader === 'bearer' || p.authHeader === 'both') headers['authorization'] = `Bearer ${p.token}`
-    if (p.authHeader === 'x-api-key' || p.authHeader === 'both') headers['x-api-key'] = p.token
-
-    const req = lib.request({
-      hostname: u.hostname,
-      port: u.port || (u.protocol === 'http:' ? 80 : 443),
-      path: L.upstreamPath(p.url, '/v1/messages'),
-      method: 'POST',
-      headers,
-      timeout: 8000,
-    }, (res) => {
-      const ch = []
-      res.on('data', (c) => ch.push(c))
-      res.on('end', () => {
-        const ms = Date.now() - start
-        const ok = res.statusCode >= 200 && res.statusCode < 300
-        resolve({ ok, status: res.statusCode, ms, body: Buffer.concat(ch).toString('utf8').slice(0, 160) })
-      })
-    })
-    req.on('timeout', () => { req.destroy(); resolve({ ok: false, status: 0, ms: Date.now() - start, body: 'timeout' }) })
-    req.on('error', (e) => resolve({ ok: false, status: 0, ms: Date.now() - start, body: e.message }))
-    req.end(payload)
-  })
-}
+// A new config: format 2, no provider yet, port 8950
+const starterConfig = () => ({ format: 2, port: 8950, failover: { enabled: true, chain: [], cooldownMs: 600000 }, providers: {} })
 
 if (cmd === 'presets') {
-  console.log('Built-in provider presets (use the name in model-relay.json, or ask "/provider setup add <name>" in Claude Code):')
-  for (const [k, v] of Object.entries(L.PRESETS)) {
-    console.log(`  - ${k.padEnd(10)} model=${v.model.padEnd(25)} url=${v.baseUrl}`)
-  }
+  console.log('Built-in providers: the address and compatibility settings of each service. You choose the model.')
+  for (const [k, v] of Object.entries(L.PRESETS)) console.log(`  - ${k.padEnd(10)} ${v.baseUrl}`)
+  console.log('Add one with: add <name> --preset <preset> --model <model id> --token env:<VAR>  (or "/provider setup" in Claude Code)')
   process.exit(0)
 }
 
 if (cmd === 'init') {
+  refuseIfOutdated() // a new file next to an older one would hide it from migrate
   fs.mkdirSync(cfgDir, { recursive: true })
-  const active = resolveActiveCfgPath()
-  if (fs.existsSync(active)) {
-    console.log(`Config already exists at: ${active}`)
+  if (fs.existsSync(relayCfgPath)) {
+    console.log(`Config already exists at: ${relayCfgPath}`)
   } else {
-    fs.copyFileSync(examplePath, relayCfgPath)
-    console.log(`Created ${relayCfgPath} from model-relay.example.json.`)
+    writeFileAtomic(relayCfgPath, JSON.stringify(starterConfig(), null, 2) + '\n')
+    console.log(`Created ${relayCfgPath} with no provider yet; until you add one, every request goes to Claude.`)
   }
   if (hasFlag('--fix')) {
     const w = ensureSettingsWiring(relayPort(), true)
     console.log(`  ${w.msg}`)
   }
-  console.log('Next: set the API key variable your provider needs (e.g. ZAI_API_KEY), restart Claude Code, then run "/provider doctor --ping". "/provider setup" lets Claude walk you through it.')
+  console.log('Next: add a provider ("presets" lists the built-in ones), set its API key variable, restart Claude Code, then run "/provider doctor --ping". "/provider setup" lets Claude walk you through it.')
   process.exit(0)
 }
 
 if (cmd === 'add') {
   const name = (args[1] || '').trim().toLowerCase()
   const token = getOpt('--token')
-  if (!name || name.startsWith('--') || !token) {
-    console.error('Usage: node tools/setup.mjs add <name> --token <token|env:VAR> [--preset <p>] [--model <m>] [--url <u>]')
+  const model = getOpt('--model')
+  const presetKey = (getOpt('--preset') || '').toLowerCase()
+  const url = getOpt('--url')
+  const usage = 'Usage: node tools/setup.mjs add <name> --model <model id> --token <token|env:VAR> (--preset <preset> | --url <address>)'
+  if (!name || name.startsWith('--') || name === 'claude' || !token || !model) {
+    console.error(usage)
+    process.exit(2)
+  }
+  if (presetKey && !Object.hasOwn(L.PRESETS, presetKey)) {
+    console.error(`Unknown preset "${presetKey}" (built-in: ${Object.keys(L.PRESETS).join(', ')}). Use --url for any other Anthropic-compatible address.`)
+    process.exit(2)
+  }
+  if (!presetKey && !url) {
+    console.error(`${usage}\nGive --preset (built-in: ${Object.keys(L.PRESETS).join(', ')}) or --url with the service's Anthropic-compatible address.`)
+    process.exit(2)
+  }
+  if (url && !/^https?:\/\//.test(url)) {
+    console.error(`--url must start with http:// or https:// (got "${url}")`)
     process.exit(2)
   }
   fs.mkdirSync(cfgDir, { recursive: true })
-  const active = resolveActiveCfgPath()
-  let raw = { port: 8950, failover: { enabled: true, chain: [name], cooldownMs: 600000 }, providers: {} }
-  if (fs.existsSync(active)) {
-    try { raw = JSON.parse(fs.readFileSync(active, 'utf8')) } catch {}
-  }
-  raw.providers = raw.providers || {}
-  const presetKey = (getOpt('--preset') || name).toLowerCase()
-  const preset = L.PRESETS[presetKey] || {}
-  raw.providers[name] = {
-    ...(presetKey && L.PRESETS[presetKey] ? { preset: presetKey } : {}),
-    baseUrl: getOpt('--url') || preset.baseUrl || 'https://api.example.com/anthropic',
+  const active = relayCfgPath
+  const raw = fs.existsSync(relayCfgPath) || fs.existsSync(oldCfgPath) ? loadRaw().raw : starterConfig()
+  raw.providers = isObj(raw.providers) ? raw.providers : {}
+  const existing = Object.keys(raw.providers).find((k) => k.trim().toLowerCase() === name)
+  // An update replaces the address, key and model only; launch, matchModels, fallback and the rest stay as they were
+  const { preset: _oldPreset, ...kept } = existing && isObj(raw.providers[existing]) ? raw.providers[existing] : {}
+  raw.providers[existing || name] = {
+    ...kept,
+    ...(presetKey ? { preset: presetKey } : {}),
+    baseUrl: url || L.PRESETS[presetKey].baseUrl,
     token,
-    model: getOpt('--model') || preset.model || `${name}-default`,
+    model,
   }
+  // The first provider of a new config takes over on Claude's usage-limit 429; later ones are added with "set failover.chain"
+  if (isObj(raw.failover) && Array.isArray(raw.failover.chain) && raw.failover.chain.length === 0) raw.failover.chain = [name]
+  if (fs.existsSync(active)) fs.copyFileSync(active, `${active}.${BACKUP}`)
   writeFileAtomic(active, JSON.stringify(raw, null, 2) + '\n')
-  console.log(`Saved provider "${name}" (${raw.providers[name].model}) in ${active}`)
+  console.log(existing
+    ? `Updated provider "${name}" (${model}) in ${active}: address, key and model replaced, its other settings kept`
+    : `Saved provider "${name}" (${model}) in ${active}`)
   process.exit(0)
 }
 
@@ -224,18 +227,28 @@ if (cmd === 'add') {
 
 const LF = String.fromCharCode(10)
 
-function loadRaw() {
-  const file = resolveActiveCfgPath()
+// The config file as an object. Only migrate (allowOld) reads an older config, under its older name too.
+function loadRaw(allowOld = false) {
+  const file = fs.existsSync(relayCfgPath) || !fs.existsSync(oldCfgPath) ? relayCfgPath : oldCfgPath
   if (!fs.existsSync(file)) {
     console.error(`Missing config: ${file} (run "node tools/setup.mjs init" first)`)
     process.exit(1)
   }
+  if (file === oldCfgPath && !allowOld) refuseOutdated(file)
+  let raw
   try {
-    return { file, raw: JSON.parse(fs.readFileSync(file, 'utf8')) }
+    raw = JSON.parse(fs.readFileSync(file, 'utf8'))
   } catch (e) {
     console.error(`Invalid JSON in ${file}: ${e.message}`)
     process.exit(1)
   }
+  if (!isObj(raw)) {
+    console.error(`${file} is not a JSON object ({ ... })`)
+    process.exit(1)
+  }
+  if (!allowOld && !L.isFormat2(raw)) refuseOutdated(file)
+  if (!allowOld && !isObj(raw.providers)) raw.providers = {}
+  return { file, raw }
 }
 
 // The config holds tokens, so a backup sits right next to it and is never printed
@@ -244,30 +257,51 @@ function saveRaw(file, raw, suffix) {
   writeFileAtomic(file, JSON.stringify(raw, null, 2) + LF)
 }
 
-// What the router would do with a config: two files with the same value behave the same
-const effectiveOf = (raw) => JSON.stringify(L.parseCfg(raw), (k, v) => (v instanceof RegExp ? String(v) : v))
-
-const isObj = (v) => typeof v === 'object' && v !== null && !Array.isArray(v)
+// Files with an older name that migrate would move: [from, to] for each one whose new name is still free
+const filesToMove = () => M.OLD_FILES
+  .map(([from, to]) => [path.join(cfgDir, from), path.join(cfgDir, to)])
+  .filter(([from, to]) => fs.existsSync(from) && !fs.existsSync(to))
 
 if (cmd === 'migrate') {
-  const { file, raw } = loadRaw()
-  const { config, notes } = L.migrateConfig(raw)
-  if (!notes.length) {
-    console.log(`${file} already uses the current layout; nothing to do.`)
+  const { file, raw } = loadRaw(true)
+  const next = L.isFormat2(raw) ? null : M.toFormat2(raw)
+  const moves = filesToMove()
+  if (!next && !moves.length) {
+    console.log(`${file} already uses format 2; nothing to do.`)
     process.exit(0)
   }
-  if (effectiveOf(raw) !== effectiveOf(config)) {
-    console.error('Refusing to migrate: the new layout would change what the router does. Please report this.')
+  if (next && !M.sameRouting(raw, next.config)) {
+    console.error('Refusing to migrate: format 2 would change what the router does. Please report this.')
     process.exit(1)
   }
-  console.log(`${hasFlag('--go') ? 'Migrating' : 'Dry run — would migrate'} ${file} (the router behaves exactly the same afterwards):`)
-  for (const n of notes) console.log(`  - ${n}`)
-  if (!hasFlag('--go')) {
-    console.log('Add --go to apply (a copy is kept as custom-agent.json.pre-migrate next to it; tokens are copied untouched).')
+  const go = hasFlag('--go')
+  console.log(`${go ? 'Migrating' : 'Dry run — would migrate'} ${file} (it routes exactly as the older version did):`)
+  for (const n of next ? next.notes : []) console.log(`  - ${n}`)
+  if (next) console.log('  - mark the file "format": 2, the only format the router reads')
+  for (const [from, to] of moves) console.log(`  - rename ${path.basename(from)} to ${path.basename(to)}`)
+  // An older file without a chain handed Claude's 429 to the first provider whose key was set; format 2 names it, so
+  // while that one's key is unset there is no failover (judged with the keys this shell has)
+  const chainBefore = M.oldCfg(raw, process.env)?.failoverChain || []
+  const chainAfter = next ? L.parseCfg(next.config, process.env)?.failoverChain || [] : chainBefore
+  if (chainBefore.join() !== chainAfter.join()) {
+    const unset = L.unresolvedEnv(next.config, process.env).map((u) => u.env || `${u.provider}'s token`).join(', ')
+    console.log(`  ! with the keys set in this shell, failover went to ${chainBefore.join(' → ') || 'nobody'} before but goes to ${chainAfter.join(' → ') || 'nobody'} afterwards, because ${unset} is unset; set it, or name the chain with "set failover.chain <a,b>"`)
+  }
+  if (!go) {
+    console.log(`Add --go to apply (the previous config is kept as <name>.${BACKUP} next to it; tokens are copied untouched).`)
     process.exit(0)
   }
-  saveRaw(file, config, 'pre-migrate')
-  console.log(`✓ Done. Previous copy: ${file}.pre-migrate`)
+  // The config is written under its new name first, so the router and the plugin read the new file from then on
+  const target = new Map(moves).get(file) || file
+  if (next) {
+    fs.copyFileSync(file, `${file}.${BACKUP}`)
+    writeFileAtomic(target, JSON.stringify(next.config, null, 2) + LF)
+  }
+  for (const [from, to] of moves) {
+    if (from === file && next) fs.rmSync(from) // its content is in the backup and in the new file
+    else fs.renameSync(from, to)
+  }
+  console.log(`✓ Done. Config: ${target}${next ? `; previous copy: ${file}.${BACKUP}` : ''}`)
   process.exit(0)
 }
 
@@ -315,7 +349,7 @@ const PROVIDER_KEYS = {
       for (const pat of list) new RegExp(pat, 'i')
       return list
     },
-    hint: 'default | ^glm,haiku — regexes matched against the request model',
+    hint: 'default | ^my-model,haiku — regexes matched against the request model',
   },
 }
 
@@ -323,18 +357,6 @@ const ALIAS_ENV_KEYS = {
   haiku: 'ANTHROPIC_DEFAULT_HAIKU_MODEL',
   sonnet: 'ANTHROPIC_DEFAULT_SONNET_MODEL',
   opus: 'ANTHROPIC_DEFAULT_OPUS_MODEL',
-}
-
-function effectiveMatchersFor(key, pv) {
-  if (Array.isArray(pv.matchModels) && pv.matchModels.length > 0) {
-    return pv.matchModels.filter((m) => typeof m === 'string' && m.length > 0)
-  }
-  const presetKey = (typeof pv.preset === 'string' && pv.preset ? pv.preset : key).toLowerCase()
-  const preset = L.PRESETS[presetKey]
-  if (preset && Array.isArray(preset.matchModels)) return [...preset.matchModels]
-  const model = typeof pv.model === 'string' && pv.model ? pv.model : `${key}-default`
-  const prefix = L.wireModel(model).split(/[-_.:/]/)[0] || key
-  return [`^${prefix.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`]
 }
 
 function matchesSlot(pattern, slot) {
@@ -349,9 +371,10 @@ function matchesSlot(pattern, slot) {
 if (cmd === 'alias') {
   const slot = (args[1] || '').trim().toLowerCase()
   const target = (args[2] || '').trim().toLowerCase()
-  const { file, raw } = loadRaw()
-  const { config } = L.migrateConfig(raw)
-  const cfg = L.parseCfg(raw)
+  const { file, raw: config } = loadRaw()
+  const cfg = L.parseCfg(config)
+  // matchModels and models as the router reads them, whether or not a key is exported here
+  const shape = L.parseShape(config)
   let settings = {}
   try { settings = readSettings() } catch {}
   const env = settings?.env || {}
@@ -401,10 +424,16 @@ if (cmd === 'alias') {
     process.exit(2)
   }
 
-  // 1. Update matchModels across providers in model-relay.json / custom-agent.json
+  // Checked before anything is written: an alias needs the model the provider answers to
+  if (!resetToClaude && !shape?.providers[target]) {
+    console.error(`Provider ${target} has no usable address and model yet; set them first (add ${target} --model <id> --preset <p>). Nothing was changed.`)
+    process.exit(1)
+  }
+
+  // 1. Update matchModels across providers in the config file
   for (const [k, pv] of Object.entries(config.providers)) {
     const key = k.trim().toLowerCase()
-    const current = effectiveMatchersFor(key, pv)
+    const current = shape?.providers[key]?.matchSources ?? [`^${key}`]
     const withoutSlot = current.filter((pat) => !matchesSlot(pat, slot))
     if (!resetToClaude && key === target) {
       const nextMatchers = [...withoutSlot, slot]
@@ -413,7 +442,7 @@ if (cmd === 'alias') {
       config.providers[k] = { ...pv, matchModels: withoutSlot.length ? withoutSlot : [`^${key}`] }
     }
   }
-  saveRaw(file, config, 'relay-backup')
+  saveRaw(file, config, BACKUP)
 
   // 2. Sync ANTHROPIC_DEFAULT_<SLOT>_MODEL in settings.json so Claude Code itself resolves the alias & [1m] window
   const envKey = ALIAS_ENV_KEYS[slot]
@@ -422,10 +451,7 @@ if (cmd === 'alias') {
   if (resetToClaude) {
     delete nextEnv[envKey]
   } else {
-    const pKey = Object.keys(config.providers).find((k) => k.trim().toLowerCase() === target)
-    const pv = config.providers[pKey]
-    const preset = L.PRESETS[(pv.preset || target).toLowerCase()]
-    targetModel = pv.model || preset?.model || `${target}-default`
+    targetModel = shape.providers[target].model
     nextEnv[envKey] = targetModel
   }
   writeSettings({ ...settings, env: nextEnv })
@@ -458,7 +484,7 @@ if (cmd === 'set') {
     process.exit(2)
   }
   const loaded = loadRaw()
-  const { config, notes } = L.migrateConfig(loaded.raw)
+  const config = loaded.raw
   const have = Object.keys(config.providers).map((k) => k.trim().toLowerCase())
   let next
   try {
@@ -492,7 +518,7 @@ if (cmd === 'set') {
   before = holder[field]
   if (next === undefined) delete holder[field]
   else holder[field] = next
-  if (JSON.stringify(before) === JSON.stringify(next) && !notes.length) {
+  if (JSON.stringify(before) === JSON.stringify(next)) {
     console.log(`${key} is already ${JSON.stringify(next)}`)
     process.exit(0)
   }
@@ -505,8 +531,7 @@ if (cmd === 'set') {
       process.exit(1)
     }
   }
-  saveRaw(loaded.file, config, 'relay-backup')
-  if (notes.length) console.log(`(also moved the config to the current layout: ${notes.length} change${notes.length > 1 ? 's' : ''})`)
+  saveRaw(loaded.file, config, BACKUP)
   if (key === 'port') {
     console.log(`✓ port: ${oldPort} → ${next}. The running router keeps port ${oldPort} until it is stopped; the router started after that uses ${next}.`)
     // Point Claude Code at the new port the way doctor --fix would, keeping the mode it was in
@@ -536,9 +561,8 @@ if (cmd === 'set') {
 }
 
 if (cmd === 'providers') {
-  const { raw } = loadRaw()
-  const { config } = L.migrateConfig(raw)
-  const cfg = L.parseCfg(raw)
+  const { raw: config } = loadRaw()
+  const cfg = L.parseCfg(config)
   const live = cfg ? cfg.providers : {}
   const routed = cfg ? L.detectAliases(cfg) : {}
   const aliasPairs = Object.entries(routed).map(([s, p]) => `${s} → ${p} (${live[p]?.model || p})`)
@@ -574,8 +598,7 @@ if (cmd === 'remove') {
     console.error('Usage: node tools/setup.mjs remove <name> [--go]')
     process.exit(2)
   }
-  const { file, raw } = loadRaw()
-  const { config } = L.migrateConfig(raw)
+  const { file, raw: config } = loadRaw()
   const key = Object.keys(config.providers).find((k) => k.trim().toLowerCase() === name)
   if (!key) {
     console.error(`No provider named ${name} (have: ${Object.keys(config.providers).join(', ')})`)
@@ -588,9 +611,12 @@ if (cmd === 'remove') {
     process.exit(1)
   }
   const touched = []
-  const chain = (next.failover.chain || []).filter((n) => n !== name)
-  if (chain.length !== (next.failover.chain || []).length) touched.push('removed from failover.chain')
-  next.failover = { ...next.failover, chain }
+  const was = isObj(next.failover) && Array.isArray(next.failover.chain) ? next.failover.chain : []
+  const chain = was.filter((n) => String(n).toLowerCase() !== name)
+  if (chain.length !== was.length) {
+    touched.push('removed from failover.chain')
+    next.failover = { ...next.failover, chain }
+  }
   for (const [k, v] of Object.entries(next.providers)) {
     if (Array.isArray(v.fallback) && v.fallback.map((n) => String(n).toLowerCase()).includes(name)) {
       next.providers[k] = { ...v, fallback: v.fallback.filter((n) => String(n).toLowerCase() !== name) }
@@ -599,11 +625,11 @@ if (cmd === 'remove') {
   }
   console.log(`${hasFlag('--go') ? 'Removing' : 'Dry run — would remove'} provider ${name}${touched.length ? ` (${touched.join('; ')})` : ''}`)
   if (!hasFlag('--go')) {
-    console.log('Add --go to apply (the previous file is kept as .relay-backup).')
+    console.log(`Add --go to apply (the previous file is kept as .${BACKUP}).`)
     process.exit(0)
   }
-  saveRaw(file, next, 'relay-backup')
-  console.log(`✓ Done. Previous copy: ${file}.relay-backup`)
+  saveRaw(file, next, BACKUP)
+  console.log(`✓ Done. Previous copy: ${file}.${BACKUP}`)
   process.exit(0)
 }
 
@@ -623,9 +649,9 @@ function portOpen(port) {
 
 function relayPort() {
   try {
-    const raw = JSON.parse(fs.readFileSync(resolveActiveCfgPath(), 'utf8'))
-    // parseCfg gives up on a config whose env tokens are not set yet (a fresh install), but the port is still the file's
-    return L.parseCfg(raw)?.port ?? (L.isPort(raw.port) ? raw.port : 8950)
+    // The port is the file's even when no provider is usable yet, and an older config keeps its port too
+    const file = fs.existsSync(relayCfgPath) || !fs.existsSync(oldCfgPath) ? relayCfgPath : oldCfgPath
+    return L.bareCfg(JSON.parse(fs.readFileSync(file, 'utf8'))).port
   } catch {
     return 8950
   }
@@ -650,6 +676,21 @@ function fetchHealth(port) {
       resolve(null)
     })
   })
+}
+
+// What one P.ping result means, in words; detail is the upstream's own message with the token masked
+function pingWords(r, p) {
+  const why = r.detail ? ` (${r.detail})` : ''
+  switch (r.verdict) {
+    case 'ok': return `answers, first byte after ${r.firstByteMs} ms`
+    case 'key': return `HTTP ${r.status}: the key was refused${why}`
+    case 'model': return `HTTP ${r.status}: the service does not know model ${p.model}${why}`
+    case 'quota': return `HTTP ${r.status}: out of quota or rate-limited${why}`
+    case 'not-running': return `nothing listens at ${p.url}; is that local service started?`
+    case 'unreachable': return `cannot reach ${new URL(p.url).host}${why}`
+    case 'timeout': return `no answer within ${P.LIMIT_MS / 1000} s`
+    default: return `HTTP ${r.status}${why}`
+  }
 }
 
 // A router that answers on our port but was started for another config directory (or by an older version that does
@@ -700,8 +741,7 @@ function probeProxy(port, caPath) {
 
 // The router only accepts proxy connections while the relay config says so (see parseProxyCfg); returns the previous value
 function setProxyEnabled(on) {
-  const file = resolveActiveCfgPath()
-  const raw = JSON.parse(fs.readFileSync(file, 'utf8'))
+  const { file, raw } = loadRaw()
   const before = Boolean(raw.proxy && typeof raw.proxy === 'object' && raw.proxy.enabled === true)
   raw.proxy = { ...(raw.proxy && typeof raw.proxy === 'object' ? raw.proxy : {}), enabled: on }
   writeFileAtomic(file, JSON.stringify(raw, null, 2) + String.fromCharCode(10))
@@ -728,10 +768,11 @@ const pluginVersion = () => {
 
 // restart [--if-stale] [--if-idle]: stop this config dir's router and start the one shipped with this copy of the tool.
 // --if-stale: only when the router runs older code (no configDir, or a lower version); a newer one is left alone.
-// --if-idle: only when it answers no request and holds no tunnel; a router from before 0.6.1 cannot say, so it is never
+// --if-idle: only when it answers no request and holds no tunnel; an older router cannot say, so it is never
 // idle and only a plain "restart" (a person asking) replaces it. Exit codes: 0 restarted or nothing to do, 1 failed or
 // refused, 3 busy or unknown (nothing changed).
 if (cmd === 'restart') {
+  refuseIfOutdated()
   const port = relayPort()
   const h = await fetchHealth(port)
   if (h && !(h.ok === true && Number.isInteger(h.pid) && h.pid > 1)) {
@@ -740,7 +781,7 @@ if (cmd === 'restart') {
   }
   if (!h) {
     const up = await ensureRouter(port)
-    console.log(up ? `No router was running on ${port}; started one.` : `No router was running on ${port}, and it did not start; see ${path.join(cfgDir, 'custom-agent-router.log')}.`)
+    console.log(up ? `No router was running on ${port}; started one.` : `No router was running on ${port}, and it did not start; see ${path.join(cfgDir, 'model-relay.log')}.`)
     process.exit(up ? 0 : 1)
   }
   const foreign = foreignRouter(h, port)
@@ -758,14 +799,14 @@ if (cmd === 'restart') {
     // A long reply logs only when it starts, and a router without configDir may even serve another config dir, so an
     // older router's log says nothing safe about whether killing it cuts someone off
     const busy = typeof h.inflight !== 'number'
-      ? 'it is older than 0.6.1 and cannot report requests in flight'
+      ? 'it is an older router that cannot report requests in flight'
       : h.inflight > 0 || (h.tunnels ?? 0) > 0 ? `${h.inflight} request(s) in flight, ${h.tunnels ?? 0} tunnel(s) open` : ''
     if (busy) {
       console.log(`The router (pid ${h.pid}) may be busy (${busy}); not restarted. Run "restart" without --if-idle to restart it anyway.`)
       process.exit(3)
     }
   }
-  console.log(`Restarting the router (pid ${h.pid}${h.version ? `, ${h.version}` : ', older than 0.6.1'}) to run ${mine || 'this'} code; anything in flight through it is cut off.`)
+  console.log(`Restarting the router (pid ${h.pid}${h.version ? `, ${h.version}` : ', an older version'}) to run ${mine || 'this'} code; anything in flight through it is cut off.`)
   try {
     process.kill(h.pid)
   } catch {}
@@ -776,7 +817,7 @@ if (cmd === 'restart') {
     console.error(`The router (pid ${h.pid}) did not stop, so it still runs the old code. Stop that process yourself, then run "restart" again.`)
     process.exit(1)
   }
-  console.log(up ? `✓ restarted: pid ${now?.pid}${now?.version ? `, ${now.version}` : ''}` : `The router did not start again; see ${path.join(cfgDir, 'custom-agent-router.log')}.`)
+  console.log(up ? `✓ restarted: pid ${now?.pid}${now?.version ? `, ${now.version}` : ''}` : `The router did not start again; see ${path.join(cfgDir, 'model-relay.log')}.`)
   process.exit(up ? 0 : 1)
 }
 
@@ -816,6 +857,7 @@ if (cmd === 'proxy') {
   }
 
   if (sub === 'enable' || sub === 'renew') {
+    loadRaw() // an older or missing config stops here, before anything is written
     const env = { ...(settings.env || {}) }
     if (env.HTTPS_PROXY && env.HTTPS_PROXY !== url) {
       console.error(`settings.json already sets HTTPS_PROXY=${env.HTTPS_PROXY}; chaining proxies is not supported. Remove it first.`)
@@ -850,7 +892,7 @@ if (cmd === 'proxy') {
     const st = PKI.status(cfgDir)
     console.log(`${go ? 'Applying' : 'Dry run — would apply'}: ${sub === 'renew' ? 'new certificate, ' : ''}Claude Code uses ${url} as its HTTPS proxy and keeps api.anthropic.com as its API address.`)
     console.log(`  settings.json env: set HTTPS_PROXY, NODE_EXTRA_CA_CERTS=${ca}, NO_PROXY=${noProxy}; remove ANTHROPIC_BASE_URL`)
-    console.log(`  ${path.basename(resolveActiveCfgPath())}: set proxy.enabled to true (the router refuses proxy connections otherwise)`)
+    console.log(`  ${path.basename(relayCfgPath)}: set proxy.enabled to true (the router refuses proxy connections otherwise)`)
     console.log(`  certificate: ${sub === 'renew' || !st.complete || st.renewDue ? 'a new CA (limited to api.anthropic.com) and leaf are created' : `kept (valid until ${day(st.leafExpires)})`}`)
     console.log('  effect: new Claude Code sessions use the proxy; running sessions keep their current setting until restarted')
     console.log('  undo:   node tools/setup.mjs proxy disable --go')
@@ -909,6 +951,7 @@ if (cmd === 'proxy') {
 }
 
 if (cmd === 'rc') {
+  refuseIfOutdated()
   const port = relayPort()
   let mode = 'none'
   try {
@@ -919,7 +962,7 @@ if (cmd === 'rc') {
     process.exit(1)
   }
   if (!(await ensureRouter(port))) {
-    console.error(`The router could not be started on 127.0.0.1:${port}; check ${path.join(cfgDir, 'custom-agent-router.log')}`)
+    console.error(`The router could not be started on 127.0.0.1:${port}; check ${path.join(cfgDir, 'model-relay.log')}`)
     process.exit(1)
   }
   const child = spawn(process.env.CLAUDE_CODE_EXECPATH || 'claude', ['remote-control', ...args.slice(1)], { stdio: 'inherit' })
@@ -931,34 +974,55 @@ if (cmd === 'rc') {
 } else if (cmd === 'proxy') {
   // handled above
 } else if (cmd === 'check' || cmd === 'doctor') {
-  const active = resolveActiveCfgPath()
-  if (!fs.existsSync(active)) {
-    console.error(`Missing config: ${active} (run "node tools/setup.mjs init" first)`)
+  // Everything doctor finds is a finding { id, level, text, fix?, needsConsent? }: people read the lines, and
+  // "--json" gives the same list to an assistant (or a script) that wants to act on it
+  const json = hasFlag('--json')
+  const say = (line) => !json && console.log(line)
+  const findings = []
+  const find = (id, text, extra = {}) => {
+    findings.push({ id, level: 'warn', text, ...extra })
+    say(`  ⚠ ${text}`)
+  }
+  const report = { ok: true, config: null, port: null, providers: {}, failover: null, retry: null, settings: null, router: null, ping: null, findings }
+  const fail = (text) => {
+    if (json) console.log(JSON.stringify({ ...report, ok: false, error: text }, null, 2))
+    else console.error(text)
     process.exit(1)
   }
+
+  // An older config is read for its port only: the router uses nothing else in it
+  const active = fs.existsSync(relayCfgPath) || !fs.existsSync(oldCfgPath) ? relayCfgPath : oldCfgPath
+  if (!fs.existsSync(active)) fail(`Missing config: ${active} (run "node tools/setup.mjs init" first)`)
   let raw
   try {
     raw = JSON.parse(fs.readFileSync(active, 'utf8'))
   } catch (e) {
-    console.error(`Invalid JSON in ${active}: ${e.message}`)
-    process.exit(1)
+    fail(`Invalid JSON in ${active}: ${e.message}`)
   }
+  if (!isObj(raw)) fail(`${active} is not a JSON object ({ ... })`)
+  report.config = active
+  const outdated = active === oldCfgPath || !L.isFormat2(raw)
+  report.outdated = outdated
 
-  const skippedEnv = L.unresolvedEnv(raw, process.env).map((u) => `${u.provider} (${u.env ? `${u.env} is unset` : 'token "env:" names no variable'})`)
-
-  const cfg = L.parseCfg(raw)
-  if (!cfg) {
-    console.error(`Config validation failed in ${active}. Ensure at least one provider has a resolved token (or set ${skippedEnv.join(', ')}).`)
-    process.exit(1)
-  }
+  const shape = outdated ? null : L.parseShape(raw)
+  const cfg = (!outdated && L.parseCfg(raw)) || L.bareCfg(raw)
   const names = Object.keys(cfg.providers)
-  console.log(`Config OK (${active})`)
-  console.log(`  Port: ${cfg.port}`)
-  console.log(`  Providers: ${names.map((k) => `${k} -> ${cfg.providers[k].model}`).join(', ')}`)
-  if (skippedEnv.length > 0) {
-    console.log(`  Skipped (unset env var): ${skippedEnv.join(', ')}`)
+  report.port = cfg.port
+  report.providers = Object.fromEntries(names.map((k) => [k, cfg.providers[k].model]))
+  report.failover = { enabled: cfg.failoverEnabled, chain: cfg.failoverChain, cooldownMs: cfg.cooldownMs }
+  report.retry = { enabled: cfg.retry.enabled }
+  say(names.length ? `Config OK (${active})` : `Config read (${active}), but no provider is usable yet; every request goes to Claude`)
+  say(`  Port: ${cfg.port}`)
+  say(`  Providers: ${names.length ? names.map((k) => `${k} -> ${cfg.providers[k].model}`).join(', ') : 'none usable'}`)
+  // fix: the arguments to run this CLI with, so the caller supplies its own path to it
+  if (outdated) find('outdated', `${active} is from an older version of model-relay, which this version does not read; "migrate" shows what it becomes and "migrate --go" applies it`, { fix: 'migrate --go', needsConsent: true })
+  for (const u of outdated ? [] : L.unresolvedEnv(raw, process.env)) {
+    find('missing-key', u.env
+      ? `provider ${u.provider} is skipped: its key variable ${u.env} is unset in this shell. Set it permanently for your OS, then restart Claude Code so the router starts with it`
+      : `provider ${u.provider} is skipped: its token "env:" names no variable`, { provider: u.provider, env: u.env || null })
   }
-  console.log(`  Failover: ${cfg.failoverEnabled ? `${cfg.failoverChain.join(' → ')} (back to Claude after ${cfg.cooldownMs / 60000} min)` : 'disabled'}    Retry: ${cfg.retry.enabled ? 'on' : 'off'}`)
+  if (!shape && !outdated) find('no-provider', 'no provider has an address, a model and a token yet; add one with "add <name> --preset <p> --model <id> --token env:<VAR>"', { fix: 'add <name> --preset <preset> --model <model id> --token env:<VAR>' })
+  say(`  Failover: ${cfg.failoverEnabled ? (cfg.failoverChain.length ? `${cfg.failoverChain.join(' → ')} (back to Claude after ${cfg.cooldownMs / 60000} min)` : 'on, but no chain') : 'disabled'}    Retry: ${cfg.retry.enabled ? 'on' : 'off'}`)
 
   let curSettings = {}
   try { curSettings = readSettings() } catch {}
@@ -973,26 +1037,28 @@ if (cmd === 'rc') {
     }
   }
   if (curEnv.CLAUDE_CODE_SUBAGENT_MODEL) aliasDesc.push(`subagent default -> ${curEnv.CLAUDE_CODE_SUBAGENT_MODEL}`)
-  console.log(`  Aliases:  ${aliasDesc.length ? aliasDesc.join(', ') : 'none (run "node tools/setup.mjs alias haiku <provider>" to route haiku)'}`)
+  say(`  Aliases:  ${aliasDesc.length ? aliasDesc.join(', ') : 'none (run "node tools/setup.mjs alias haiku <provider>" to route haiku)'}`)
 
-  // Things that work but are probably not what was meant
-  const migration = L.migrateConfig(raw)
-  const lint = []
-  if (migration.notes.length) lint.push(`old config layout (${migration.notes.length} item${migration.notes.length > 1 ? 's' : ''}); run "node tools/setup.mjs migrate --go" to tidy it, behaviour stays the same`)
-  const wanted = [...(migration.config.failover.chain || [])]
-  for (const v of Object.values(migration.config.providers)) if (Array.isArray(v.fallback)) wanted.push(...v.fallback)
-  const unknown = [...new Set(wanted.map((n) => String(n).trim().toLowerCase()).filter((n) => n && !names.includes(n)))]
-  if (unknown.length) lint.push(`failover names ${unknown.join(', ')} but no such usable provider exists; they are skipped`)
+  // ---- the config itself: names that go nowhere, a model another provider claims first ----
+  if (cfg.failoverEnabled && names.length && !cfg.failoverChain.length) {
+    find('no-chain', 'failover is on but has no chain, so a usage-limit 429 from Claude is passed back as it is; name who takes over with "set failover.chain <a,b>"', { fix: 'set failover.chain <a,b>' })
+  }
+  const wanted = outdated ? [] : L.lowerNames(raw.failover?.chain)
+  for (const v of outdated || !isObj(raw.providers) ? [] : Object.values(raw.providers)) if (Array.isArray(v?.fallback)) wanted.push(...L.lowerNames(v.fallback))
+  const unknown = [...new Set(wanted.filter((n) => n && !names.includes(n)))]
+  if (unknown.length) find('unknown-name', `failover names ${unknown.join(', ')} but no such usable provider exists; they are skipped`)
   for (const [k, p] of Object.entries(cfg.providers)) {
     const taker = L.matchProviderByModel(cfg, p.model)
-    if (taker && taker !== k) lint.push(`requests for ${p.model} go to ${taker}, not ${k}: ${taker} matches that name first (narrow its matchModels)`)
+    if (taker && taker !== k) find('model-claimed', `requests for ${p.model} go to ${taker}, not ${k}: ${taker} matches that name first (narrow its matchModels)`)
   }
-  for (const [slot, envKey] of Object.entries(ALIAS_ENV_KEYS)) {
+  for (const [, envKey] of Object.entries(ALIAS_ENV_KEYS)) {
     const envVal = curEnv[envKey]
     if (envVal && !L.isClaudeModel(envVal) && !L.matchProviderByModel(cfg, envVal)) {
-      lint.push(`settings.json ${envKey}="${envVal}" does not match any provider's matchModels; requests for it will go to Claude`)
+      find('alias-unrouted', `settings.json ${envKey}="${envVal}" does not match any provider's matchModels; requests for it will go to Claude`)
     }
   }
+
+  // ---- Claude Code's own settings that keep requests away from the relay ----
   // Claude Code drops a subagent model missing from availableModels (a warning in its debug log only) and runs
   // CLAUDE_CODE_SUBAGENT_MODEL or the parent's model instead, so model-relay:<name> agents never reach the relay.
   // Observed on Claude Code 2.1.300 with an exact entry for a non-Claude id. Claude-named models are skipped: aliases
@@ -1000,58 +1066,60 @@ if (cmd === 'rc') {
   // project, local and managed settings can set availableModels too.
   if (Array.isArray(curSettings?.availableModels)) {
     const allowed = new Set(curSettings.availableModels.map((m) => String(m).toLowerCase()))
-    const blocked = [...new Set(Object.values(cfg.providers).map((p) => p.model))]
+    const blocked = [...new Set(Object.values(shape?.providers || {}).map((p) => p.model))]
       .filter((m) => !L.isClaudeModel(m) && !/claude/i.test(m) && !allowed.has(m.toLowerCase()))
-    if (blocked.length) lint.push(`${settingsPath} availableModels does not list ${blocked.join(', ')}; Claude Code runs model-relay:<name> subagents on another model (CLAUDE_CODE_SUBAGENT_MODEL or the parent's) instead. Add each exactly as written here`)
+    if (blocked.length) find('available-models', `${settingsPath} availableModels does not list ${blocked.join(', ')}; Claude Code runs model-relay:<name> subagents on another model (CLAUDE_CODE_SUBAGENT_MODEL or the parent's) instead. Add each exactly as written here`, { needsConsent: true })
   }
-  for (const w of lint) console.log(`  ⚠ ${w}`)
 
   const wiring = ensureSettingsWiring(cfg.port, hasFlag('--fix'))
-  console.log(`  Claude settings: ${wiring.ok ? '✓' : '⚠'} ${wiring.msg}`)
+  report.settings = wiring
+  say(`  Claude settings: ${wiring.ok ? '✓' : '⚠'} ${wiring.msg}`)
+  if (!wiring.ok) findings.push({ id: 'wiring', level: 'warn', text: wiring.msg, fix: 'doctor --fix', needsConsent: true })
 
-  await new Promise((resolve) => {
-    const req = http.get(`http://127.0.0.1:${cfg.port}/__health`, { timeout: 2000 }, (res) => {
-      const chunks = []
-      res.on('data', (c) => chunks.push(c))
-      res.on('end', () => {
-        const rawHealth = Buffer.concat(chunks).toString('utf8').trim()
-        try {
-          const h = JSON.parse(rawHealth)
-          const foreign = foreignRouter(h, cfg.port)
-          if (foreign) console.log(`  Router health: ⚠ ${foreign}`)
-          else {
-            if (olderRouter(h)) console.log(`  Router health: ⚠ ${olderNote(cfg.port)}`)
-          const foState = h.failoverSince ? `active since ${new Date(h.failoverSince).toISOString().slice(11, 19)}Z` : 'idle'
-          const pxState = h.proxy ? `proxy ${h.proxy.enabled ? 'on' : 'off'} (${h.proxy.mitm} routed / ${h.proxy.tunnel} tunnelled)` : 'no proxy'
-          console.log(`  Router health: ✓ up on 127.0.0.1:${cfg.port} (pid ${h.pid}, pinned sessions: ${h.sessionsOnCustom ?? 0}, 429 failover: ${foState}, ${pxState})`)
-          // the router resolves env:VAR from the environment it was started with, which may differ from this shell's
-          for (const u of Array.isArray(h.unresolved) ? h.unresolved : []) {
-            console.log(process.env[u.env]
-              ? `  ⚠ The running router was started without ${u.env}, so provider ${u.provider} is skipped there although this shell has it. Stop the router (kill ${h.pid}) and start Claude Code from this shell so the new router inherits it`
-              : `  ⚠ Provider ${u.provider} is skipped by the running router: ${u.env ? `${u.env} is unset here too` : 'its token "env:" names no variable'}`)
-          }
-          }
-        } catch {
-          console.log(`  Router health: ${rawHealth}`)
+  // ---- the running router ----
+  const h = await fetchHealth(cfg.port)
+  report.router = h ? { up: true, pid: h.pid, version: h.version || null, configDir: h.configDir || null } : { up: false }
+  if (!h) say(`  Router status: offline on 127.0.0.1:${cfg.port} (will auto-start when Claude Code launches)`)
+  else if (h.ok !== true) say(`  Router health: ${JSON.stringify(h)}`)
+  else {
+    const foreign = foreignRouter(h, cfg.port)
+    if (foreign) {
+      report.router.foreign = true
+      say(`  Router health: ⚠ ${foreign}`)
+      findings.push({ id: 'foreign-router', level: 'warn', text: foreign })
+    } else {
+      if (olderRouter(h)) {
+        say(`  Router health: ⚠ ${olderNote(cfg.port)}`)
+        findings.push({ id: 'router-older', level: 'warn', text: olderNote(cfg.port), fix: 'restart --if-idle' })
+      }
+      const foState = h.failoverSince ? `active since ${new Date(h.failoverSince).toISOString().slice(11, 19)}Z` : 'idle'
+      const pxState = h.proxy ? `proxy ${h.proxy.enabled ? 'on' : 'off'} (${h.proxy.mitm} routed / ${h.proxy.tunnel} tunnelled)` : 'no proxy'
+      say(`  Router health: ✓ up on 127.0.0.1:${cfg.port} (pid ${h.pid}${h.version ? `, ${h.version}` : ''}, pinned sessions: ${h.sessionsOnCustom ?? 0}, 429 failover: ${foState}, ${pxState})`)
+      const mine = pluginVersion()
+      if (h.version && mine && compareVersions(h.version, mine) < 0) {
+        find('router-older', `the running router is ${h.version} and this tool is ${mine}, so the router still runs the older code; run "/provider restart" (or "restart") when no reply is in progress`, { fix: 'restart --if-idle' })
+      }
+      // the router resolves env:VAR from the environment it was started with, which may differ from this shell's;
+      // a variable unset here as well is already a missing-key finding
+      for (const u of Array.isArray(h.unresolved) ? h.unresolved : []) {
+        if (u.env && process.env[u.env]) {
+          find('router-env', `The running router was started without ${u.env}, so provider ${u.provider} is skipped there although this shell has it. Stop the router (kill ${h.pid}) and start Claude Code from this shell so the new router inherits it`, { provider: u.provider, env: u.env })
         }
-        resolve()
-      })
-    })
-    req.on('error', () => {
-      console.log(`  Router status: offline on 127.0.0.1:${cfg.port} (will auto-start when Claude Code launches)`)
-      resolve()
-    })
-    req.end()
-  })
-
-  if (hasFlag('--ping')) {
-    console.log('  Upstream ping:')
-    for (const [k, p] of Object.entries(cfg.providers)) {
-      const r = await pingProvider(p)
-      console.log(`    ${r.ok ? '✓' : '✗'} ${k.padEnd(10)} (${p.model}) -> HTTP ${r.status} in ${r.ms}ms${r.ok ? '' : ` [${r.body}]`}`)
+      }
     }
   }
+
+  if (hasFlag('--ping')) {
+    say('  Upstream ping:')
+    report.ping = {}
+    for (const [k, p] of Object.entries(cfg.providers)) {
+      const r = await P.ping(p)
+      report.ping[k] = r
+      say(`    ${r.verdict === 'ok' ? '✓' : '✗'} ${k.padEnd(10)} (${p.model}) -> ${pingWords(r, p)}`)
+    }
+  }
+  if (json) console.log(JSON.stringify(report, null, 2))
 } else {
-  console.error('Usage: node tools/setup.mjs [init|presets|add|providers|alias|set|remove|migrate|doctor|check|restart|proxy|rc] [--fix] [--ping] [--go]')
+  console.error('Usage: node tools/setup.mjs [init|presets|add|providers|alias|set|remove|migrate|doctor|check|restart|proxy|rc] [--fix] [--ping] [--json] [--go]')
   process.exit(2)
 }

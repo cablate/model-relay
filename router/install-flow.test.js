@@ -43,14 +43,14 @@ async function waitHealth(port) {
 
 function configDir(t, port, extra = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'relay-flow-'))
-  fs.writeFileSync(path.join(dir, 'model-relay.json'), JSON.stringify({ port, providers: { glm: { baseUrl: 'http://127.0.0.1:9', token: 'dummy', model: 'glm-5.3' } }, ...extra }))
+  fs.writeFileSync(path.join(dir, 'model-relay.json'), JSON.stringify({ format: 2, port, providers: { glm: { baseUrl: 'http://127.0.0.1:9', token: 'dummy', model: 'glm-5.3' } }, ...extra }))
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }))
   return dir
 }
 
 const routerLog = (dir) => {
   try {
-    return fs.readFileSync(path.join(dir, 'custom-agent-router.log'), 'utf8')
+    return fs.readFileSync(path.join(dir, 'model-relay.log'), 'utf8')
   } catch {
     return ''
   }
@@ -97,10 +97,10 @@ test('set port validates, saves a copy, says the router must restart, and rewire
   assert.strictEqual(r.code, 0, r.out)
   assert.match(r.out, /keeps port \d+ until it is stopped/)
   assert.strictEqual(readJson(cfg).port, next)
-  assert.strictEqual(readJson(`${cfg}.relay-backup`).port, port)
+  assert.strictEqual(readJson(`${cfg}.model-relay-backup`).port, port)
   const s = readJson(settings)
   assert.deepStrictEqual(s, { model: 'sonnet', env: { FOO: '1', ANTHROPIC_BASE_URL: `http://127.0.0.1:${next}` } })
-  assert.strictEqual(readJson(`${settings}.relay-backup`).env.ANTHROPIC_BASE_URL, `http://127.0.0.1:${port}`)
+  assert.strictEqual(readJson(`${settings}.model-relay-backup`).env.ANTHROPIC_BASE_URL, `http://127.0.0.1:${port}`)
 
   const ca = path.join(dir, 'ca.pem')
   fs.writeFileSync(settings, JSON.stringify({ env: { HTTPS_PROXY: `http://127.0.0.1:${next}`, NODE_EXTRA_CA_CERTS: ca } }))
@@ -174,7 +174,7 @@ test('doctor warns and proxy enable refuses when the router on the port belongs 
 test('the router log is emptied past 5 MB like the request log', async (t) => {
   const port = await freePort()
   const dir = configDir(t, port)
-  const file = path.join(dir, 'custom-agent-router.log')
+  const file = path.join(dir, 'model-relay.log')
   fs.writeFileSync(file, Buffer.alloc(5 * 1024 * 1024 + 10, 'x'))
   startRouter(t, dir)
   await waitHealth(port)
@@ -246,7 +246,7 @@ test('a config whose only token is unset still binds its own port, and refuses C
   const port = await freePort()
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'relay-flow-'))
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }))
-  fs.writeFileSync(path.join(dir, 'model-relay.json'), JSON.stringify({ port, providers: { glm: { preset: 'zai', token: 'env:RELAY_FLOW_UNSET_TOKEN' } } }))
+  fs.writeFileSync(path.join(dir, 'model-relay.json'), JSON.stringify({ format: 2, port, providers: { glm: { preset: 'zai', model: 'glm-5.3', token: 'env:RELAY_FLOW_UNSET_TOKEN' } } }))
   startRouter(t, dir)
   assert.strictEqual((await waitHealth(port)).configDir, fs.realpathSync.native(dir))
   let dialled = 0
@@ -289,24 +289,24 @@ test('/__health reports the plugin version and the requests in flight', async (t
   assert.strictEqual(h.inflight, 0)
 })
 
-test('a router from before 0.6.1 is never restarted by --if-idle, only by a plain restart', async (t) => {
+test('a router from 0.6.0 or earlier is never restarted by --if-idle, only by a plain restart', async (t) => {
   const port = await freePort()
   const dir = configDir(t, port)
   const old = fakeRouter(t, port, {})
   await waitHealth(port)
   killHealth(t, port)
   // even with a request log that has been quiet for an hour: a long reply logs only when it starts
-  fs.writeFileSync(path.join(dir, 'custom-agent-requests.log'), '{}\n')
+  fs.writeFileSync(path.join(dir, 'model-relay-requests.log'), '{}\n')
   const quiet = new Date(Date.now() - 60 * 60 * 1000)
-  fs.utimesSync(path.join(dir, 'custom-agent-requests.log'), quiet, quiet)
+  fs.utimesSync(path.join(dir, 'model-relay-requests.log'), quiet, quiet)
   const busy = setup(dir, 'restart', '--if-stale', '--if-idle')
   assert.strictEqual(busy.code, 3, busy.out)
-  assert.match(busy.out, /older than 0\.6\.1 and cannot report requests in flight/)
+  assert.match(busy.out, /an older router that cannot report requests in flight/)
   assert.strictEqual((await getHealth(port)).pid, old.pid, 'the older router was not touched')
 
   const r = setup(dir, 'restart', '--if-stale')
   assert.strictEqual(r.code, 0, r.out)
-  assert.match(r.out, /older than 0\.6\.1/)
+  assert.match(r.out, /an older version/)
   const h = await waitHealth(port)
   assert.strictEqual(h.configDir, fs.realpathSync.native(dir), 'the router now running is this version\'s')
   assert.ok(h.version)
@@ -383,7 +383,7 @@ test('restart --if-idle waits while the router is answering a request', async (t
   t.after(() => { hold?.destroy(); upstream.close() })
   const port = await freePort()
   const dir = configDir(t, port)
-  fs.writeFileSync(path.join(dir, 'model-relay.json'), JSON.stringify({ port, failover: { enabled: false }, providers: { stub: { baseUrl: `http://127.0.0.1:${upstream.address().port}`, token: 't', model: 'stub-1' } } }))
+  fs.writeFileSync(path.join(dir, 'model-relay.json'), JSON.stringify({ format: 2, port, failover: { enabled: false }, providers: { stub: { baseUrl: `http://127.0.0.1:${upstream.address().port}`, token: 't', model: 'stub-1' } } }))
   const { child } = startRouter(t, dir)
   await waitHealth(port)
   const body = JSON.stringify({ model: 'stub-1', stream: true, messages: [] })
@@ -399,4 +399,59 @@ test('restart --if-idle waits while the router is answering a request', async (t
   req.destroy()
   for (let i = 0; i < 30 && (await getHealth(port)).inflight !== 0; i++) await sleep(100)
   assert.strictEqual((await getHealth(port)).inflight, 0, 'the count drops when the caller leaves')
+})
+
+test('a new install: init, add one provider, and the router sends its model there and everything else to Claude', async (t) => {
+  const seen = []
+  const stub = (from) => http.createServer((req, res) => {
+    const ch = []
+    req.on('data', (c) => ch.push(c))
+    req.on('end', () => {
+      seen.push({ from, auth: String(req.headers.authorization || ''), model: JSON.parse(Buffer.concat(ch).toString('utf8') || '{}').model })
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({ from }))
+    })
+  })
+  const anthropic = stub('claude')
+  const provider = stub('provider')
+  for (const s of [anthropic, provider]) {
+    await new Promise((r) => s.listen(0, '127.0.0.1', r))
+    t.after(() => s.close())
+  }
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'relay-new-'))
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }))
+  const file = path.join(dir, 'model-relay.json')
+  const port = await freePort()
+
+  const init = setup(dir, 'init')
+  assert.strictEqual(init.code, 0, init.out)
+  assert.deepStrictEqual(readJson(file).providers, {}, 'no provider until one is added')
+  assert.strictEqual(setup(dir, 'set', 'port', String(port)).code, 0)
+  const add = setup(dir, 'add', 'stub', '--url', `http://127.0.0.1:${provider.address().port}`, '--model', 'stub-1', '--token', 'env:RELAY_NEW_KEY')
+  assert.strictEqual(add.code, 0, add.out)
+  const cfg = readJson(file)
+  assert.strictEqual(cfg.format, 2)
+  assert.deepStrictEqual(cfg.failover.chain, ['stub'], 'the first provider takes over on a 429')
+  // the one seam the test needs: Anthropic itself is a local stub
+  fs.writeFileSync(file, JSON.stringify({ ...cfg, claudeUrl: `http://127.0.0.1:${anthropic.address().port}` }))
+
+  const child = spawn(process.execPath, [ROUTER, dir], { stdio: 'ignore', env: { ...process.env, RELAY_NEW_KEY: 'k-new' } })
+  t.after(() => child.kill())
+  assert.deepStrictEqual((await waitHealth(port)).providers, { stub: 'stub-1' })
+  const post = (model) => new Promise((resolve, reject) => {
+    const body = JSON.stringify({ model, messages: [] })
+    const headers = { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body), authorization: 'Bearer oauth' }
+    const req = http.request({ host: '127.0.0.1', port, method: 'POST', path: '/v1/messages', headers }, (res) => {
+      const ch = []
+      res.on('data', (c) => ch.push(c))
+      res.on('end', () => resolve(JSON.parse(Buffer.concat(ch).toString('utf8')).from))
+    })
+    req.on('error', reject)
+    req.end(body)
+  })
+  assert.strictEqual(await post('stub-1'), 'provider')
+  assert.strictEqual(await post('claude-sonnet-5-5'), 'claude')
+  assert.strictEqual(await post('claude-haiku-5-5'), 'claude', 'no provider takes haiku unless it is told to')
+  assert.strictEqual(seen.find((s) => s.from === 'provider')?.auth, 'Bearer k-new', 'the provider gets its own key')
+  assert.ok(seen.filter((s) => s.from === 'claude').every((s) => s.auth === 'Bearer oauth'), 'Claude gets the session\'s own login, never the provider key')
 })

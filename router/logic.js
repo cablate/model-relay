@@ -34,9 +34,9 @@ function resolveToken(rawToken, env = process.env) {
 
 // Providers whose `env:VAR` token has no value in `env`, as [{ provider, env }]; never the value itself
 function unresolvedEnv(raw, env = process.env) {
-  const migrated = migrateConfig(raw).config
   const out = []
-  for (const [k, v] of Object.entries(migrated?.providers || {})) {
+  if (!isFormat2(raw)) return out // an older config is not used at all, so none of its keys counts as missing
+  for (const [k, v] of Object.entries(isObj(raw.providers) ? raw.providers : {})) {
     const key = k.trim().toLowerCase()
     if (!key || key === 'claude' || !v || typeof v.token !== 'string' || !v.token.startsWith('env:')) continue // the keys parseCfg ignores
     const name = v.token.slice(4).trim() // empty when the token is a bare "env:"
@@ -47,7 +47,7 @@ function unresolvedEnv(raw, env = process.env) {
 
 // The error for "parseCfg gave nothing": names the skipped providers when unset env vars are the reason
 function cfgMissingMessage(unresolved) {
-  if (!unresolved.length) return 'model-relay.json / custom-agent.json is missing or invalid'
+  if (!unresolved.length) return 'model-relay.json is missing or invalid, or has no usable provider'
   const list = unresolved.map((u) => `${u.provider} (${u.env ? `${u.env} is unset in the router process` : 'its token "env:" names no variable'})`).join(', ')
   return `no provider is usable; skipped ${list}. Export the variable(s), then restart the router (it keeps the environment it was started with)`
 }
@@ -58,92 +58,38 @@ function defaultPrefixRegex(name, model) {
   return `^${prefix.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`
 }
 
+// Built-in providers: each service's address and the switches it needs. The model is always the person's to name,
+// because model ids go out of date.
 const PRESETS = {
-  zai: {
-    baseUrl: 'https://api.z.ai/api/anthropic',
-    model: 'glm-5.3[1m]',
-    matchModels: ['^glm', 'haiku'],
-    stripToolSearch: true,
-    stripCacheControl: false,
-    authHeader: 'both',
-  },
-  glm: {
-    baseUrl: 'https://api.z.ai/api/anthropic',
-    model: 'glm-5.3[1m]',
-    matchModels: ['^glm', 'haiku'],
-    stripToolSearch: true,
-    stripCacheControl: false,
-    authHeader: 'both',
-  },
-  deepseek: {
-    baseUrl: 'https://api.deepseek.com/anthropic',
-    model: 'deepseek-chat',
-    matchModels: ['^deepseek'],
-    stripToolSearch: true,
-    stripCacheControl: false,
-    authHeader: 'bearer',
-  },
-  kimi: {
-    baseUrl: 'https://api.moonshot.ai/anthropic',
-    model: 'kimi-k2',
-    matchModels: ['^kimi', '^moonshot'],
-    stripToolSearch: true,
-    stripCacheControl: false,
-    authHeader: 'bearer',
-  },
-  minimax: {
-    baseUrl: 'https://api.minimax.io/anthropic',
-    model: 'MiniMax-M1',
-    matchModels: ['^minimax'],
-    stripToolSearch: true,
-    stripCacheControl: false,
-    authHeader: 'bearer',
-  },
-  openrouter: {
-    baseUrl: 'https://openrouter.ai/api',
-    model: 'anthropic/claude-sonnet-4',
-    matchModels: ['^openrouter/'],
-    stripToolSearch: true,
-    stripCacheControl: false,
-    authHeader: 'bearer',
-  },
-  gemini: {
-    baseUrl: 'http://127.0.0.1:3425',
-    model: 'gemini-4-argon',
-    matchModels: ['^gemini'],
-    stripToolSearch: true,
-    stripCacheControl: true,
-    authHeader: 'both',
-  },
-  magpie: {
-    baseUrl: 'http://127.0.0.1:3425',
-    model: 'gemini-4-argon',
-    matchModels: ['^gemini'],
-    stripToolSearch: true,
-    stripCacheControl: true,
-    authHeader: 'both',
-  },
+  zai: { baseUrl: 'https://api.z.ai/api/anthropic', matchModels: ['^glm'], stripToolSearch: true, stripCacheControl: false, authHeader: 'both' },
+  deepseek: { baseUrl: 'https://api.deepseek.com/anthropic', matchModels: ['^deepseek'], stripToolSearch: true, stripCacheControl: false, authHeader: 'bearer' },
+  kimi: { baseUrl: 'https://api.moonshot.ai/anthropic', matchModels: ['^kimi', '^moonshot'], stripToolSearch: true, stripCacheControl: false, authHeader: 'bearer' },
+  minimax: { baseUrl: 'https://api.minimax.io/anthropic', matchModels: ['^minimax'], stripToolSearch: true, stripCacheControl: false, authHeader: 'bearer' },
+  openrouter: { baseUrl: 'https://openrouter.ai/api', matchModels: ['^openrouter/'], stripToolSearch: true, stripCacheControl: false, authHeader: 'bearer' },
 }
 
-function parseProvider(name, raw, env = process.env, baseRetry = parseRetryCfg(undefined)) {
+// Format 2 is the only layout the router reads; "setup.mjs migrate" turns an older file into it
+const isFormat2 = (raw) => isObj(raw) && raw.format === 2
+
+// presets: the table a "preset" (or the provider's own name) is looked up in; migrate passes the older one
+function parseProvider(name, raw, env = process.env, baseRetry = parseRetryCfg(undefined), presets = PRESETS) {
   if (typeof raw !== 'object' || raw === null) return null
   const presetKey = (str(raw.preset) || name || '').toLowerCase()
-  const preset = PRESETS[presetKey] || null
+  const preset = Object.hasOwn(presets, presetKey) ? presets[presetKey] : null
   const url = str(raw.baseUrl || raw.url || preset?.baseUrl)
   const token = resolveToken(raw.token, env)
   const model = str(raw.model || preset?.model)
   if (!url || !/^https?:\/\//.test(url) || !token || !model) return null
 
-  const isGeminiLike = /^gemini$/i.test(name) || /^gemini/i.test(model)
   const stripToolSearch = raw.stripToolSearch !== undefined
     ? Boolean(raw.stripToolSearch)
     : (preset ? preset.stripToolSearch : true)
   const stripCacheControl = raw.stripCacheControl !== undefined
     ? Boolean(raw.stripCacheControl)
-    : (preset ? preset.stripCacheControl : isGeminiLike)
+    : Boolean(preset?.stripCacheControl)
   const authHeader = raw.authHeader === 'bearer' || raw.authHeader === 'x-api-key' || raw.authHeader === 'both'
     ? raw.authHeader
-    : (preset?.authHeader || (isGeminiLike ? 'both' : 'bearer'))
+    : (preset?.authHeader || 'bearer')
 
   const rawMatchers = Array.isArray(raw.matchModels) && raw.matchModels.length > 0
     ? raw.matchModels.filter((m) => typeof m === 'string' && m.length > 0)
@@ -203,107 +149,52 @@ const lowerNames = (list) => (Array.isArray(list) ? list : []).map((n) => String
 const dedupe = (list) => [...new Set(list)]
 const DEFAULT_COOLDOWN_MS = 600000
 
-// The one place that knows about older config layouts: the original single-GLM keys at the top level, the separate
-// `gemini` block, failoverEnabled / probeEveryMin / failoverProvider. Everything else reads the current shape only.
-// Returns the current-shape object (secrets copied through untouched) and one note per thing it moved.
-function migrateConfig(raw) {
-  const notes = []
-  if (!isObj(raw)) return { config: null, notes }
-  const config = { ...raw }
-  const providers = isObj(raw.providers) ? { ...raw.providers } : {}
-  const has = (name) => Object.keys(providers).some((k) => k.trim().toLowerCase() === name)
-
-  if (!has('glm') && str(raw.baseUrl) && str(raw.token) && str(raw.model)) {
-    providers.glm = {
-      baseUrl: raw.baseUrl,
-      token: raw.token,
-      model: raw.model,
-      matchModels: ['^glm'],
-      stripToolSearch: true,
-      stripCacheControl: false,
-      authHeader: 'bearer',
-      ...(raw.launch ? { launch: raw.launch } : {}),
-    }
-    notes.push('top-level baseUrl/token/model -> providers.glm')
+// The settings that do not depend on any provider. An older config (no "format": 2) gets only these: the router keeps
+// its port and sends everything to Claude until "setup.mjs migrate --go" rewrites the file.
+function bareCfg(raw) {
+  const r = isObj(raw) ? raw : {}
+  const fo = isObj(r.failover) ? r.failover : {}
+  const cooldownMs = typeof fo.cooldownMs === 'number' && fo.cooldownMs >= 0 ? fo.cooldownMs : DEFAULT_COOLDOWN_MS
+  return {
+    providers: Object.create(null),
+    failoverChain: [],
+    failoverProvider: null,
+    port: isPort(r.port) ? r.port : 8950,
+    claudeUrl: str(r.claudeUrl) || 'https://api.anthropic.com',
+    failoverEnabled: fo.enabled !== false,
+    cooldownMs: Math.min(7200000, Math.max(60000, cooldownMs)),
+    retry: parseRetryCfg(r.retry),
+    proxy: parseProxyCfg(r.proxy),
   }
-  for (const k of ['baseUrl', 'token', 'model', 'launch']) {
-    if (k in config && (has('glm') || !str(raw.baseUrl))) {
-      delete config[k]
-      if (k !== 'launch' || raw.launch) notes.push(`removed top-level ${k} (providers.glm replaces it)`)
-    }
-  }
-
-  if (isObj(raw.gemini)) {
-    if (!has('gemini')) {
-      providers.gemini = {
-        ...raw.gemini,
-        matchModels: raw.gemini.matchModels || ['^gemini'],
-        stripCacheControl: raw.gemini.stripCacheControl !== undefined ? raw.gemini.stripCacheControl : true,
-        authHeader: raw.gemini.authHeader || 'both',
-      }
-      notes.push('top-level gemini -> providers.gemini')
-    } else {
-      notes.push('removed top-level gemini (providers.gemini replaces it)')
-    }
-    delete config.gemini
-  }
-
-  const fo = isObj(raw.failover) ? raw.failover : {}
-  const legacyMin = typeof fo.probeEveryMin === 'number' ? fo.probeEveryMin : raw.probeEveryMin
-  const cooldownMs = typeof fo.cooldownMs === 'number' && fo.cooldownMs >= 0
-    ? fo.cooldownMs
-    : (typeof legacyMin === 'number' && Number.isFinite(legacyMin) ? legacyMin * 60000 : DEFAULT_COOLDOWN_MS)
-  const chain = Array.isArray(fo.chain) ? fo.chain : [fo.provider || raw.failoverProvider].filter(Boolean)
-  const nextFo = {
-    enabled: fo.enabled !== undefined ? fo.enabled !== false : raw.failoverEnabled !== false,
-    chain: lowerNames(chain),
-    cooldownMs,
-  }
-  const sameFo = isObj(raw.failover) && raw.failover.enabled === nextFo.enabled && raw.failover.cooldownMs === nextFo.cooldownMs
-    && Array.isArray(raw.failover.chain) && raw.failover.chain.join() === nextFo.chain.join() && !('provider' in raw.failover) && !('probeEveryMin' in raw.failover)
-  if (!sameFo) notes.push('failover -> { enabled, chain, cooldownMs }')
-  for (const k of ['failoverEnabled', 'probeEveryMin', 'failoverProvider']) {
-    if (k in raw) notes.push(`removed top-level ${k} (failover.* replaces it)`)
-    delete config[k]
-  }
-  config.failover = nextFo
-  config.providers = providers
-  return { config, notes }
 }
 
 function parseCfg(raw, env = process.env) {
-  const migrated = migrateConfig(raw).config
-  if (!migrated) return null
-  const retry = parseRetryCfg(migrated.retry)
+  if (!isFormat2(raw)) return null
+  const base = bareCfg(raw)
   // No prototype: names arrive from config files, sticky state and /__session, and "constructor" or "toString"
   // must never look up an inherited Object.prototype member as if it were a provider.
   const providers = Object.create(null)
-  for (const [k, v] of Object.entries(migrated.providers)) {
+  for (const [k, v] of Object.entries(isObj(raw.providers) ? raw.providers : {})) {
     const key = k.trim().toLowerCase()
     if (!key || key === 'claude') continue
-    const p = parseProvider(key, v, env, retry)
+    const p = parseProvider(key, v, env, base.retry)
     if (p) providers[key] = p
   }
-  const names = Object.keys(providers)
-  if (names.length === 0) return null
-
-  // The chain is the order providers are used when Claude is out of quota; names that are not configured are skipped
-  let failoverChain = dedupe(migrated.failover.chain.filter((n) => providers[n]))
-  if (failoverChain.length === 0) failoverChain = [providers.glm ? 'glm' : names[0]]
-  const port = isPort(migrated.port) ? migrated.port : 8950
-
+  if (Object.keys(providers).length === 0) return null
+  // The chain is the order providers are used when Claude is out of quota; names that are not configured are skipped.
+  // Without one, a 429 from Claude is passed back as it is.
+  const failoverChain = dedupe(lowerNames(raw.failover?.chain).filter((n) => providers[n]))
   return {
+    ...base,
     providers,
     failoverChain,
-    failoverProvider: failoverChain[0], // the first link; kept as its own field for callers that show a single target
-    port,
-    claudeUrl: str(migrated.claudeUrl) || 'https://api.anthropic.com',
-    failoverEnabled: migrated.failover.enabled,
-    cooldownMs: Math.min(7200000, Math.max(60000, migrated.failover.cooldownMs)),
-    retry,
-    proxy: parseProxyCfg(migrated.proxy),
+    failoverProvider: failoverChain[0] || null, // the first link; kept as its own field for callers that show a single target
   }
 }
+
+// Every env:VAR counts as set, so a config is judged by its shape alone and never by this shell's keys
+const ANY_ENV = new Proxy({}, { get: () => 'set' })
+const parseShape = (raw) => parseCfg(raw, ANY_ENV)
 
 // HTTPS proxy mode: Claude Code keeps talking to api.anthropic.com (Remote Control insists on it) and uses the
 // router as its HTTPS proxy. Only this host is opened up and routed; every other host is a plain byte tunnel.
@@ -446,16 +337,6 @@ function parseState(raw) {
   if (typeof raw.nextClaudeTry === 'number') s.nextClaudeTry = raw.nextClaudeTry
 
   const sticky = Object.create(null)
-  if (typeof raw.onGlm === 'object' && raw.onGlm !== null) {
-    for (const [sid, t] of Object.entries(raw.onGlm)) {
-      if (typeof t === 'number') sticky[sid] = { provider: 'glm', at: t }
-    }
-  }
-  if (typeof raw.onGemini === 'object' && raw.onGemini !== null) {
-    for (const [sid, t] of Object.entries(raw.onGemini)) {
-      if (typeof t === 'number') sticky[sid] = { provider: 'gemini', at: t }
-    }
-  }
   if (typeof raw.sticky === 'object' && raw.sticky !== null) {
     for (const [sid, v] of Object.entries(raw.sticky)) {
       if (v && typeof v === 'object' && typeof v.provider === 'string' && typeof v.at === 'number') {
@@ -498,8 +379,7 @@ function getSessionProvider(state, cfg, sid) {
 }
 
 function routeLabel(providerName, rewrite) {
-  const base = providerName === 'glm' ? 'zai' : providerName
-  return rewrite ? `${base}-rewrite` : base
+  return rewrite ? `${providerName}-rewrite` : providerName
 }
 
 function parseRoute(route, cfg) {
@@ -507,8 +387,7 @@ function parseRoute(route, cfg) {
     return { kind: 'claude', trial: route === 'claude-trial', provider: null, rewrite: false }
   }
   const rewrite = route.endsWith('-rewrite')
-  const rawName = rewrite ? route.slice(0, -8) : route
-  const name = rawName === 'zai' ? 'glm' : rawName
+  const name = rewrite ? route.slice(0, -8) : route
   const provider = cfg?.providers?.[name] || null
   return { kind: 'provider', name, provider, rewrite }
 }
@@ -520,9 +399,8 @@ function decide(state, cfg, model, sid, now) {
   const stickyProvider = getSessionProvider(state, cfg, sid)
   if (stickyProvider !== 'claude') return routeLabel(stickyProvider, true)
 
-  if (!cfg.failoverEnabled || !state.failoverSince) return 'claude'
-  const fo = cfg.failoverProvider || 'glm'
-  return now >= state.nextClaudeTry ? 'claude-trial' : routeLabel(fo, true)
+  if (!cfg.failoverEnabled || !state.failoverSince || !cfg.failoverProvider) return 'claude'
+  return now >= state.nextClaudeTry ? 'claude-trial' : routeLabel(cfg.failoverProvider, true)
 }
 
 function onLimited(state, cfg, now) {
@@ -574,6 +452,12 @@ module.exports = {
   realDir,
   sameDir,
   PRESETS,
+  isFormat2,
+  isObj,
+  lowerNames,
+  bareCfg,
+  ANY_ENV,
+  parseShape,
   wireModel,
   resolveToken,
   retryWaitMs,
@@ -582,7 +466,6 @@ module.exports = {
   unresolvedEnv,
   cfgMissingMessage,
   nextFallback,
-  migrateConfig,
   matchProviderByModel,
   ALIAS_SLOTS,
   isClaudeModel,

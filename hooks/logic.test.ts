@@ -2,60 +2,70 @@ import { test } from 'claude-code/testing'
 import {
   buildPanelData,
   compareVersions,
+  elsewhereText,
+  fit,
   foreignConfigDir,
   foreignStatusText,
+  has,
   healthArgv,
-  pingArgv,
-  probeArgv,
-  sessionArgv,
-  parseCfg,
+  healthHints,
+  outdatedText,
   parseHealth,
+  parseLocal,
+  pingArgv,
+  pingText,
+  probeArgv,
   providerAgentSpecs,
-  providerModelForSubagent,
   providerReport,
+  reachedRelay,
+  relayAgent,
   routerIsStale,
   routerScript,
   routerUrl,
+  sessionArgv,
   setupBrief,
   setupScript,
+  spawnedElsewhere,
   startArgv,
   statusText,
   toggleArgv,
+  wireKey,
 } from './logic'
-import { fit } from './panel'
 
 function assert(cond: boolean, msg: string): void {
   if (!cond) throw new Error('assert failed: ' + msg)
 }
 
-const base = { baseUrl: 'https://api.z.ai/api/anthropic', token: 't', model: 'glm-5.3[1m]' }
+const health = (j: object) => parseHealth(JSON.stringify({ ok: true, ...j }))!
 
-test('parseCfg validates both legacy and multi-provider formats', () => {
-  assert(parseCfg(null) === null, 'null rejected')
-  assert(parseCfg({ ...base, token: '' }) === null, 'empty token rejected')
-  assert(parseCfg({ ...base, baseUrl: 'ftp://x' }) === null, 'non-http rejected')
-  const cfg = parseCfg(base)!
-  assert(cfg.port === 8950 && cfg.nodePath === 'node' && cfg.providers.glm === 'glm-5.3[1m]', 'defaults')
-  assert(parseCfg({ ...base, port: 80 })!.port === 8950, 'privileged port refused')
+test('the hook reads only the port and the node path from the config file', () => {
+  assert(parseLocal(null) === null && parseLocal([]) === null, 'not an object')
+  const d = parseLocal({ providers: { x: { token: 't' } } })!
+  assert(d.port === 8950 && d.nodePath === 'node', 'defaults')
+  assert(parseLocal({ port: 80 })!.port === 8950, 'privileged port refused')
+  assert(parseLocal({ port: 9001, nodePath: 'C:/n/node.exe' })!.nodePath === 'C:/n/node.exe', 'node path kept')
+  assert(Object.keys(parseLocal({ port: 9001 })!).sort().join() === 'nodePath,outdated,port', 'nothing about providers')
+  assert(parseLocal({ format: 2 })!.outdated === false, 'format 2 is read')
+  assert(parseLocal({ providers: {} })!.outdated && parseLocal({ format: '2' })!.outdated, 'no "format": 2 is an older config')
+  assert(parseLocal({ format: 2, port: 9001 }, true)!.outdated && parseLocal({ format: 2, port: 9001 }, true)!.port === 9001, 'the older file name: its port only')
+})
 
-  const multi = parseCfg({
-    port: 8960,
-    failover: { provider: 'deepseek' },
-    providers: {
-      glm: { token: 't' },
-      deepseek: { token: 'env:DS_KEY' },
-    },
-  })!
-  assert(multi.failoverProvider === 'deepseek' && multi.providers.deepseek === 'deepseek-chat' && multi.providers.glm === 'glm-5.3[1m]', 'multi-provider with built-in presets parsed')
+test('an older config is pointed out, never routed by guesswork', () => {
+  assert(outdatedText('en').includes('/provider setup upgrade my model-relay config'), 'the prompt UPGRADING.md gives')
+  const hints = healthHints(null, 'zh', true)
+  assert(hints.length === 1 && hints[0] === outdatedText('zh'), 'shown even with no router answering')
+  assert(buildPanelData(null, 8950, true, 'en', 0, true).hints[0] === outdatedText('en'), 'the panel shows it first')
+  assert(buildPanelData(null, 8950, true, 'en', 0).hints.length === 0, 'and only for an older config')
 })
 
 test('router control commands on Windows and POSIX', () => {
-  const cfg = parseCfg({ ...base, port: 9001 })!
+  const cfg = parseLocal({ port: 9001 })!
   assert(routerUrl(cfg) === 'http://127.0.0.1:9001', 'url')
   assert(healthArgv(cfg, 'a b').at(-1) === 'http://127.0.0.1:9001/__health?sid=a%20b', 'health carries the session')
-  const m = sessionArgv(cfg, 's1', 'glm')
-  assert(m.includes('{"sid":"s1","on":"glm"}') && m.at(-1) === 'http://127.0.0.1:9001/__session', 'per-session switch')
-  assert(pingArgv(cfg, 'glm').at(-1) === 'http://127.0.0.1:9001/__ping', 'ping endpoint')
+  const m = sessionArgv(cfg, 's1', 'aaa')
+  assert(m.includes('{"sid":"s1","on":"aaa"}') && m.at(-1) === 'http://127.0.0.1:9001/__session', 'per-session switch')
+  const p = pingArgv(cfg, 'aaa')
+  assert(p.at(-1) === 'http://127.0.0.1:9001/__ping' && Number(p[p.indexOf('-m') + 1]) >= 25, 'ping endpoint, waits longer than one 15 s test plus a launch')
   assert(probeArgv(cfg).at(-1) === 'http://127.0.0.1:9001/__probe', 'probe endpoint')
   assert(routerScript('C:\\x\\claude-relay') === 'C:/x/claude-relay/router/router.js', 'script from root')
   assert(routerScript('C:/x/claude-relay/.claude-plugin') === 'C:/x/claude-relay/router/router.js', 'script from manifest dir')
@@ -65,68 +75,103 @@ test('router control commands on Windows and POSIX', () => {
   assert(sPosix[0] === 'sh' && (sPosix[2] ?? '').includes('nohup'), 'posix nohup start')
 })
 
-test('health, panel data, and status texts (zh and en)', () => {
+test('health, panel data, and status texts (zh and en) come from the router alone', () => {
   assert(parseHealth('nope') === null && parseHealth('{"ok":false}') === null, 'bad health')
-  const h = parseHealth('{"ok":true,"session":"claude","failoverSince":5,"nextClaudeTry":600005,"sessionsOnCustom":3,"stats":{"glm":{"status":200,"ms":1200,"at":10}}}')!
-  assert(h.session === 'claude' && h.failoverSince === 5 && h.sessionsOnCustom === 3 && h.stats?.glm?.ms === 1200, 'parsed with stats')
-  assert(statusText(h, 'glm', false).includes('額度用完'), 'failover status')
-  assert(statusText({ ...h, failoverSince: 0 }, 'glm', false) === '主線：Claude', 'normal')
-  assert(statusText({ ...h, session: 'glm', failoverSince: 0 }, 'glm', false).includes('固定'), 'sticky session')
-  assert(statusText({ ...h, session: 'glm', failoverSince: 0 }, 'glm', false, null, 'en').includes('pinned'), 'sticky session en')
+  const h = health({
+    session: 'claude', failoverSince: 5, nextClaudeTry: 600005, sessionsOnCustom: 3,
+    providers: { aaa: 'aaa-9' }, aliases: { haiku: 'aaa' }, failoverProvider: 'aaa', failoverChain: ['aaa'],
+    stats: { aaa: { status: 200, ms: 1200, at: 10 } },
+  })
+  assert(h.session === 'claude' && h.failoverSince === 5 && h.sessionsOnCustom === 3 && h.stats?.aaa?.ms === 1200, 'parsed with stats')
+  assert(statusText(h, false).includes('額度用完') && statusText(h, false).includes('aaa-9'), 'failover status names the model')
+  assert(statusText({ ...h, failoverSince: 0 }, false) === '主線：Claude', 'normal')
+  assert(statusText({ ...h, session: 'aaa', failoverSince: 0 }, false).includes('固定'), 'sticky session')
+  assert(statusText({ ...h, session: 'aaa', failoverSince: 0 }, false, 'en').includes('pinned'), 'sticky session en')
   assert(parseHealth('{"ok":true,"mode":"glm"}')!.session === 'claude', 'old router answer reads as claude')
-  assert(statusText(null, 'glm', true).includes('直連'), 'router down, direct')
-  const rep = providerReport(h, 'glm', 5)
-  assert(rep.includes('10 分鐘後') && rep.includes('● /provider claude') && rep.includes('○ /provider glm') && rep.includes('200 · 1.2s') && rep.includes('haiku → glm'), 'structured provider report with latency and alias')
-  const cfg = parseCfg(base)!
-  assert(cfg.aliases.haiku === 'glm', 'default glm alias detected')
-  const pd = buildPanelData(h, cfg, false, 'zh', 5)
-  assert(pd.online && pd.sessionsOnCustom === 3 && pd.stats.glm?.status === 200 && pd.aliases.haiku === 'glm', 'panel snapshot built')
-  assert(fit('1234567890', 6) === '12345…', 'fit truncates long text')
+  assert(statusText(null, true).includes('直連') && !/GLM/i.test(statusText(null, true)), 'router down, direct, no provider named')
+  const rep = providerReport(h, 5)
+  assert(rep.includes('10 分鐘後') && rep.includes('● /provider claude') && rep.includes('○ /provider aaa') && rep.includes('上次 200 · 1.2s') && rep.includes('haiku → aaa'), 'structured provider report with latency and alias')
+  const pd = buildPanelData(h, 8950, false, 'zh', 5)
+  assert(pd.online && pd.sessionsOnCustom === 3 && pd.stats.aaa?.status === 200 && pd.aliases.haiku === 'aaa', 'panel snapshot built')
+  assert(fit('1234567890', 6) === '12345…' && fit('中文字串', 5) === '中文…', 'fit truncates by terminal cells')
+})
+
+test('a router with no usable provider, or no failover chain, is shown as such rather than guessed at', () => {
+  const bare = health({ session: 'claude', providers: {}, failoverProvider: null, failoverChain: [] })
+  assert(bare.failoverProvider === undefined && bare.failoverChain.length === 0 && Object.keys(bare.providers).length === 0, 'null failover provider')
+  const pd = buildPanelData(bare, 8950, false, 'en', 0)
+  assert(pd.failoverProvider === null && pd.failoverChain.length === 0 && Object.keys(pd.aliases).length === 0, 'no default alias or chain')
+  const rep = providerReport(bare, 0, 'en')
+  assert(rep.includes('no provider is usable yet') && rep.includes('nobody to hand over to') && !rep.includes('model-relay:<name>  Spawn'), 'said plainly')
+  assert(statusText({ ...bare, failoverSince: 1 }, false, 'en') === 'Claude limit reached', 'a 429 with nobody to take over')
+  assert(Object.keys(buildPanelData(null, 8950, true, 'zh', 0).providers).length === 0, 'offline: nothing invented')
 })
 
 test('the failover chain leads the panel, and the router reports its switches', () => {
-  const cfg = parseCfg({
-    providers: { glm: { token: 't' }, deepseek: { token: 't' } },
-    failover: { chain: ['ghost', 'deepseek', 'glm'] },
-  })!
-  assert(cfg.failoverProvider === 'deepseek', 'first usable link of the chain leads')
+  const old = health({ session: 'claude' })
+  assert(old.switches === undefined && buildPanelData(old, 8950, false, 'zh', 0).switches === null, 'an older router shows no switches')
 
-  const old = parseHealth('{"ok":true,"session":"claude"}')!
-  assert(old.switches === undefined && buildPanelData(old, cfg, false, 'zh', 0).switches === null, 'an older router shows no switches')
-
-  const h = parseHealth('{"ok":true,"session":"claude","failoverChain":["Deepseek","glm"],"config":{"failoverEnabled":true,"retryEnabled":false,"proxyEnabled":true},"proxy":{"enabled":true,"certificate":true}}')!
-  const pd = buildPanelData(h, cfg, false, 'zh', 0)
-  assert(pd.failoverChain.join() === 'deepseek,glm', 'chain from the router, lower-cased')
+  const h = health({ session: 'claude', failoverChain: ['Deepseek', 'aaa'], config: { failoverEnabled: true, retryEnabled: false, proxyEnabled: true }, proxy: { enabled: true, certificate: true } })
+  const pd = buildPanelData(h, 8950, false, 'zh', 0)
+  assert(pd.failoverChain.join() === 'deepseek,aaa', 'chain from the router, lower-cased')
   assert(pd.switches?.failover === true && pd.switches.retry === false && pd.switches.proxy === true && pd.switches.proxyReady === true, 'switches as the router reports them')
-  assert(parseHealth('{"ok":true,"config":{"failoverEnabled":true}}')!.switches === undefined, 'a partial report is ignored')
+  assert(health({ config: { failoverEnabled: true } }).switches === undefined, 'a partial report is ignored')
+})
+
+test('a test result is kept apart from the last request, and what the person should fix is listed', () => {
+  const h = health({
+    providers: { aaa: 'aaa-9', bbb: 'bbb-1' },
+    stats: { aaa: { status: 200, ms: 45000, at: 9 } },
+    ping: { aaa: { verdict: 'ok', status: 200, firstByteMs: 320, at: 10, detail: '' }, bbb: { verdict: 'key', status: 401, firstByteMs: 80, at: 10, detail: 'invalid key' } },
+    unresolved: [{ provider: 'ccc', env: 'CCC_KEY' }],
+  })
+  assert(pingText(h.ping?.aaa, 'en')?.text === 'test ok 320ms' && pingText(h.ping?.bbb, 'zh')?.text === '測試: 金鑰被拒', 'verdict in words')
+  assert(pingText({ verdict: 'error', status: 500, firstByteMs: 1, at: 1, detail: '' }, 'en')?.text === 'test: HTTP 500', 'unknown verdict shows the status')
+  const rep = providerReport(h, 0, 'en')
+  assert(rep.includes('last 200 · 45.0s · test ok 320ms'), 'a 45 s reply and a 320 ms first byte, side by side')
+  const hints = healthHints(h, 'en')
+  assert(hints.length === 1 && hints[0]!.includes('CCC_KEY'), 'skipped provider')
+  assert(buildPanelData(h, 8950, false, 'zh', 0).hints.length === 1, 'the panel gets it too')
 })
 
 test('/provider setup hands Claude the CLI path and the safety rules', () => {
   const b = setupBrief('C:/p/tools/setup.mjs', 'node', 'add deepseek', false, 'zh')
   assert(b.includes('"node" "C:/p/tools/setup.mjs"') && b.includes('add deepseek') && b.includes('繁體中文'), 'path, goal and language')
-  assert(b.includes('presets') && !b.includes('already exists'), 'no config yet starts from presets')
+  assert(b.includes('presets') && b.includes('--model') && b.includes('there is no default') && !b.includes('already exists'), 'no config yet: presets, and the model is asked for')
   assert(b.includes('Never ask me to paste an API key') && b.includes('without --go first') && b.includes('settings.json'), 'safety rules')
+  assert(b.includes('"outdated"') && b.includes('C:/p/UPGRADING.md'), 'an older config is upgraded by the guide next to the CLI')
   const en = setupBrief('/p/tools/setup.mjs', '/usr/bin/node', '', true, 'en')
-  assert(en.includes('already exists') && en.includes('ask me which provider') && en.includes('Reply in English'), 'existing config, no goal, english')
+  assert(en.includes('already exists') && en.includes('doctor --json') && en.includes('ask me which provider') && en.includes('Reply in English'), 'existing config, no goal, english')
 })
 
-test('switches are changed through the setup CLI', () => {
-  const cfg = parseCfg({ ...base, nodePath: 'node' })!
-  assert(setupScript('C:/mods/custom-agent/.claude-plugin') === 'C:/mods/custom-agent/tools/setup.mjs', 'manifest dir with forward slashes')
-  const script = setupScript('C:\\mods\\custom-agent\\.claude-plugin')
-  assert(script === 'C:/mods/custom-agent/tools/setup.mjs', 'script path from the plugin root')
+test('switches are changed through the setup CLI, and each provider gets a model-relay agent', () => {
+  const cfg = parseLocal({ nodePath: 'node' })!
+  assert(setupScript('C:/mods/x/.claude-plugin') === 'C:/mods/x/tools/setup.mjs', 'manifest dir with forward slashes')
+  const script = setupScript('C:\\mods\\x\\.claude-plugin')
+  assert(script === 'C:/mods/x/tools/setup.mjs', 'script path from the plugin root')
   assert(toggleArgv(cfg, script, 'failover', false).join(' ') === `node ${script} set failover.enabled off`, 'failover')
   assert(toggleArgv(cfg, script, 'retry', true).join(' ') === `node ${script} set retry.enabled on`, 'retry')
   assert(toggleArgv(cfg, script, 'proxy', true).join(' ') === `node ${script} proxy enable --go`, 'proxy on')
   assert(toggleArgv(cfg, script, 'proxy', false).join(' ') === `node ${script} proxy disable --go`, 'proxy off')
 
-  const multi = parseCfg({
-    providers: { glm: { token: 't' }, gemini: { token: 'g' } },
-  })!
-  const specs = providerAgentSpecs(multi)
-  assert(specs.length === 2 && specs[0]?.name === 'glm' && specs[0]?.model === 'glm-5.3[1m]' && specs[1]?.name === 'gemini' && specs[1]?.model === 'gemini-4-argon', 'providerAgentSpecs builds one spec per provider')
-  assert(providerModelForSubagent('model-relay:gemini', multi) === 'gemini-4-argon', 'locks model-relay:gemini to gemini-4-argon')
-  assert(providerModelForSubagent('Explore', multi) === null, 'leaves other subagent types untouched')
+  const providers = { aaa: 'aaa-9[1m]', bbb: 'bbb-1' }
+  const specs = providerAgentSpecs(providers)
+  assert(specs.length === 2 && specs[0]?.name === 'aaa' && specs[0]?.model === 'aaa-9[1m]' && specs[1]?.model === 'bbb-1', 'one spec per provider')
+  assert(relayAgent('model-relay:BBB', providers)?.model === 'bbb-1', 'locks model-relay:<name> to its model')
+  assert(relayAgent('Explore', providers) === null && relayAgent('model-relay:ghost', providers) === null, 'other types and unknown names untouched')
+  assert(relayAgent('model-relay:constructor', providers) === null && !has(providers, 'toString'), 'no prototype names')
+})
+
+test('a model-relay subagent that Claude Code ran on another model, or that never reached the relay, is noticed', () => {
+  assert(wireKey('GLM-5.3[1m]') === 'glm-5.3', 'the key the router uses')
+  assert(!spawnedElsewhere('aaa-9[1m]', 'aaa-9') && !spawnedElsewhere('aaa-9', undefined), 'the same model, or no answer')
+  assert(spawnedElsewhere('aaa-9[1m]', 'claude-sonnet-5-5'), 'swapped for another model')
+  assert(elsewhereText('aaa', 'aaa-9', 'claude-sonnet-5-5', 'en').includes('availableModels'), 'says the usual cause')
+  const h = (seen?: object) => health(seen ? { seenModels: seen } : {})
+  assert(reachedRelay(h({ 'aaa-9': 5000 }), 'aaa-9[1m]', 4000) === true, 'reached after the spawn')
+  assert(reachedRelay(h({ 'aaa-9': 1000 }), 'aaa-9', 4000) === false, 'only before the spawn')
+  assert(reachedRelay(h({}), 'aaa-9', 4000) === false, 'never')
+  assert(reachedRelay(h(), 'aaa-9', 4000) === null && reachedRelay(null, 'aaa-9', 4000) === null, 'an older or absent router cannot tell')
 })
 
 test('a router serving another config dir is not ours; one that reports no dir is an older relay and is', () => {
@@ -142,13 +187,12 @@ test('a router serving another config dir is not ours; one that reports no dir i
 
 test('a router left running by an older plugin is stale; a current or newer one is not', () => {
   assert(compareVersions('0.6.0', '0.6.1') === -1 && compareVersions('0.10.0', '0.9.9') === 1 && compareVersions('0.6', '0.6.0') === 0, 'numeric, part by part')
-  const h = (j: object) => parseHealth(JSON.stringify({ ok: true, ...j }))
-  assert(routerIsStale(h({}), '0.6.1'), 'no configDir: from before 0.6.1')
-  assert(routerIsStale(h({ configDir: '/d', version: '0.6.1' }), '0.6.2'), 'a lower version')
-  assert(!routerIsStale(h({ configDir: '/d', version: '0.6.1' }), '0.6.1'), 'the same version')
-  assert(!routerIsStale(h({ configDir: '/d', version: '0.7.0' }), '0.6.1'), 'a newer router is left alone')
-  assert(!routerIsStale(h({ configDir: '/d' }), '0.6.1'), 'a configDir without a version is not guessed at')
+  assert(routerIsStale(health({}), '0.6.1'), 'no configDir: 0.6.0 or earlier')
+  assert(routerIsStale(health({ configDir: '/d', version: '0.6.1' }), '0.6.2'), 'a lower version')
+  assert(!routerIsStale(health({ configDir: '/d', version: '0.6.1' }), '0.6.1'), 'the same version')
+  assert(!routerIsStale(health({ configDir: '/d', version: '0.7.0' }), '0.6.1'), 'a newer router is left alone')
+  assert(!routerIsStale(health({ configDir: '/d' }), '0.6.1'), 'a configDir without a version is not guessed at')
   assert(!routerIsStale(null, '0.6.1'), 'no router is not stale')
-  const p = h({ configDir: '/d', version: '0.6.1', inflight: 2 })!
+  const p = health({ configDir: '/d', version: '0.6.1', inflight: 2 })
   assert(p.version === '0.6.1' && p.inflight === 2, 'version and inflight are parsed')
 })

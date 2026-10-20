@@ -42,7 +42,7 @@ const run = (dir, ...args) => runWith({}, dir, ...args)
 async function fixture(t, settings) {
   const port = await freePort()
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'relay-setup-'))
-  fs.writeFileSync(path.join(dir, 'model-relay.json'), JSON.stringify({ port, providers: { glm: { baseUrl: 'http://127.0.0.1:9', token: 'dummy', model: 'glm-5.3' } } }))
+  fs.writeFileSync(path.join(dir, 'model-relay.json'), JSON.stringify({ format: 2, port, providers: { glm: { baseUrl: 'http://127.0.0.1:9', token: 'dummy', model: 'glm-5.3' } } }))
   const settingsPath = path.join(dir, 'settings.json')
   fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2))
   t.after(async () => {
@@ -80,7 +80,7 @@ test('proxy enable is a dry run until --go, then switches modes and keeps unrela
   assert.ok(after.env.NODE_EXTRA_CA_CERTS.endsWith('model-relay-pki/ca.pem'))
   assert.strictEqual(after.env.NO_PROXY, '127.0.0.1,localhost,::1')
   assert.strictEqual(f.proxyOn(), true, 'enable opens the router to proxy connections')
-  assert.deepStrictEqual(JSON.parse(fs.readFileSync(`${f.settingsPath}.relay-backup`, 'utf8')), fixed, 'the previous file is kept')
+  assert.deepStrictEqual(JSON.parse(fs.readFileSync(`${f.settingsPath}.model-relay-backup`, 'utf8')), fixed, 'the previous file is kept')
 
   const status = run(f.dir, 'proxy', 'status')
   assert.match(status.out, /HTTPS proxy \(Remote Control works\)/)

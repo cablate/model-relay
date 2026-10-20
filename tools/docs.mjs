@@ -10,7 +10,7 @@ import { pathToFileURL } from 'node:url'
 
 const ZH = '.zh-TW.md'
 // Keep a Changelog 的分類與繁中名稱；繁中 CHANGELOG 用右邊的名稱
-const CATEGORIES = { Added: '新增', Changed: '變更', Deprecated: '棄用', Removed: '移除', Fixed: '修正', Security: '安全性' }
+const CATEGORIES = { Added: '新增', Changed: '變更', Deprecated: '棄用', Removed: '移除', Fixed: '修正', Security: '安全性', 'Not covered': '未涵蓋' }
 const UNRELEASED = { en: 'Unreleased', zh: '未發布' }
 
 // ---------- 解析 ----------

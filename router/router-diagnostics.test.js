@@ -41,7 +41,7 @@ async function waitHealth(port) {
 async function start(t, providers, extra = {}, envOver = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'relay-diag-'))
   const port = await freePort()
-  fs.writeFileSync(path.join(dir, 'model-relay.json'), JSON.stringify({ port, providers, ...extra }))
+  fs.writeFileSync(path.join(dir, 'model-relay.json'), JSON.stringify({ format: 2, port, providers, ...extra }))
   const env = { ...process.env }
   delete env.RELAY_DIAG_KEY
   Object.assign(env, envOver)
@@ -90,7 +90,7 @@ test('doctor advises a restart only when its own shell has the variable the rout
   assert.match(has, /started without RELAY_DIAG_KEY.*this shell has it/)
   assert.ok(!has.includes('shell-secret'))
   const lacks = doctor(r.dir, { RELAY_DIAG_KEY: '' })
-  assert.match(lacks, /RELAY_DIAG_KEY is unset here too/)
+  assert.match(lacks, /provider gemini is skipped: its key variable RELAY_DIAG_KEY is unset in this shell/)
   assert.ok(!/start(ed)? Claude Code from this shell/.test(lacks))
 })
 
