@@ -9,7 +9,7 @@
     {
       "name": "model-relay",
       "source": "./",
-      "description": "Route Claude Code conversations and subagents across Claude, GLM, Gemini, DeepSeek, or any Anthropic-compatible provider with cache-safe sticky sessions."
+      "description": "Route Claude Code conversations and subagents between Claude and any Anthropic-compatible provider with cache-safe sticky sessions."
     }
   ]
 }

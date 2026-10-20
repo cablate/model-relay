@@ -70,14 +70,14 @@
     <g class="lane2">
       <rect x="292" y="104" width="168" height="64" rx="14" fill="#ffffff" stroke="#6366f1" stroke-width="2"/>
       <circle cx="314" cy="128" r="5" fill="#6366f1"/>
-      <text x="328" y="133" class="mono" font-size="14" font-weight="700" fill="#0f172a">GLM 5.3 [1m]</text>
+      <text x="328" y="133" class="mono" font-size="14" font-weight="700" fill="#0f172a">備援模型 [1m]</text>
       <text x="310" y="154" class="sans" font-size="11" fill="#4f46e5">429 備援・Haiku 子代理</text>
     </g>
 
     <g class="lane3">
       <rect x="292" y="194" width="168" height="64" rx="14" fill="#ffffff" stroke="#059669" stroke-width="2"/>
       <circle cx="314" cy="218" r="5" fill="#059669"/>
-      <text x="328" y="223" class="mono" font-size="14" font-weight="700" fill="#0f172a">Gemini 4</text>
+      <text x="328" y="223" class="mono" font-size="14" font-weight="700" fill="#0f172a">快速模型</text>
       <text x="310" y="244" class="sans" font-size="11" fill="#047857">單視窗固定・200 · 1.8s</text>
     </g>
   </g>
