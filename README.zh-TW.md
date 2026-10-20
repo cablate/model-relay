@@ -194,6 +194,7 @@ node tools/setup.mjs rc
 | `/provider claude` | 將目前這個對話切回 Claude（下一輪會重建整段對話快取） |
 | `/provider setup [goal]` | 讓 Claude 用設定工具帶你完成設定，金鑰不會進對話 |
 | `/provider init` · `/provider doctor [--ping]` | 首次設定與健康檢查；不論在哪個資料夾、有沒有設定檔都能用 |
+| `/provider restart` | 重啟轉發站，讓它跑已安裝外掛的程式。`claude plugin update` 之後，外掛會在轉發站沒有請求進行中時自動做這件事；0.6.1 之前的轉發站無法回報這件事，所以改在狀態列提示你執行 |
 | `/provider ping` | 即時測試所有已設定供應商的連線狀態與回應延遲 |
 | `/provider probe` | 重置 429 冷卻計時，讓下一個新對話立即嘗試使用 Claude |
 | `/provider alias [haiku\|sonnet\|opus] [<name>\|claude]` | 查看或設定 Claude 模型別名要走哪個供應商（同步更新 `settings.json` 與 `matchModels`） |
@@ -227,6 +228,7 @@ node tools/setup.mjs rc
 | `/provider` 顯示設定檔不存在或格式錯誤 | 執行 `/provider doctor`（在外掛安裝目錄也可用 `node tools/setup.mjs doctor`）檢查 JSON 語法，並確認 `env:VAR` 環境變數是否已在當前 shell 匯出 |
 | 狀態列顯示轉發站離線（`Relay offline: connected directly to Claude`） | `ANTHROPIC_BASE_URL` 模式下，外掛偵測到轉發站未回應時會自動退回直連確保對話不中斷；代理模式沒有這個退路，轉發站重新啟動前 Claude Code 連不上。可執行 `/provider doctor` 或查看 `~/.claude/custom-agent-router.log`（連接埠被其他程序或其他設定目錄的轉發站佔用時，轉發站會把原因寫在這個日誌並結束） |
 | Remote Control 說只能經由 `api.anthropic.com` 使用 | Claude Code 還把轉發站當成 API 位址；執行 `node tools/setup.mjs proxy enable --go` 後開新的對話 |
+| `proxy enable` 因為 `NODE_EXTRA_CA_CERTS` 已有設定而拒絕 | 你在用的某樣東西（常見是會檢查 TLS 的公司網路）已經依賴那張憑證，而 Claude Code 這裡只接受一個檔案，開代理模式會讓它不再信任你原本的憑證。目前還不能兩者並用；設定沒有被改動 |
 | 開啟代理模式後 Claude Code 連不上 | 多半是轉發站沒在跑：執行 `node tools/setup.mjs proxy status` 查看，用 `node tools/setup.mjs rc` 啟動，或用 `node tools/setup.mjs proxy disable --go` 退回 |
 | 切到第三方供應商後工具消失或無法呼叫工具 | 確認該供應商在 `model-relay.json` 中設有 `"stripToolSearch": true` |
 | `model-relay:<name>` 子代理實際跑在 Claude 而不是該供應商 | 某一層設定（使用者、專案、local 或 managed）的 `availableModels` 沒有列出該供應商的模型，Claude Code 會改用 `CLAUDE_CODE_SUBAGENT_MODEL` 或主線模型；把模型 ID 依設定原樣加進去。`node tools/setup.mjs doctor` 會檢查 `~/.claude/settings.json` |
@@ -242,7 +244,10 @@ node tools/setup.mjs rc
 node tools/check.mjs
 claude plugin validate .
 claude plugin test .
+node tools/smoke.mjs   # 用真實的 Claude Code 經過這份原始碼的轉發站送一次請求；加 --provider <name> 再測一個供應商
 ```
+
+`tools/smoke.mjs` 需要已登入的 `claude`，所以 CI 不會跑。發版前與 Claude Code 更新後各跑一次。
 
 架構說明與發版流程請見 [CONTRIBUTING.md](CONTRIBUTING.md)。
 

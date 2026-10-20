@@ -30,10 +30,14 @@ function health(port) {
   })
 }
 
-function run(dir, ...args) {
-  const r = spawnSync(process.execPath, [setup, ...args], { encoding: 'utf8', env: { ...process.env, CLAUDE_CONFIG_DIR: dir } })
+// The CLI is run without the caller's NODE_EXTRA_CA_CERTS (a Claude Code session in proxy mode carries one); runWith adds env back
+function runWith(env, dir, ...args) {
+  const base = { ...process.env, CLAUDE_CONFIG_DIR: dir }
+  delete base.NODE_EXTRA_CA_CERTS
+  const r = spawnSync(process.execPath, [setup, ...args], { encoding: 'utf8', env: { ...base, ...env } })
   return { code: r.status, out: `${r.stdout}${r.stderr}` }
 }
+const run = (dir, ...args) => runWith({}, dir, ...args)
 
 async function fixture(t, settings) {
   const port = await freePort()
@@ -107,4 +111,47 @@ test('proxy enable refuses settings it does not own', async (t) => {
   assert.strictEqual(b.code, 1)
   assert.match(b.out, /not this relay/)
   assert.strictEqual(g.read().env.ANTHROPIC_BASE_URL, 'https://gateway.example')
+})
+
+test('proxy enable refuses to replace a NODE_EXTRA_CA_CERTS someone already relies on, from settings.json or the environment', async (t) => {
+  for (const [settings, env, where] of [
+    [{ env: { NODE_EXTRA_CA_CERTS: '/etc/corp/ca.pem' } }, {}, /settings\.json env already sets NODE_EXTRA_CA_CERTS=\/etc\/corp\/ca\.pem/],
+    [{ env: {} }, { NODE_EXTRA_CA_CERTS: '/etc/corp/ca.pem' }, /your environment already sets NODE_EXTRA_CA_CERTS=\/etc\/corp\/ca\.pem/],
+  ]) {
+    const f = await fixture(t, settings)
+    const before = fs.readFileSync(f.settingsPath, 'utf8')
+    for (const args of [['proxy', 'enable'], ['proxy', 'enable', '--go'], ['proxy', 'renew', '--go']]) {
+      const r = runWith(env, f.dir, ...args)
+      assert.strictEqual(r.code, 1, r.out)
+      assert.match(r.out, where)
+      assert.match(r.out, /Nothing was changed/)
+    }
+    assert.strictEqual(fs.readFileSync(f.settingsPath, 'utf8'), before, 'settings.json is byte-identical')
+    assert.ok(!fs.existsSync(path.join(f.dir, 'model-relay-pki')), 'no certificate was created')
+    assert.strictEqual(f.proxyOn(), false)
+  }
+})
+
+test('proxy renew in proxy mode accepts the relay\'s own NODE_EXTRA_CA_CERTS, from settings.json and the environment', async (t) => {
+  const f = await fixture(t, {})
+  const url = `http://127.0.0.1:${f.port}`
+  fs.writeFileSync(f.settingsPath, JSON.stringify({ env: { ANTHROPIC_BASE_URL: url } }))
+  const on = run(f.dir, 'proxy', 'enable', '--go')
+  assert.strictEqual(on.code, 0, on.out)
+  const ca = f.read().env.NODE_EXTRA_CA_CERTS
+  const r = runWith({ NODE_EXTRA_CA_CERTS: ca }, f.dir, 'proxy', 'renew', '--go')
+  assert.strictEqual(r.code, 0, r.out)
+})
+
+test('the relay\'s own CA path spelled differently, or a shell CA already overridden by settings.json, does not block proxy renew', async (t) => {
+  const f = await fixture(t, {})
+  fs.writeFileSync(f.settingsPath, JSON.stringify({ env: { ANTHROPIC_BASE_URL: `http://127.0.0.1:${f.port}` } }))
+  assert.strictEqual(run(f.dir, 'proxy', 'enable', '--go').code, 0)
+  const ca = f.read().env.NODE_EXTRA_CA_CERTS
+  if (process.platform === 'win32') {
+    const r = runWith({ NODE_EXTRA_CA_CERTS: ca.replace(/\//g, '\\').toUpperCase() }, f.dir, 'proxy', 'renew', '--go')
+    assert.strictEqual(r.code, 0, `drive-letter case and backslashes: ${r.out}`)
+  }
+  const o = runWith({ NODE_EXTRA_CA_CERTS: '/etc/corp/ca.pem' }, f.dir, 'proxy', 'renew', '--go')
+  assert.strictEqual(o.code, 0, `settings.json already holds the relay CA: ${o.out}`)
 })

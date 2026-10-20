@@ -1,6 +1,7 @@
 import { test } from 'claude-code/testing'
 import {
   buildPanelData,
+  compareVersions,
   foreignConfigDir,
   foreignStatusText,
   healthArgv,
@@ -12,6 +13,7 @@ import {
   providerAgentSpecs,
   providerModelForSubagent,
   providerReport,
+  routerIsStale,
   routerScript,
   routerUrl,
   setupBrief,
@@ -136,4 +138,17 @@ test('a router serving another config dir is not ours; one that reports no dir i
   assert(foreignConfigDir(parseHealth('{"ok":true}'), '/any', false) === null, 'older relay without configDir stays ours')
   assert(foreignConfigDir(null, '/any', false) === null, 'no answer is not foreign')
   assert(foreignStatusText('/other/.claude', 'en').includes('/other/.claude'), 'the status names the other dir')
+})
+
+test('a router left running by an older plugin is stale; a current or newer one is not', () => {
+  assert(compareVersions('0.6.0', '0.6.1') === -1 && compareVersions('0.10.0', '0.9.9') === 1 && compareVersions('0.6', '0.6.0') === 0, 'numeric, part by part')
+  const h = (j: object) => parseHealth(JSON.stringify({ ok: true, ...j }))
+  assert(routerIsStale(h({}), '0.6.1'), 'no configDir: from before 0.6.1')
+  assert(routerIsStale(h({ configDir: '/d', version: '0.6.1' }), '0.6.2'), 'a lower version')
+  assert(!routerIsStale(h({ configDir: '/d', version: '0.6.1' }), '0.6.1'), 'the same version')
+  assert(!routerIsStale(h({ configDir: '/d', version: '0.7.0' }), '0.6.1'), 'a newer router is left alone')
+  assert(!routerIsStale(h({ configDir: '/d' }), '0.6.1'), 'a configDir without a version is not guessed at')
+  assert(!routerIsStale(null, '0.6.1'), 'no router is not stale')
+  const p = h({ configDir: '/d', version: '0.6.1', inflight: 2 })!
+  assert(p.version === '0.6.1' && p.inflight === 2, 'version and inflight are parsed')
 })

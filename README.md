@@ -194,6 +194,7 @@ Configuration lives in `~/.claude/model-relay.json` (or legacy `~/.claude/custom
 | `/provider claude` | Switch the current conversation back to Claude (rebuilds prompt cache on next turn) |
 | `/provider setup [goal]` | Let Claude walk you through setup with the setup tool; keys stay out of the chat |
 | `/provider init` · `/provider doctor [--ping]` | First-run setup and health check; work from any folder, with or without a config file |
+| `/provider restart` | Restart the relay so it runs the installed plugin's code. After `claude plugin update` the plugin does this by itself once the relay answers no request; a relay from before 0.6.1 cannot report that, so the status line asks you to run it |
 | `/provider ping` | Probe live latency and HTTP status across all configured providers |
 | `/provider probe` | Reset the 429 cooldown timer so the next new session tries Claude immediately |
 | `/provider alias [haiku\|sonnet\|opus] [<name>\|claude]` | Inspect or point a Claude model alias at a provider (updates both `settings.json` and `matchModels`) |
@@ -227,6 +228,7 @@ Configuration lives in `~/.claude/model-relay.json` (or legacy `~/.claude/custom
 | `/provider` says config is missing or invalid | Run `/provider doctor` (or `node tools/setup.mjs doctor` from the install directory) to verify JSON syntax and check if any `env:VAR` variables are unset in your shell |
 | Status bar shows `Relay offline: connected directly to Claude` | In `ANTHROPIC_BASE_URL` mode the plugin bypassed a stopped router so your chat keeps working. In proxy mode there is no such bypass: Claude Code cannot connect until the router is restarted. Run `/provider doctor` or check `~/.claude/custom-agent-router.log` (a router that finds its port taken by another process or another config directory logs that there and exits) |
 | Remote Control says it is only available via `api.anthropic.com` | Claude Code still uses the relay as its API address; run `node tools/setup.mjs proxy enable --go` and start a new session |
+| `proxy enable` refuses because `NODE_EXTRA_CA_CERTS` is already set | Something you use (often a company network that inspects TLS) already relies on that certificate, and Claude Code accepts only one file there, so proxy mode would make it stop trusting yours. Remote Control through the relay cannot be combined with it yet; nothing was changed |
 | Claude Code cannot connect after enabling proxy mode | The router is probably down: run `node tools/setup.mjs proxy status`, start it with `node tools/setup.mjs rc`, or go back with `node tools/setup.mjs proxy disable --go` |
 | Tools are missing on a third-party provider | Set `"stripToolSearch": true` on that provider in `model-relay.json` so `ToolSearch` does not hide other tools |
 | A `model-relay:<name>` subagent runs on Claude instead of the provider | An `availableModels` list (user, project, local or managed settings) does not include the provider's model, so Claude Code runs the subagent on `CLAUDE_CODE_SUBAGENT_MODEL` or the parent's model; add the model ID exactly as configured. `node tools/setup.mjs doctor` checks `~/.claude/settings.json` |
@@ -242,7 +244,10 @@ Configuration lives in `~/.claude/model-relay.json` (or legacy `~/.claude/custom
 node tools/check.mjs
 claude plugin validate .
 claude plugin test .
+node tools/smoke.mjs   # one real Claude Code request through this checkout's router; add --provider <name> for a provider
 ```
+
+`tools/smoke.mjs` needs a logged-in `claude`, so CI does not run it. Run it before a release and after a Claude Code update.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for architecture and release steps.
 

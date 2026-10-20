@@ -708,6 +708,78 @@ function setProxyEnabled(on) {
   return before
 }
 
+// -1, 0 or 1 for dotted numeric versions; a missing part counts as 0 (same rule as the hook's compareVersions)
+function compareVersions(a, b) {
+  const pa = String(a).split('.').map((n) => parseInt(n, 10) || 0)
+  const pb = String(b).split('.').map((n) => parseInt(n, 10) || 0)
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+    const d = (pa[i] ?? 0) - (pb[i] ?? 0)
+    if (d !== 0) return d < 0 ? -1 : 1
+  }
+  return 0
+}
+const pluginVersion = () => {
+  try {
+    return String(JSON.parse(fs.readFileSync(path.join(root, '.claude-plugin', 'plugin.json'), 'utf8')).version || '')
+  } catch {
+    return ''
+  }
+}
+
+// restart [--if-stale] [--if-idle]: stop this config dir's router and start the one shipped with this copy of the tool.
+// --if-stale: only when the router runs older code (no configDir, or a lower version); a newer one is left alone.
+// --if-idle: only when it answers no request and holds no tunnel; a router from before 0.6.1 cannot say, so it is never
+// idle and only a plain "restart" (a person asking) replaces it. Exit codes: 0 restarted or nothing to do, 1 failed or
+// refused, 3 busy or unknown (nothing changed).
+if (cmd === 'restart') {
+  const port = relayPort()
+  const h = await fetchHealth(port)
+  if (h && !(h.ok === true && Number.isInteger(h.pid) && h.pid > 1)) {
+    console.error(`Refusing to restart: something answers on 127.0.0.1:${port} but not as a model-relay router. Nothing was changed.`)
+    process.exit(1)
+  }
+  if (!h) {
+    const up = await ensureRouter(port)
+    console.log(up ? `No router was running on ${port}; started one.` : `No router was running on ${port}, and it did not start; see ${path.join(cfgDir, 'custom-agent-router.log')}.`)
+    process.exit(up ? 0 : 1)
+  }
+  const foreign = foreignRouter(h, port)
+  if (foreign) {
+    console.error(`Refusing to restart: ${foreign} Nothing was changed.`)
+    process.exit(1)
+  }
+  const mine = pluginVersion()
+  const stale = olderRouter(h) || Boolean(h.version && mine && compareVersions(h.version, mine) < 0)
+  if (hasFlag('--if-stale') && !stale) {
+    console.log(`The router (pid ${h.pid}) already runs ${h.version || 'this'} code; not restarted.`)
+    process.exit(0)
+  }
+  if (hasFlag('--if-idle')) {
+    // A long reply logs only when it starts, and a router without configDir may even serve another config dir, so an
+    // older router's log says nothing safe about whether killing it cuts someone off
+    const busy = typeof h.inflight !== 'number'
+      ? 'it is older than 0.6.1 and cannot report requests in flight'
+      : h.inflight > 0 || (h.tunnels ?? 0) > 0 ? `${h.inflight} request(s) in flight, ${h.tunnels ?? 0} tunnel(s) open` : ''
+    if (busy) {
+      console.log(`The router (pid ${h.pid}) may be busy (${busy}); not restarted. Run "restart" without --if-idle to restart it anyway.`)
+      process.exit(3)
+    }
+  }
+  console.log(`Restarting the router (pid ${h.pid}${h.version ? `, ${h.version}` : ', older than 0.6.1'}) to run ${mine || 'this'} code; anything in flight through it is cut off.`)
+  try {
+    process.kill(h.pid)
+  } catch {}
+  for (let i = 0; i < 25 && (await fetchHealth(port)); i++) await sleep(200)
+  const up = await ensureRouter(port)
+  const now = up ? await fetchHealth(port) : null
+  if (now && now.pid === h.pid) {
+    console.error(`The router (pid ${h.pid}) did not stop, so it still runs the old code. Stop that process yourself, then run "restart" again.`)
+    process.exit(1)
+  }
+  console.log(up ? `✓ restarted: pid ${now?.pid}${now?.version ? `, ${now.version}` : ''}` : `The router did not start again; see ${path.join(cfgDir, 'custom-agent-router.log')}.`)
+  process.exit(up ? 0 : 1)
+}
+
 const fwd = (p) => p.replace(/\\/g, '/')
 const day = (ms) => (ms ? new Date(ms).toISOString().slice(0, 10) : 'n/a')
 
@@ -757,6 +829,20 @@ if (cmd === 'proxy') {
     if (foreign) {
       console.error(`Refusing to ${sub}: ${foreign} Nothing was changed.`)
       process.exit(1)
+    }
+    // NODE_EXTRA_CA_CERTS names one file, and settings.json env wins over the shell's, so proxy mode would make Claude Code
+    // stop trusting a certificate someone already relies on (often a company CA for its TLS-inspecting network)
+    // Compared by real path (drive-letter case, symlinks). When settings.json already holds the relay CA, the shell's
+    // value is already overridden and a renew changes nothing about it
+    const ours = (v) => Boolean(v) && L.sameDir(v, pki.ca)
+    const checks = ours(env.NODE_EXTRA_CA_CERTS)
+      ? []
+      : [['settings.json env', env.NODE_EXTRA_CA_CERTS], ['your environment', process.env.NODE_EXTRA_CA_CERTS]]
+    for (const [where, value] of checks) {
+      if (value && !ours(value)) {
+        console.error(`Refusing to ${sub}: ${where} already sets NODE_EXTRA_CA_CERTS=${value}. Proxy mode points it at ${ca} instead, so Claude Code would stop trusting that certificate (often a company network's). Nothing was changed.`)
+        process.exit(1)
+      }
     }
     const noProxy = [...new Set([...(env.NO_PROXY || '').split(',').map((s) => s.trim()).filter(Boolean), ...NO_PROXY_LOCAL.split(',')])].join(',')
     const next = { ...settings, env: { ...env, HTTPS_PROXY: url, NODE_EXTRA_CA_CERTS: ca, NO_PROXY: noProxy } }
@@ -966,6 +1052,6 @@ if (cmd === 'rc') {
     }
   }
 } else {
-  console.error('Usage: node tools/setup.mjs [init|presets|add|providers|alias|set|remove|migrate|doctor|check|proxy|rc] [--fix] [--ping] [--go]')
+  console.error('Usage: node tools/setup.mjs [init|presets|add|providers|alias|set|remove|migrate|doctor|check|restart|proxy|rc] [--fix] [--ping] [--go]')
   process.exit(2)
 }

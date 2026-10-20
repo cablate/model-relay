@@ -211,6 +211,8 @@ export interface Health {
   failoverProvider?: string
   failoverChain?: string[]
   configDirs?: string[] // the directory this router serves, as it resolves it and as it was given; absent on older routers
+  version?: string // the plugin version the router's code came from; absent before 0.6.1
+  inflight?: number // model and passthrough requests being answered right now; absent before 0.6.1
   stats?: Record<string, ProviderStat>
   // What the router is doing right now; absent when it predates the switches
   switches?: { failover: boolean; retry: boolean; proxy: boolean; proxyReady: boolean }
@@ -271,6 +273,8 @@ export function parseHealth(stdout: string): Health | null {
       ...(failoverProvider ? { failoverProvider } : {}),
       ...(failoverChain && failoverChain.length > 0 ? { failoverChain } : {}),
       ...(configDirs.length > 0 ? { configDirs } : {}),
+      ...(typeof j.version === 'string' && j.version.length > 0 ? { version: j.version } : {}),
+      ...(typeof j.inflight === 'number' ? { inflight: j.inflight } : {}),
       ...(stats ? { stats } : {}),
       ...(switches ? { switches } : {}),
     }
@@ -327,6 +331,32 @@ export function foreignConfigDir(h: Health | null, myDir: string, isWin = true):
     return isWin ? s.toLowerCase() : s
   }
   return h.configDirs.some((d) => key(d) === key(myDir)) ? null : h.configDirs[0]!
+}
+
+// -1, 0 or 1 for dotted numeric versions; a missing part counts as 0
+export function compareVersions(a: string, b: string): number {
+  const pa = a.split('.').map((n) => parseInt(n, 10) || 0)
+  const pb = b.split('.').map((n) => parseInt(n, 10) || 0)
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+    const d = (pa[i] ?? 0) - (pb[i] ?? 0)
+    if (d !== 0) return d < 0 ? -1 : 1
+  }
+  return 0
+}
+
+// The router runs older code than this plugin: one from before 0.6.1 (no configDir) or a lower version. A newer router is
+// left alone, so two sessions on different plugin versions never take turns restarting it.
+export function routerIsStale(h: Health | null, pluginVersion: string): boolean {
+  if (!h) return false
+  if (!h.configDirs || h.configDirs.length === 0) return true
+  if (!h.version || !pluginVersion) return false
+  return compareVersions(h.version, pluginVersion) < 0
+}
+
+export function staleStatusText(lang: 'zh' | 'en' = 'zh'): string {
+  return lang === 'en'
+    ? 'The relay runs older code; run /provider restart when no reply is in progress'
+    : '轉發站還在跑舊版程式；沒有回覆進行中時執行 /provider restart 更新'
 }
 
 export function foreignStatusText(dir: string, lang: 'zh' | 'en' = 'zh'): string {
@@ -436,6 +466,9 @@ export function providerReport(h: Health | null, modelOrCfg: string | RelayCfg, 
     en
       ? '  · /provider setup [goal]               Let Claude walk you through setup (e.g. /provider setup add deepseek)'
       : '  · /provider setup [想要的設定]         讓 Claude 帶你設定（例：/provider setup 加上 deepseek）',
+    en
+      ? '  · /provider restart                    Restart the relay so it runs this plugin version'
+      : '  · /provider restart                    重啟轉發站，讓它跑這個外掛版本的程式',
     en
       ? '  · /provider alias [haiku <name|claude>] View or point a Claude model alias (e.g. /provider alias haiku glm)'
       : '  · /provider alias [haiku <name|claude>] 查看或設定別名分流（例：/provider alias haiku glm）',

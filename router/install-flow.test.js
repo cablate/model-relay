@@ -64,7 +64,9 @@ function startRouter(t, dir) {
 }
 
 const setup = (dir, ...args) => {
-  const r = spawnSync(process.execPath, [SETUP, ...args], { encoding: 'utf8', env: { ...process.env, CLAUDE_CONFIG_DIR: dir } })
+  const env = { ...process.env, CLAUDE_CONFIG_DIR: dir }
+  delete env.NODE_EXTRA_CA_CERTS // a Claude Code session in proxy mode carries its own; proxy enable would refuse it
+  const r = spawnSync(process.execPath, [SETUP, ...args], { encoding: 'utf8', env })
   return { code: r.status, out: `${r.stdout}${r.stderr}` }
 }
 const readJson = (file) => JSON.parse(fs.readFileSync(file, 'utf8'))
@@ -262,4 +264,139 @@ test('a config whose only token is unset still binds its own port, and refuses C
   })
   assert.strictEqual(status, 403)
   assert.strictEqual(dialled, 0, 'nothing was dialled')
+})
+
+// ---------- restart: replace a router left running by an older plugin, never while it answers a request ----------
+
+// A process that answers /__health like a router of another version; `body` gets its pid
+function fakeRouter(t, port, body) {
+  const src = `require('http').createServer((q,r)=>r.end(JSON.stringify({ok:true,pid:process.pid,...${JSON.stringify(body)}}))).listen(${port},'127.0.0.1')`
+  const child = spawn(process.execPath, ['-e', src], { stdio: 'ignore' })
+  t.after(() => child.kill())
+  return child
+}
+const killHealth = (t, port) => t.after(async () => {
+  const h = await getHealth(port)
+  if (h && h.pid) try { process.kill(h.pid) } catch {}
+})
+
+test('/__health reports the plugin version and the requests in flight', async (t) => {
+  const port = await freePort()
+  const dir = configDir(t, port)
+  startRouter(t, dir)
+  const h = await waitHealth(port)
+  assert.strictEqual(h.version, readJson(path.join(__dirname, '..', '.claude-plugin', 'plugin.json')).version)
+  assert.strictEqual(h.inflight, 0)
+})
+
+test('a router from before 0.6.1 is never restarted by --if-idle, only by a plain restart', async (t) => {
+  const port = await freePort()
+  const dir = configDir(t, port)
+  const old = fakeRouter(t, port, {})
+  await waitHealth(port)
+  killHealth(t, port)
+  // even with a request log that has been quiet for an hour: a long reply logs only when it starts
+  fs.writeFileSync(path.join(dir, 'custom-agent-requests.log'), '{}\n')
+  const quiet = new Date(Date.now() - 60 * 60 * 1000)
+  fs.utimesSync(path.join(dir, 'custom-agent-requests.log'), quiet, quiet)
+  const busy = setup(dir, 'restart', '--if-stale', '--if-idle')
+  assert.strictEqual(busy.code, 3, busy.out)
+  assert.match(busy.out, /older than 0\.6\.1 and cannot report requests in flight/)
+  assert.strictEqual((await getHealth(port)).pid, old.pid, 'the older router was not touched')
+
+  const r = setup(dir, 'restart', '--if-stale')
+  assert.strictEqual(r.code, 0, r.out)
+  assert.match(r.out, /older than 0\.6\.1/)
+  const h = await waitHealth(port)
+  assert.strictEqual(h.configDir, fs.realpathSync(dir), 'the router now running is this version\'s')
+  assert.ok(h.version)
+})
+
+test('restart refuses something on the port that does not answer like a router, and kills nothing', async (t) => {
+  // pid 1 would be init, and process.kill(0) the whole process group
+  for (const body of [{ ok: false }, { pid: 1 }, { pid: 0 }]) {
+    const port = await freePort()
+    const dir = configDir(t, port)
+    const odd = fakeRouter(t, port, body)
+    await waitHealth(port)
+    const r = setup(dir, 'restart')
+    assert.strictEqual(r.code, 1, `${JSON.stringify(body)}: ${r.out}`)
+    assert.match(r.out, /not as a model-relay router/)
+    assert.ok(await getHealth(port), 'what answered is still there')
+    odd.kill()
+  }
+})
+
+test('an open blind tunnel keeps restart --if-idle from cutting it', async (t) => {
+  const target = net.createServer((sock) => sock.on('data', () => {}))
+  await new Promise((r) => target.listen(0, '127.0.0.1', r))
+  t.after(() => target.close())
+  const port = await freePort()
+  const dir = configDir(t, port, { proxy: { enabled: true } })
+  startRouter(t, dir)
+  await waitHealth(port)
+  const sock = await new Promise((resolve, reject) => {
+    const req = http.request({ host: '127.0.0.1', port, method: 'CONNECT', path: `127.0.0.1:${target.address().port}` })
+    req.on('connect', (res, s) => resolve(s))
+    req.on('error', reject)
+    req.end()
+  })
+  sock.on('error', () => {})
+  assert.strictEqual((await getHealth(port)).tunnels, 1)
+  const r = setup(dir, 'restart', '--if-idle')
+  assert.strictEqual(r.code, 3, r.out)
+  assert.match(r.out, /1 tunnel\(s\) open/)
+  sock.destroy()
+  for (let i = 0; i < 30 && (await getHealth(port)).tunnels !== 0; i++) await sleep(100)
+  assert.strictEqual((await getHealth(port)).tunnels, 0, 'the count drops when the tunnel closes')
+})
+
+test('restart --if-stale leaves a current or newer router alone, and refuses another config dir\'s', async (t) => {
+  const port = await freePort()
+  const dir = configDir(t, port)
+  const newer = fakeRouter(t, port, { configDir: fs.realpathSync(dir), version: '99.0.0', inflight: 0 })
+  await waitHealth(port)
+  const r = setup(dir, 'restart', '--if-stale', '--if-idle')
+  assert.strictEqual(r.code, 0, r.out)
+  assert.match(r.out, /not restarted/)
+  assert.strictEqual((await getHealth(port)).pid, newer.pid, 'a newer router is never replaced by older code')
+  newer.kill()
+  for (let i = 0; i < 30 && (await getHealth(port)); i++) await sleep(100)
+
+  const other = configDir(t, port)
+  fakeRouter(t, port, { configDir: fs.realpathSync(other), version: '0.0.1', inflight: 0 })
+  await waitHealth(port)
+  const f = setup(dir, 'restart')
+  assert.strictEqual(f.code, 1, f.out)
+  assert.match(f.out, /Refusing to restart: .*belongs to config dir/)
+})
+
+test('restart --if-idle waits while the router is answering a request', async (t) => {
+  let hold
+  const upstream = http.createServer((req, res) => {
+    req.resume()
+    res.writeHead(200, { 'content-type': 'text/event-stream' })
+    res.write('event: ping\ndata: {}\n\n')
+    hold = res
+  })
+  await new Promise((r) => upstream.listen(0, '127.0.0.1', r))
+  t.after(() => { hold?.destroy(); upstream.close() })
+  const port = await freePort()
+  const dir = configDir(t, port)
+  fs.writeFileSync(path.join(dir, 'model-relay.json'), JSON.stringify({ port, failover: { enabled: false }, providers: { stub: { baseUrl: `http://127.0.0.1:${upstream.address().port}`, token: 't', model: 'stub-1' } } }))
+  const { child } = startRouter(t, dir)
+  await waitHealth(port)
+  const body = JSON.stringify({ model: 'stub-1', stream: true, messages: [] })
+  const req = http.request({ host: '127.0.0.1', port, method: 'POST', path: '/v1/messages', headers: { 'content-length': Buffer.byteLength(body) } })
+  req.on('error', () => {})
+  req.end(body)
+  await new Promise((r) => req.on('response', (res) => res.once('data', r)))
+  assert.strictEqual((await getHealth(port)).inflight, 1)
+  const r = setup(dir, 'restart', '--if-idle')
+  assert.strictEqual(r.code, 3, r.out)
+  assert.match(r.out, /1 request\(s\) in flight/)
+  assert.strictEqual(child.exitCode, null, 'the router answering the request keeps running')
+  req.destroy()
+  for (let i = 0; i < 30 && (await getHealth(port)).inflight !== 0; i++) await sleep(100)
+  assert.strictEqual((await getHealth(port)).inflight, 0, 'the count drops when the caller leaves')
 })

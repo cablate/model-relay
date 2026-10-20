@@ -14,8 +14,10 @@ import {
   providerAgentSpecs,
   providerModelForSubagent,
   providerReport,
+  routerIsStale,
   routerScript,
   routerUrl,
+  staleStatusText,
   sessionArgv,
   setupCliArgv,
   setupBrief,
@@ -39,6 +41,20 @@ let shownStatus = ''
 let lastStart = 0
 let direct = false // this session bypasses a dead router and talks to Anthropic itself
 let registeredAgentsSig = ''
+let pluginVersion: string | null = null
+let lastStaleTry = 0
+let staleBusy = false // the router runs older code but was answering a request when we last tried to replace it
+
+async function myVersion($: EngineInterface): Promise<string> {
+  if (pluginVersion === null) {
+    try {
+      pluginVersion = String(JSON.parse(await $.fs.read(`${$.plugin.root}/.claude-plugin/plugin.json`)).version ?? '')
+    } catch {
+      pluginVersion = ''
+    }
+  }
+  return pluginVersion
+}
 
 async function syncProviderAgents($: EngineInterface, cfg: RelayCfg, h: Health | null = null): Promise<void> {
   const specs = providerAgentSpecs(cfg, h)
@@ -137,6 +153,23 @@ async function tick($: EngineInterface): Promise<void> {
       return
     }
     const h = seen
+    // `plugin update` leaves the old router running, and the hook only starts one when none answers; replace it here,
+    // but only while it answers nothing (setup.mjs restart --if-idle), so no other session loses a reply. A router from
+    // before 0.6.1 cannot report that, so it is only pointed out: /provider restart is the person's call.
+    const stale = routerIsStale(h, await myVersion($))
+    if (!stale) staleBusy = false
+    else if (h && typeof h.inflight !== 'number') {
+      if (!staleBusy) $.ui.toast(staleStatusText(lang))
+      staleBusy = true
+    } else if (Date.now() - lastStaleTry > 60000) {
+      lastStaleTry = Date.now()
+      const r = await $.process.run([cfg.nodePath, setupScript($.plugin.root), 'restart', '--if-stale', '--if-idle'], { timeoutMs: 30000 }).catch(() => null)
+      staleBusy = r?.exitCode === 3
+      if (r?.exitCode === 0) {
+        $.ui.toast(lang === 'en' ? 'The relay was restarted to run this plugin version' : '轉發站已重啟，改跑這個外掛版本的程式')
+        return // the next tick reads the new router
+      }
+    }
     await syncProviderAgents($, cfg, h)
     if (h) {
       if (direct) {
@@ -144,7 +177,7 @@ async function tick($: EngineInterface): Promise<void> {
         await $.env.set('ANTHROPIC_BASE_URL', routerUrl(cfg))
         $.ui.toast(lang === 'en' ? 'Relay recovered; routing through local relay' : '轉發站恢復，主線重新經由轉發站')
       }
-      await showStatus($, statusText(h, cfg, false, null, lang))
+      await showStatus($, staleBusy ? `${statusText(h, cfg, false, null, lang)} · ${staleStatusText(lang)}` : statusText(h, cfg, false, null, lang))
       await syncPanelData($, cfg, h, lang)
       return
     }
@@ -275,8 +308,8 @@ export const register: Register = (on) => {
     if (cfg) await syncProviderAgents($, cfg, null)
     await $.command.register({
       name: 'provider',
-      description: '切換對話模型、設定 haiku 別名或開關備援面板（/provider [name|claude|panel|ping|setup|init|doctor|alias|failover|retry|rc]）',
-      argumentHint: `[${[...keys, 'claude', 'panel', 'ping', 'setup', 'init', 'doctor', 'alias', 'failover', 'retry', 'rc'].join('|')}]`,
+      description: '切換對話模型、設定 haiku 別名或開關備援面板（/provider [name|claude|panel|ping|setup|init|doctor|restart|alias|failover|retry|rc]）',
+      argumentHint: `[${[...keys, 'claude', 'panel', 'ping', 'setup', 'init', 'doctor', 'restart', 'alias', 'failover', 'retry', 'rc'].join('|')}]`,
     })
     await tick($)
     $.clock.every(10000, () => {
@@ -316,8 +349,8 @@ export const register: Register = (on) => {
       void $.prompt.submit({ text: setupBrief(setupScript($.plugin.root), cfg?.nodePath ?? 'node', goal, !!cfg, lang) })
       return { text: lang === 'en' ? 'Handing setup to Claude…' : '已交給 Claude 協助設定…' }
     }
-    if (first === 'init' || first === 'doctor' || first === 'presets') {
-      const cliArgs = first === 'init' ? ['init', '--fix'] : first === 'doctor' ? ['doctor', '--fix', ...(arg.includes('--ping') ? ['--ping'] : [])] : ['presets']
+    if (first === 'init' || first === 'doctor' || first === 'presets' || first === 'restart') {
+      const cliArgs = first === 'init' ? ['init', '--fix'] : first === 'doctor' ? ['doctor', '--fix', ...(arg.includes('--ping') ? ['--ping'] : [])] : [first]
       const r = await $.process.run([cfg?.nodePath ?? 'node', setupScript($.plugin.root), ...cliArgs], { timeoutMs: 60000 }).catch(() => null)
       const out = ((r?.stdout || '') + (r?.stderr || '')).trim()
       return { text: out || (lang === 'en' ? 'Setup command did not respond.' : '設定指令沒有回應。') }

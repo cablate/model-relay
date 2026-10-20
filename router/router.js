@@ -19,6 +19,22 @@ for (const k of ['HTTPS_PROXY', 'https_proxy', 'HTTP_PROXY', 'http_proxy', 'ALL_
 const dir = process.argv[2] || process.env.CLAUDE_CONFIG_DIR || path.join(process.env.USERPROFILE || process.env.HOME || '', '.claude')
 // Reported by /__health so a second router, setup.mjs or the plugin hook can tell whose router answers on a port
 const realDir = L.realDir(dir)
+// The plugin version this code shipped with, so the hook can tell a router left running by an older plugin
+const VERSION = (() => {
+  try {
+    return String(JSON.parse(fs.readFileSync(path.join(__dirname, '..', '.claude-plugin', 'plugin.json'), 'utf8')).version || '')
+  } catch {
+    return ''
+  }
+})()
+// Model and passthrough requests not answered yet, and open blind tunnels and WebSocket upgrades (Remote Control, a
+// git push through HTTPS_PROXY); `setup.mjs restart --if-idle` waits until both are zero
+let inflight = 0
+let tunnels = 0
+const holdTunnel = (sock) => {
+  tunnels++
+  sock.once('close', () => tunnels--)
+}
 
 function resolveCfgPath() {
   const relay = path.join(dir, 'model-relay.json')
@@ -327,6 +343,9 @@ function control(req, res, body) {
       pid: process.pid,
       configDir: realDir,
       configDirArg: dir, // as given on the command line; the hook compares its own spelling against both
+      version: VERSION,
+      inflight,
+      tunnels,
       failoverSince: state.failoverSince,
       nextClaudeTry: state.nextClaudeTry,
       failoverProvider: cfg ? cfg.failoverProvider : 'glm',
@@ -395,6 +414,10 @@ function passthrough(cfg, req, res) {
 
 // tunneled: the request arrived through a CONNECT tunnel opened for api.anthropic.com
 function dispatch(req, res, tunneled) {
+  if (tunneled || !req.url.startsWith('/__')) {
+    inflight++
+    res.once('close', () => inflight--)
+  }
   if (tunneled) {
     const cfg = readCfg()
     if (!cfg) return apiError(res, 500, cfgMissing())
@@ -445,9 +468,19 @@ const proxyStats = { mitm: 0, tunnel: 0, lastMitmAt: 0 }
 let lastTlsError = 0
 let mitmCache = null // { server, cert, checkedAt }
 
+// The leaf file's mtime: `proxy renew` rewrites it while the router runs, and its self-test must get the new one at once
+const leafMtime = () => {
+  try {
+    return fs.statSync(PKI.paths(dir).leaf).mtimeMs
+  } catch {
+    return 0
+  }
+}
+
 function mitmServer() {
   const now = Date.now()
-  if (mitmCache && mitmCache.server && now - mitmCache.checkedAt < 10000) return mitmCache.server
+  const mtime = leafMtime()
+  if (mitmCache && mitmCache.server && now - mitmCache.checkedAt < 10000 && mitmCache.mtime === mtime) return mitmCache.server
   const leaf = PKI.loadLeaf(dir)
   if (!leaf) {
     // an absent certificate is not cached: `proxy enable` writes it while the router is already up, and the next CONNECT must use it
@@ -458,6 +491,7 @@ function mitmServer() {
   const cert = leaf.cert.toString('utf8')
   if (mitmCache && mitmCache.server && mitmCache.cert === cert) {
     mitmCache.checkedAt = now
+    mitmCache.mtime = mtime
     return mitmCache.server
   }
   let srv
@@ -477,7 +511,7 @@ function mitmServer() {
   })
   srv.on('clientError', (e, sock) => sock.destroy())
   log(`proxy: serving api.anthropic.com with a certificate valid until ${new Date(leaf.expires).toISOString()}`)
-  mitmCache = { server: srv, cert, checkedAt: now }
+  mitmCache = { server: srv, cert, checkedAt: now, mtime }
   return srv
 }
 
@@ -486,6 +520,7 @@ function tunnelUpgrade(req, socket, head) {
   const cfg = readCfg()
   const host = String(req.headers.host || '').replace(/:\d+$/, '').toLowerCase()
   if (!cfg || host !== L.PROXY_MITM_HOST) return socket.destroy()
+  holdTunnel(socket)
   const u = new URL(cfg.claudeUrl)
   const ready = () => {
     const lines = [`${req.method} ${req.url} HTTP/1.1`]
@@ -523,6 +558,7 @@ server.on('connect', (req, client, head) => {
     return srv.emit('connection', client)
   }
   proxyStats.tunnel += 1
+  holdTunnel(client)
   let open = false
   const up = net.connect({ host: target.host, port: target.port }, () => {
     open = true

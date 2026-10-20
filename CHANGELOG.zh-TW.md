@@ -11,6 +11,8 @@
 - **`setup.mjs set port <n>`：** 修改轉發站連接埠（`1025`–`65535`），保留 `.relay-backup` 備份，並同步改寫 `settings.json`（`ANTHROPIC_BASE_URL`，代理模式則是 `HTTPS_PROXY`，照例備份）。會拒絕已有程式在回應的埠。已在執行的轉發站會一直用舊埠直到你把它停掉；指令會印出它的 pid，但不會替你結束它。
 - **`/__health` 回報 `configDir`：** 轉發站是為哪個設定目錄啟動的，讓 `doctor`、`proxy` 與外掛 hook 能分辨連接埠上回應的是誰的轉發站。路徑以實際路徑比對，Windows 上不分大小寫。
 - **`/provider setup [goal]`：讓 Claude 帶你設定。** Claude 會拿到已安裝設定工具的路徑並帶你執行：不會要你在對話貼金鑰、套用前先預演變更、改 `~/.claude/settings.json` 之前先問你。還沒有設定檔時也能用。
+- **`/provider restart` 與 `setup.mjs restart [--if-stale] [--if-idle]`：** 重啟轉發站，讓它跑已安裝外掛的程式。`/__health` 現在會回報 `version`、`inflight`（正在回應的請求數）與 `tunnels`（開著的 `CONNECT` 通道數），分得出舊外掛留下來的轉發站，也只在它閒置時重啟。
+- **`tools/smoke.mjs`：** 在臨時連接埠起這份原始碼的轉發站，用真實的 Claude Code 送一次請求（`--provider <name>` 再加一次供應商請求）。需要已登入的 `claude`，所以是發版步驟，不在 CI 裡。
 
 ### 變更
 
@@ -29,6 +31,9 @@
 - **設定檔的 `env:` token 未設定時，轉發站會綁到 8950、並對任何主機開放 `CONNECT`：** 現在轉發站會綁設定檔自己的連接埠，沒有可用設定時對 `CONNECT` 的處理和代理模式關閉時相同（拒絕）。
 - **`custom-agent-router.log` 無限成長：** 現在和 `custom-agent-requests.log` 一樣超過 5 MB 就清空，與文件一致。
 - **首次設定不再需要路徑：** 安裝步驟原本要執行 `node tools/setup.mjs …`，但只有在外掛安裝目錄或 clone 的原始碼資料夾裡才找得到這個檔案；用 `claude plugin install` 安裝後在其他資料夾照著做會出現 `Cannot find module`。現在 `/provider init` 與 `/provider doctor [--ping]` 能在 Claude Code 裡直接完成同樣的事，不論目前在哪個資料夾、也不需要先有設定檔，README 也說明了 `node tools/setup.mjs …` 適用的情境。
+- **更新外掛現在也會更新轉發站：** 外掛只在沒有轉發站回應時才啟動新的，所以 `claude plugin update` 之後舊的轉發站會繼續跑，這一版的修正要等有人手動結束它才生效。現在外掛發現轉發站是舊外掛留下的，會在它沒有請求進行中、也沒有開著的通道時自動重啟。這一版之前的轉發站兩件事都無法回報，所以外掛不會自己重啟它，而是在狀態列提示你在沒有回覆進行中時執行 `/provider restart`。比外掛新的轉發站一律不動。
+- **`proxy enable` 不再蓋掉既有的 `NODE_EXTRA_CA_CERTS`：** 代理模式會把它指向轉發站的 CA，而 `settings.json` 的 env 優先於 shell，所以原本在那裡或環境變數中設定的憑證（常見是公司網路的）會默默不再被信任。現在 `proxy enable` 與 `proxy renew` 會在改動任何東西之前拒絕，並指出原本的值。
+- **轉發站 10 秒內有服務過時，`proxy renew --go` 的自我測試會失敗：** `renew` 換掉憑證後，轉發站最多還會沿用舊憑證 10 秒，自我測試拿到新 CA 不認得的憑證，於是不更新 `settings.json`。現在轉發站會立刻發現憑證檔已重寫。
 
 ### 安全性
 
