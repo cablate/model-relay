@@ -6,12 +6,28 @@
 
 ## [未發布]
 
+### 新增
+
+- **`setup.mjs set port <n>`：** 修改轉發站連接埠（`1025`–`65535`），保留 `.relay-backup` 備份，並同步改寫 `settings.json`（`ANTHROPIC_BASE_URL`，代理模式則是 `HTTPS_PROXY`，照例備份）。會拒絕已有程式在回應的埠。已在執行的轉發站會一直用舊埠直到你把它停掉；指令會印出它的 pid，但不會替你結束它。
+- **`/__health` 回報 `configDir`：** 轉發站是為哪個設定目錄啟動的，讓 `doctor`、`proxy` 與外掛 hook 能分辨連接埠上回應的是誰的轉發站。路徑以實際路徑比對，Windows 上不分大小寫。
+
+### 變更
+
+- **轉發站拿不到連接埠時會說明原因：** 遇到 `EADDRINUSE`，只有佔用者回報相同設定目錄時才靜默結束；否則把連接埠與另一個設定目錄（或未知程序）寫進 `custom-agent-router.log`，並以非零狀態結束。不回報設定目錄的是舊版轉發站，照舊不去動它。
+- **`doctor`、`proxy status` 與 `proxy enable|renew` 會察覺別人的轉發站：** 連接埠上的轉發站屬於其他設定目錄時，`doctor` 與 `proxy status` 會警告、`proxy enable|renew` 會拒絕並指出兩個目錄，且在變更任何東西之前。不回報目錄的是舊版轉發站：`doctor` 會請你重新啟動它，`proxy enable` 照舊替你重啟。
+- **外掛 hook 不會經由其他設定目錄的轉發站轉送：** 連接埠上的轉發站回報了不同的設定目錄時，這個對話改為直連 Claude，狀態列會指出另一個目錄。沒有回報目錄的仍視為你自己的。
+- **README：** 說明 `tools/setup.mjs` 的位置與執行方式、`env:VAR` token 讀的是轉發站自己的環境、範例設定會把所有 `haiku` 呼叫送到 GLM、自動直連退路只在 `ANTHROPIC_BASE_URL` 模式有效、`HTTPS_PROXY` 也會套用到 `git`／`curl`／`gh`、`proxy.enabled` 實際開放了什麼、CI 實際測了什麼，以及完整的移除清單。
+
 ### 修正
 
 - `~/.claude/settings.json` 的 `availableModels` 沒有列出某個供應商的非 Claude 模型時，`doctor` 現在會發出警告。否則 Claude Code 會把 `model-relay:<name>` 子代理改跑在 `CLAUDE_CODE_SUBAGENT_MODEL` 或主線模型上，只在 debug log 留一行警告，請求永遠不會經過轉發站。
 - 供應商或 Anthropic 的回應在串流途中斷線時，不再讓 Claude Code 一直等不到回覆；開啟重試時，串流途中連線被重置也不再讓轉發站當掉：現在會直接中斷呼叫端的連線，讓它知道請求失敗。呼叫端放棄時（按 Esc），現在也會中斷送往上游的請求，不再讓它跑到結束。
 - **路由器看不到的 token 變數現在看得到了：** 路由器從「啟動當下」的環境解析 `env:VAR` token，所以之後才 export 的金鑰在重啟前都不會生效，而從你的 shell 執行的 `doctor` 卻顯示「Config OK」。現在 `/__health` 會以 `unresolved` 列出未解析的供應商與變數名稱（絕不顯示值）、「config missing」錯誤會指出被略過的供應商並說明需重啟路由器，`doctor` 也會在執行中的路由器缺少你 shell 裡已有的變數時提出警告。
 - **第一次 `proxy enable --go` 不再因「unable to get local issuer certificate」自我測試失敗：** 路由器會把「沒有憑證」記住 10 秒，而外掛的健康檢查輪詢可能恰好在 `proxy enable` 建立憑證之前記下這個結果，導致自我測試的連線被直接轉送到 Anthropic，而不是由轉發站的憑證回應。現在不再快取「憑證不存在」。
+- **`init --fix` 寫死連接埠 8950：** 改為寫入設定檔中的連接埠。
+- **設定檔的 `env:` token 未設定時，轉發站會綁到 8950、並對任何主機開放 `CONNECT`：** 現在轉發站會綁設定檔自己的連接埠，沒有可用設定時對 `CONNECT` 的處理和代理模式關閉時相同（拒絕）。
+- **`custom-agent-router.log` 無限成長：** 現在和 `custom-agent-requests.log` 一樣超過 5 MB 就清空，與文件一致。
+
 ### 安全性
 
 - **網頁不能再使用轉發站：** 轉發站以前會回應任何連到 `127.0.0.1` 的請求，瀏覽器裡開著的網頁可以送一個單純的 `text/plain` POST 到 `/v1/messages`，花掉你的供應商額度，或利用 DNS rebinding 讀取回應、呼叫 `/__session`、`/__probe` 與 `/__ping`。現在轉發站的監聽埠會以 403 拒絕三種請求：來自瀏覽器的請求（帶有 `Origin` 或 `Sec-Fetch-Site` 標頭，本機其他連接埠上的網頁也算）、`Host` 不是 `127.0.0.1` 或 `localhost` 加上轉發站正在監聽的連接埠的請求，以及絕對形式的請求網址。`api.anthropic.com` 代理通道裡的請求不受影響。

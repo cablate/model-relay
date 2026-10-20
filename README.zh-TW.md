@@ -48,10 +48,17 @@ claude plugin install model-relay@model-relay
 初始化 `~/.claude/model-relay.json`、自動將 `ANTHROPIC_BASE_URL` 寫入 `~/.claude/settings.json`，並用一行指令實測所有上游供應商連線：
 
 ```bash
+cd ~/.claude/plugins/cache/model-relay/model-relay/<version>   # 外掛的安裝目錄（見下方說明）
 node tools/setup.mjs init --fix
 export ZAI_API_KEY="your-api-key"
 node tools/setup.mjs doctor --ping
 ```
+
+本文所有 `node tools/setup.mjs ...` 指令都要在外掛的安裝目錄下執行，也就是 `~/.claude/plugins/cache/model-relay/model-relay/<version>/`（有設定 `CLAUDE_CONFIG_DIR` 時為 `$CLAUDE_CONFIG_DIR/plugins/cache/model-relay/model-relay/<version>/`；用 `ls` 看該資料夾即可知道版本）。在其他位置則改用該目錄內 `tools/setup.mjs` 的完整路徑。指令操作的是 `$CLAUDE_CONFIG_DIR` 指定的設定目錄，未設定則為 `~/.claude`。
+
+`env:VAR` 的 token 是從轉發站程序自己的環境變數讀取，而它的環境繼承自啟動它的 Claude Code 對話（或 setup 指令）。轉發站啟動之後才匯出的變數，要等轉發站重新啟動才讀得到：請結束轉發站程序（`doctor` 會印出它的 pid）並開新的 Claude Code 對話。`doctor` 讀的是你當下的 shell，所以可能顯示金鑰已設定、轉發站卻看不到。
+
+範例設定會把 `haiku` 導向 GLM（`matchModels: ["^glm", "haiku"]`）。金鑰一設好，Claude Code 所有的 `haiku` 呼叫（子代理、`WebFetch` 摘要、內部輔助呼叫）都會送到 z.ai，而不只是你挑的模型。要關掉，執行 `node tools/setup.mjs alias haiku claude`。
 
 確認成功的輸出：
 
@@ -106,7 +113,7 @@ Config OK (~/.claude/model-relay.json)
 要把 `haiku` 等別名指向某個供應商（例如 `glm`），背後是兩個設定一起配合：
 
 - `~/.claude/settings.json` → `env.ANTHROPIC_DEFAULT_HAIKU_MODEL = "glm-5.3[1m]"`：讓 Claude Code 本身把 `haiku` 別名解析成 `glm-5.3[1m]`（含 `[1m]` 百萬上下文視窗），送出請求時帶 `"model": "glm-5.3"`。
-- `~/.claude/model-relay.json` → `providers.glm.matchModels: ["^glm", "haiku"]`：讓轉發站同時攔截 `"glm-5.3"`（符合 `^glm`）以及 Claude Code 內部寫死 `"claude-haiku-*"` 的請求（符合 `"haiku"`），並在送往上游前自動把 `model` 欄位改寫成 `"glm-5.3"`。
+- `~/.claude/model-relay.json` → `providers.glm.matchModels: ["^glm", "haiku"]`：讓轉發站同時攔截 `"glm-5.3"`（符合 `^glm`）以及 Claude Code 內部寫死 `"claude-haiku-*"` 的請求（符合 `"haiku"`），並在送往上游前自動把 `model` 欄位改寫成 `"glm-5.3"`。這也是範例設定在金鑰設好後會把 Claude Code 所有 `haiku` 呼叫送到 GLM 的原因；`node tools/setup.mjs alias haiku claude` 可還原。
 
 直接用 `setup.mjs alias`（或對話內 `/provider alias`）即可一次查看或同步寫入這兩個檔案：
 
@@ -140,8 +147,10 @@ node tools/setup.mjs rc
 ```
 
 - **信任範圍受限：** 轉發站建立的 CA 只能為 `api.anthropic.com` 背書（關鍵的網域限制），私鑰在簽完憑證後立即丟棄，且只有帶 `NODE_EXTRA_CA_CERTS` 的 Claude Code 程序才會載入。系統憑證庫完全不會被動到。
-- **安全退路：** 沒有可用憑證時，轉發站會把 `api.anthropic.com` 原封不動轉送，Claude Code 照常運作，只是不再分流。
+- **安全退路：** 沒有可用憑證時，轉發站會把 `api.anthropic.com` 原封不動轉送，Claude Code 照常運作，只是不再分流。轉發站停掉則不一樣：外掛自動退回直連只在 `ANTHROPIC_BASE_URL` 模式有效，代理模式下轉發站沒重新啟動（`node tools/setup.mjs rc`）前 Claude Code 連不上。
 - **可還原：** `proxy disable --go` 會恢復 `ANTHROPIC_BASE_URL`，原本的 `settings.json` 會保留為 `settings.json.relay-backup`。
+
+`HTTPS_PROXY` 寫在 `settings.json` 的 `env`，所以 Claude Code 執行的指令（`git`、`curl`、`gh`）也會套用：它們經由轉發站以盲轉送（blind tunnel）連線，轉發站停掉時就會失敗。
 
 ## 設定
 
@@ -149,9 +158,9 @@ node tools/setup.mjs rc
 
 | 欄位 | 預設值 | 說明 |
 |---|---|---|
-| `port` | `8950` | 本機轉發站監聽的連接埠（`1025`–`65535`） |
+| `port` | `8950` | 本機轉發站監聽的連接埠（`1025`–`65535`）。用 `node tools/setup.mjs set port <n>` 修改，會一併更新 `settings.json`；已在執行的轉發站會一直用舊埠直到你把它停掉（指令會印出它的 pid），且會拒絕已有程式在回應的埠 |
 | `claudeUrl` | `"https://api.anthropic.com"` | 上游 Anthropic API 網址 |
-| `proxy.enabled` | `false` | 接受為 Remote Control 而來的 HTTPS 代理連線。預設關閉，轉發站不會變成開放代理；`node tools/setup.mjs proxy enable --go` 開啟、`proxy disable --go` 關閉 |
+| `proxy.enabled` | `false` | 接受為 Remote Control 而來的 HTTPS 代理連線。預設關閉。開啟後，對 `api.anthropic.com` 以外任何主機的 `CONNECT` 都是盲轉送（blind tunnel），本機任何程序都能使用；`node tools/setup.mjs proxy enable --go` 開啟、`proxy disable --go` 關閉 |
 | `failover.enabled` | `true` | 遇到 Claude 429 額度用完時是否自動切換至備援名單 |
 | `failover.chain` | 第一個供應商 | 依序接手的供應商：Claude 額度用完，或某個供應商持續失敗時使用；不存在的名稱會被略過（舊的單一 `failover.provider` 仍可讀） |
 | `failover.cooldownMs` | `600000` | 幾毫秒後讓新對話重新測試 Claude 是否恢復（預設 10 分鐘，最小 `60000`） |
@@ -165,7 +174,7 @@ node tools/setup.mjs rc
 | `providers.<name>.fallback` | 備援名單 | 這個供應商失敗時由誰接手：`false` 代表不交給任何人，或像 `["glm"]` 的清單 |
 | `providers.<name>.preset` | `<name>` | 可選預設集（`zai`、`glm`、`deepseek`、`kimi`、`minimax`、`openrouter`、`gemini`、`magpie`） |
 | `providers.<name>.baseUrl` | （由 preset 帶入） | 該供應商相容 Anthropic 格式的上游網址 |
-| `providers.<name>.token` | （必填） | API 金鑰字串，或 `"env:ENV_VAR_NAME"` 從環境變數讀取 |
+| `providers.<name>.token` | （必填） | API 金鑰字串，或 `"env:ENV_VAR_NAME"` 從環境變數讀取。變數是從轉發站程序的環境讀取（繼承自啟動它的 Claude Code 對話或 setup 指令），所以之後才匯出的變數要等轉發站重新啟動才讀得到 |
 | `providers.<name>.model` | （由 preset 帶入） | 轉發時改寫的目標模型 ID（如 `[1m]` 等尾綴會在送出時自動剝除） |
 | `providers.<name>.matchModels` | `["^<name>"]` | 比對請求 `model` 欄位的正規表示式陣列 |
 | `providers.<name>.stripToolSearch` | `true` | 是否在送出前移除 `ToolSearch` 與 `defer_loading: true` 工具 |
@@ -191,7 +200,7 @@ node tools/setup.mjs rc
 ## 花費、隱私與權限
 
 - **網路與資料流向：** 轉發站只綁定本機 `127.0.0.1:<port>`，請求只會送往 `claudeUrl`（`https://api.anthropic.com`）或你在設定檔中指定的 `baseUrl`。當你主動觸發 `/provider ping` 時，會對各供應商發送一個 `max_tokens: 1` 的測試請求。不包含任何遙測或第三方統計。
-- **本機讀寫檔案：** 讀取 `~/.claude/model-relay.json`（或 `custom-agent.json`），並將對話黏著狀態寫入 `~/.claude/model-relay-state.json`，日誌寫入 `custom-agent-router.log` 與 `custom-agent-requests.log`（超過 5 MB 自動清空）。
+- **本機讀寫檔案：** 讀取 `~/.claude/model-relay.json`（或 `custom-agent.json`），並將對話黏著狀態寫入 `~/.claude/model-relay-state.json`，日誌寫入 `custom-agent-router.log` 與 `custom-agent-requests.log`（兩者超過 5 MB 都會自動清空）。
 - **本機憑證（僅代理模式）：** `~/.claude/model-relay-pki/` 內有一份公開的 CA 檔與一張葉憑證及其私鑰（權限限定你的使用者）。這個 CA 只限 `api.anthropic.com`，且只透過 `NODE_EXTRA_CA_CERTS` 被信任；刪掉該資料夾或執行 `proxy disable --go` 即可停用。
 - **外掛權限檢查：** 你可以隨時執行 `claude plugin validate /path/to/model-relay` 檢視外掛宣告的所有 hooks、狀態鍵與環境變數存取範圍。
 
@@ -200,7 +209,7 @@ node tools/setup.mjs rc
 | 環境 | 狀態 |
 |---|---|
 | Windows 11 + Node.js 22 + Git Bash / PowerShell | 實測通過 |
-| macOS / Linux + Node.js 20+（`sh` + `curl`） | 依官方 Node.js 與 POSIX 規格（CI 多平台矩陣測試通過） |
+| macOS / Linux + Node.js 20+（`sh` + `curl`） | 依官方 Node.js 與 POSIX 規格。CI 只在 Node.js 22（Ubuntu、Windows、macOS）執行 `node tools/check.mjs`；Node.js 20、外掛 hooks 與 Claude Code 整合並未在 CI 測試 |
 
 ## 限制
 
@@ -212,7 +221,7 @@ node tools/setup.mjs rc
 | 症狀 | 檢查項目 |
 |---|---|
 | `/provider` 顯示設定檔不存在或格式錯誤 | 執行 `node tools/setup.mjs doctor` 檢查 JSON 語法，並確認 `env:VAR` 環境變數是否已在當前 shell 匯出 |
-| 狀態列顯示轉發站離線（`Relay offline: connected directly to Claude`） | 外掛偵測到轉發站未回應時會自動退回直連確保對話不中斷；可執行 `node tools/setup.mjs doctor` 或查看 `~/.claude/custom-agent-router.log` |
+| 狀態列顯示轉發站離線（`Relay offline: connected directly to Claude`） | `ANTHROPIC_BASE_URL` 模式下，外掛偵測到轉發站未回應時會自動退回直連確保對話不中斷；代理模式沒有這個退路，轉發站重新啟動前 Claude Code 連不上。可執行 `node tools/setup.mjs doctor` 或查看 `~/.claude/custom-agent-router.log`（連接埠被其他程序或其他設定目錄的轉發站佔用時，轉發站會把原因寫在這個日誌並結束） |
 | Remote Control 說只能經由 `api.anthropic.com` 使用 | Claude Code 還把轉發站當成 API 位址；執行 `node tools/setup.mjs proxy enable --go` 後開新的對話 |
 | 開啟代理模式後 Claude Code 連不上 | 多半是轉發站沒在跑：執行 `node tools/setup.mjs proxy status` 查看，用 `node tools/setup.mjs rc` 啟動，或用 `node tools/setup.mjs proxy disable --go` 退回 |
 | 切到第三方供應商後工具消失或無法呼叫工具 | 確認該供應商在 `model-relay.json` 中設有 `"stripToolSearch": true` |
@@ -220,7 +229,7 @@ node tools/setup.mjs rc
 
 ## 移除
 
-1. 執行 `claude plugin uninstall model-relay@model-relay`，並將 `~/.claude/settings.json` 中的 `ANTHROPIC_BASE_URL` 移除（代理模式則改為移除 `HTTPS_PROXY` 與 `NODE_EXTRA_CA_CERTS`）。
+1. 執行 `claude plugin uninstall model-relay@model-relay`，並將 `~/.claude/settings.json` 中的 `ANTHROPIC_BASE_URL` 移除（代理模式則改為移除 `HTTPS_PROXY`、`NODE_EXTRA_CA_CERTS` 與 `NO_PROXY`；先執行 `node tools/setup.mjs proxy disable --go` 就會處理好，並把 `ANTHROPIC_BASE_URL` 放回去，再把它移除即可）。
 2. 刪除選用的本機狀態檔（`~/.claude/model-relay.json`、`~/.claude/model-relay-state.json`、`~/.claude/model-relay-pki/`、`~/.claude/custom-agent-router.log`、`~/.claude/custom-agent-requests.log`）。
 
 ## 從原始碼執行

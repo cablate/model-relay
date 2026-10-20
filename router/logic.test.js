@@ -1,6 +1,7 @@
 'use strict'
 const test = require('node:test')
 const assert = require('node:assert')
+const os = require('node:os')
 const L = require('./logic')
 
 const cfg = L.parseCfg({ baseUrl: 'https://api.z.ai/api/anthropic', token: 't', model: 'glm-5.3[1m]' })
@@ -230,6 +231,8 @@ test('unresolvedEnv skips keys parseCfg ignores and flags a bare "env:"', () => 
   assert.deepStrictEqual(L.unresolvedEnv({ providers: { claude: p('env:A'), ' ': p('env:B'), x: p('env:') } }, {}), [{ provider: 'x', env: '' }])
   assert.match(L.cfgMissingMessage([{ provider: 'x', env: '' }]), /x \(its token "env:" names no variable\)/)
   assert.deepStrictEqual(L.unresolvedEnv({ baseUrl: 'http://127.0.0.1:1', token: 'env:LEG', model: 'm' }, {}).map((u) => u.env), ['LEG'])
+})
+
 test('the plain-HTTP side answers only local programs: loopback Host on the bound port, no browser markers', () => {
   for (const host of ['127.0.0.1:9123', 'localhost:9123', 'LocalHost:9123']) {
     assert.strictEqual(L.isLocalRequest({ host }, 9123), true, host)
@@ -277,4 +280,12 @@ test('Object.prototype names never resolve to a provider', () => {
     assert.strictEqual(L.nextFallback({ ...c, failoverChain: [name] }, 'glm', []), null, name)
   }
   assert.strictEqual(c.providers.glm.name, 'glm')
+})
+
+test('directories compare by real path, and case-insensitively only on Windows', () => {
+  assert.strictEqual(L.sameDir('c:\\Users\\x\\.claude', 'C:\\Users\\X\\.claude', true), true)
+  assert.strictEqual(L.sameDir('c:\\Users\\x\\.claude', 'C:/users/x/.claude', true), true)
+  assert.strictEqual(L.sameDir('/tmp/Relay-A', '/tmp/relay-a', false), false)
+  assert.strictEqual(L.sameDir(os.tmpdir(), os.tmpdir() + '/', false), true)
+  assert.strictEqual(L.isPort(1025) && L.isPort(65535) && !L.isPort(1024) && !L.isPort(65536) && !L.isPort('8950'), true)
 })

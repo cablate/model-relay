@@ -1,6 +1,23 @@
 'use strict'
 // Pure routing decisions for router.js, tested by logic.test.js (node --test).
 
+const fs = require('fs')
+const path = require('path')
+
+const isPort = (n) => Number.isInteger(n) && n > 1024 && n < 65536
+
+// Two spellings of one directory (symlinks, `c:\x` vs `C:\X` on Windows) compare equal; the router and setup.mjs
+// both use this to tell whose router answers on a port
+function realDir(d) {
+  try {
+    return fs.realpathSync.native(d)
+  } catch {
+    return path.resolve(d)
+  }
+}
+const dirKey = (d, win) => (win ? d.replace(/\\/g, '/').toLowerCase() : d)
+const sameDir = (a, b, win = process.platform === 'win32') => dirKey(realDir(a), win) === dirKey(realDir(b), win)
+
 function str(v) {
   return typeof v === 'string' && v.length > 0 ? v : null
 }
@@ -273,7 +290,7 @@ function parseCfg(raw, env = process.env) {
   // The chain is the order providers are used when Claude is out of quota; names that are not configured are skipped
   let failoverChain = dedupe(migrated.failover.chain.filter((n) => providers[n]))
   if (failoverChain.length === 0) failoverChain = [providers.glm ? 'glm' : names[0]]
-  const port = Number.isInteger(migrated.port) && migrated.port > 1024 && migrated.port < 65536 ? migrated.port : 8950
+  const port = isPort(migrated.port) ? migrated.port : 8950
 
   return {
     providers,
@@ -553,6 +570,9 @@ function upstreamPath(base, reqUrl) {
 }
 
 module.exports = {
+  isPort,
+  realDir,
+  sameDir,
   PRESETS,
   wireModel,
   resolveToken,

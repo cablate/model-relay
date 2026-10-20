@@ -6,6 +6,8 @@ import {
   healthArgv,
   healthWaitArgv,
   parseCfg,
+  foreignConfigDir,
+  foreignStatusText,
   parseHealth,
   pingArgv,
   probeArgv,
@@ -121,7 +123,19 @@ async function tick($: EngineInterface): Promise<void> {
     const cfg = await readCfg($)
     if (!cfg) return
     const lang = await detectLang($)
-    const h = await health($, cfg)
+    const seen = await health($, cfg)
+    // Another config dir's router on our port is not ours: never route through it, same as a router that is down
+    const other = foreignConfigDir(seen, await configDir($), await isWindows($))
+    if (other) {
+      if (!direct && (await $.env.get('ANTHROPIC_BASE_URL')) === routerUrl(cfg)) {
+        direct = true
+        await $.env.set('ANTHROPIC_BASE_URL', undefined)
+        $.ui.toast(lang === 'en' ? `Port ${cfg.port} belongs to another relay (${other}); connected directly to Claude` : `連接埠 ${cfg.port} 屬於另一個轉發站（${other}），主線直連 Claude`)
+      }
+      await showStatus($, foreignStatusText(other, lang))
+      return
+    }
+    const h = seen
     await syncProviderAgents($, cfg, h)
     if (h) {
       if (direct) {

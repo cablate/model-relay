@@ -6,12 +6,28 @@ All notable changes to `model-relay` are documented in this file. Format follows
 
 ## [Unreleased]
 
+### Added
+
+- **`setup.mjs set port <n>`:** Changes the router port (`1025`–`65535`), keeps a `.relay-backup` copy, and rewires `settings.json` (`ANTHROPIC_BASE_URL`, or `HTTPS_PROXY` in proxy mode) with the usual backup. Refuses a port that already answers. The router already running keeps the old port until you stop it; the command prints its pid and does not kill it.
+- **`/__health` reports `configDir`:** The config directory the router was started for, so `doctor`, `proxy` and the plugin hook can tell whose router answers on a port. Paths compare by real path, and case-insensitively on Windows.
+
+### Changed
+
+- **A router that cannot take its port says why:** On `EADDRINUSE` it exits quietly only when the occupant reports the same config directory; otherwise it logs the port and the other config directory (or an unknown process) to `custom-agent-router.log` and exits non-zero. A router that reports no config directory is an older relay and is left running, as before.
+- **`doctor`, `proxy status` and `proxy enable|renew` notice a foreign router:** When the router on the port belongs to another config directory, `doctor` and `proxy status` warn and `proxy enable|renew` refuse, naming both directories, before changing anything. A router that reports no directory is an older relay: `doctor` asks you to restart it, and `proxy enable` restarts it as before.
+- **The plugin hook does not route through another config directory's router:** If the router on the port reports a different config directory, the session connects directly to Claude and the status line names the other directory. A router that reports none still counts as yours.
+- **README:** Says where `tools/setup.mjs` lives and how to run it, that `env:VAR` tokens come from the router's own environment, that the example config sends every `haiku` call to GLM, that the automatic direct fallback only works in `ANTHROPIC_BASE_URL` mode, that `HTTPS_PROXY` also applies to `git` / `curl` / `gh`, what `proxy.enabled` really opens up, what CI really tests, and the full uninstall list.
+
 ### Fixed
 
 - `doctor` now warns when `availableModels` in `~/.claude/settings.json` does not list a provider's non-Claude model. Claude Code otherwise runs `model-relay:<name>` subagents on `CLAUDE_CODE_SUBAGENT_MODEL` or the parent's model, with a warning only in its debug log, so they never reach the relay.
 - A provider or Anthropic answer that drops mid-stream no longer leaves Claude Code waiting with no reply, and a connection reset mid-stream no longer crashes the router when retries are on: the caller's connection is cut so it sees the failure. A caller that gives up (Esc) now stops the upstream request instead of letting it run to the end.
 - **A token variable the router cannot see is now visible:** the router resolves `env:VAR` tokens from the environment it was started with, so a key exported later was ignored until a restart while `doctor` (run from your shell) said "Config OK". `/__health` now lists `unresolved` providers with their variable name (never the value), the "config missing" error names the skipped providers and says to restart the router, and `doctor` warns when the running router lacks a variable your shell has.
 - **First `proxy enable --go` no longer fails its self-test with "unable to get local issuer certificate":** the router remembered "no certificate" for 10 seconds, and the plugin's health poll could record that just before `proxy enable` created the certificate, so the self-test connection was tunnelled to Anthropic instead of answered with the relay certificate. A missing certificate is no longer cached.
+- **`init --fix` wired port 8950:** It now wires the port from the config file.
+- **A config with an unset `env:` token made the router bind 8950, and open `CONNECT` to any host:** The router now binds the config file's own port, and without a usable config it refuses `CONNECT` like proxy mode off.
+- **`custom-agent-router.log` grew without limit:** It is now emptied past 5 MB like `custom-agent-requests.log`, as documented.
+
 ### Security
 
 - **Web pages can no longer use the router:** the router used to answer any request that reached `127.0.0.1`, so a page open in a browser could send a plain `text/plain` POST to `/v1/messages` and spend your provider tokens, or use DNS rebinding to read answers and call `/__session`, `/__probe` and `/__ping`. The router's listener now refuses, with 403, any request that comes from a browser (one that carries an `Origin` or `Sec-Fetch-Site` header, including pages served from another local port), any request whose `Host` is not `127.0.0.1` or `localhost` on the port the router is listening on, and any absolute-form request URL. Requests inside the `api.anthropic.com` proxy tunnel are not affected.

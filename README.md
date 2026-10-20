@@ -48,10 +48,17 @@ claude plugin install model-relay@model-relay
 Initialize `~/.claude/model-relay.json`, wire `ANTHROPIC_BASE_URL` into `~/.claude/settings.json`, and verify your upstream providers with one command:
 
 ```bash
+cd ~/.claude/plugins/cache/model-relay/model-relay/<version>   # the plugin's install directory (see below)
 node tools/setup.mjs init --fix
 export ZAI_API_KEY="your-api-key"
 node tools/setup.mjs doctor --ping
 ```
+
+Every `node tools/setup.mjs ...` command in this README runs from the plugin's install directory, which is `~/.claude/plugins/cache/model-relay/model-relay/<version>/` (`$CLAUDE_CONFIG_DIR/plugins/cache/model-relay/model-relay/<version>/` when you set `CLAUDE_CONFIG_DIR`; `ls` that folder for your version). Elsewhere, use the full path to `tools/setup.mjs` inside it. The command acts on the config directory in `$CLAUDE_CONFIG_DIR`, or `~/.claude` if unset.
+
+`env:VAR` tokens are read from the router process's own environment, which it inherits from whichever Claude Code session (or setup command) started it. A variable exported after the router started is not seen until the router restarts: stop the router process (`doctor` prints its pid) and start a new Claude Code session. `doctor` reads your shell, so it can report the key as set while the router cannot see it.
+
+The example config sends `haiku` to GLM (`matchModels: ["^glm", "haiku"]`). As soon as the key is set, every Claude Code `haiku` call (subagents, `WebFetch` summaries, internal helpers) goes to z.ai, not only the models you pick. To turn that off, run `node tools/setup.mjs alias haiku claude`.
 
 Expected output:
 
@@ -106,7 +113,7 @@ Use built-in presets (`zai`, `glm`, `deepseek`, `kimi`, `minimax`, `openrouter`,
 Pointing a Claude tier like `haiku` at a provider (for example `glm`) coordinates two places at once:
 
 - `~/.claude/settings.json` → `env.ANTHROPIC_DEFAULT_HAIKU_MODEL = "glm-5.3[1m]"` so Claude Code itself resolves the `haiku` alias to `glm-5.3[1m]` (including the `[1m]` context window) and sends `"model": "glm-5.3"`.
-- `~/.claude/model-relay.json` → `providers.glm.matchModels: ["^glm", "haiku"]` so the router catches both `"glm-5.3"` (via `^glm`) and any internal Claude Code calls that hardcode `"claude-haiku-*"` (via `"haiku"`), rewriting the wire `model` field to `"glm-5.3"`.
+- `~/.claude/model-relay.json` → `providers.glm.matchModels: ["^glm", "haiku"]` so the router catches both `"glm-5.3"` (via `^glm`) and any internal Claude Code calls that hardcode `"claude-haiku-*"` (via `"haiku"`), rewriting the wire `model` field to `"glm-5.3"`. This is why the example config sends every Claude Code `haiku` call to GLM once its key is set; `node tools/setup.mjs alias haiku claude` undoes it.
 
 Use `setup.mjs alias` (or `/provider alias`) to inspect or set both files in one step:
 
@@ -140,8 +147,10 @@ node tools/setup.mjs rc
 ```
 
 - **Contained trust:** The CA the relay creates can only vouch for `api.anthropic.com` (a critical name constraint), its private key is discarded right after signing, and only Claude Code processes that carry `NODE_EXTRA_CA_CERTS` load it. The system certificate store is never touched.
-- **Safe fallback:** Without a usable certificate the relay tunnels `api.anthropic.com` untouched, so Claude Code keeps working, just unrouted.
+- **Safe fallback:** Without a usable certificate the relay tunnels `api.anthropic.com` untouched, so Claude Code keeps working, just unrouted. A stopped router is different: the plugin's automatic direct fallback only works in `ANTHROPIC_BASE_URL` mode, so in proxy mode Claude Code cannot connect until the router is restarted (`node tools/setup.mjs rc`).
 - **Reversible:** `proxy disable --go` restores `ANTHROPIC_BASE_URL`, and the previous `settings.json` is kept as `settings.json.relay-backup`.
+
+`HTTPS_PROXY` lives in `settings.json` `env`, so it also applies to commands Claude Code runs (`git`, `curl`, `gh`): they go through the relay as blind tunnels, and fail while the router is down.
 
 ## Configuration
 
@@ -149,9 +158,9 @@ Configuration lives in `~/.claude/model-relay.json` (or legacy `~/.claude/custom
 
 | Field | Default | Meaning |
 |---|---|---|
-| `port` | `8950` | Localhost port for the relay HTTP server (`1025`–`65535`) |
+| `port` | `8950` | Localhost port for the relay HTTP server (`1025`–`65535`). Change it with `node tools/setup.mjs set port <n>`, which also updates `settings.json`; the router already running keeps the old port until you stop it (the command prints its pid), and it refuses a port that already answers |
 | `claudeUrl` | `"https://api.anthropic.com"` | Upstream Anthropic API base URL |
-| `proxy.enabled` | `false` | Accept HTTPS-proxy connections for Remote Control. Off by default, so the router is never an open proxy; `node tools/setup.mjs proxy enable --go` turns it on and `proxy disable --go` off |
+| `proxy.enabled` | `false` | Accept HTTPS-proxy connections for Remote Control. Off by default. When on, a `CONNECT` to any host other than `api.anthropic.com` is a blind tunnel that any local process can use; `node tools/setup.mjs proxy enable --go` turns it on and `proxy disable --go` off |
 | `failover.enabled` | `true` | Automatically switch to the failover chain on Claude 429 usage limits |
 | `failover.chain` | first provider | Ordered providers that take over when Claude is out of quota or a provider keeps failing; unknown names are skipped (the old single `failover.provider` is still read) |
 | `failover.cooldownMs` | `600000` | Milliseconds before probing Claude again for new sessions (10 minutes, minimum `60000`) |
@@ -165,7 +174,7 @@ Configuration lives in `~/.claude/model-relay.json` (or legacy `~/.claude/custom
 | `providers.<name>.fallback` | the chain | Who takes over from this provider: `false` for nobody, or a list like `["glm"]` |
 | `providers.<name>.preset` | `<name>` | Optional preset (`zai`, `glm`, `deepseek`, `kimi`, `minimax`, `openrouter`, `gemini`, `magpie`) |
 | `providers.<name>.baseUrl` | (from preset) | Anthropic-compatible upstream URL for this provider |
-| `providers.<name>.token` | (required) | Literal token or `"env:ENV_VAR_NAME"` |
+| `providers.<name>.token` | (required) | Literal token or `"env:ENV_VAR_NAME"`. The variable is read from the router process's environment (inherited from the Claude Code session or setup command that started it), so one exported later is not seen until the router restarts |
 | `providers.<name>.model` | (from preset) | Target model ID when rewriting requests (suffixes like `[1m]` are stripped on wire) |
 | `providers.<name>.matchModels` | `["^<name>"]` | Regex patterns matched against incoming request `model` |
 | `providers.<name>.stripToolSearch` | `true` | Strip `ToolSearch` and `defer_loading: true` tools from requests |
@@ -191,7 +200,7 @@ Configuration lives in `~/.claude/model-relay.json` (or legacy `~/.claude/custom
 ## Cost, privacy, and permissions
 
 - **Network and data flow:** The router listens only on `127.0.0.1:<port>`. Requests go strictly to `claudeUrl` (`https://api.anthropic.com`) or the `baseUrl` endpoints you configure. `/provider ping` sends a `max_tokens: 1` request to each configured provider when you trigger it. No telemetry or analytics exist.
-- **Local files:** Reads `~/.claude/model-relay.json` (or `custom-agent.json`) and writes session sticky state to `~/.claude/model-relay-state.json` plus local logs (`custom-agent-router.log` and `custom-agent-requests.log`, auto-truncated at 5 MB).
+- **Local files:** Reads `~/.claude/model-relay.json` (or `custom-agent.json`) and writes session sticky state to `~/.claude/model-relay-state.json` plus local logs (`custom-agent-router.log` and `custom-agent-requests.log`, each emptied once it passes 5 MB).
 - **Local certificate (proxy mode only):** `~/.claude/model-relay-pki/` holds a public CA file and one leaf certificate with its key (restricted to your user). The CA is limited to `api.anthropic.com` and trusted only through `NODE_EXTRA_CA_CERTS`; delete the folder or run `proxy disable --go` to stop using it.
 - **Plugin permissions:** Inspect all hooks, state keys, and env access at any time by running `claude plugin validate /path/to/model-relay`.
 
@@ -200,7 +209,7 @@ Configuration lives in `~/.claude/model-relay.json` (or legacy `~/.claude/custom
 | Environment | Status |
 |---|---|
 | Windows 11 + Node.js 22 + Git Bash / PowerShell | Tested |
-| macOS / Linux + Node.js 20+ (`sh` + `curl`) | Per official Node.js & POSIX specs (CI matrix tested) |
+| macOS / Linux + Node.js 20+ (`sh` + `curl`) | Per official Node.js & POSIX specs. CI runs only `node tools/check.mjs` on Node.js 22 (Ubuntu, Windows, macOS); Node.js 20, the plugin hooks and the Claude Code integration are not tested there |
 
 ## Limitations
 
@@ -212,7 +221,7 @@ Configuration lives in `~/.claude/model-relay.json` (or legacy `~/.claude/custom
 | Symptom | What to check |
 |---|---|
 | `/provider` says config is missing or invalid | Run `node tools/setup.mjs doctor` to verify JSON syntax and check if any `env:VAR` variables are unset in your shell |
-| Status bar shows `Relay offline: connected directly to Claude` | The plugin automatically bypassed a stopped router so your chat keeps working; run `node tools/setup.mjs doctor` or check `~/.claude/custom-agent-router.log` |
+| Status bar shows `Relay offline: connected directly to Claude` | In `ANTHROPIC_BASE_URL` mode the plugin bypassed a stopped router so your chat keeps working. In proxy mode there is no such bypass: Claude Code cannot connect until the router is restarted. Run `node tools/setup.mjs doctor` or check `~/.claude/custom-agent-router.log` (a router that finds its port taken by another process or another config directory logs that there and exits) |
 | Remote Control says it is only available via `api.anthropic.com` | Claude Code still uses the relay as its API address; run `node tools/setup.mjs proxy enable --go` and start a new session |
 | Claude Code cannot connect after enabling proxy mode | The router is probably down: run `node tools/setup.mjs proxy status`, start it with `node tools/setup.mjs rc`, or go back with `node tools/setup.mjs proxy disable --go` |
 | Tools are missing on a third-party provider | Set `"stripToolSearch": true` on that provider in `model-relay.json` so `ToolSearch` does not hide other tools |
@@ -220,7 +229,7 @@ Configuration lives in `~/.claude/model-relay.json` (or legacy `~/.claude/custom
 
 ## Uninstall
 
-1. Run `claude plugin uninstall model-relay@model-relay` and remove `ANTHROPIC_BASE_URL` from `~/.claude/settings.json` (in proxy mode remove `HTTPS_PROXY` and `NODE_EXTRA_CA_CERTS` instead).
+1. Run `claude plugin uninstall model-relay@model-relay` and remove `ANTHROPIC_BASE_URL` from `~/.claude/settings.json` (in proxy mode remove `HTTPS_PROXY`, `NODE_EXTRA_CA_CERTS` and `NO_PROXY` instead; running `node tools/setup.mjs proxy disable --go` first does that and puts `ANTHROPIC_BASE_URL` back, which you then remove).
 2. Delete optional state files (`~/.claude/model-relay.json`, `~/.claude/model-relay-state.json`, `~/.claude/model-relay-pki/`, `~/.claude/custom-agent-router.log`, `~/.claude/custom-agent-requests.log`).
 
 ## Run from source

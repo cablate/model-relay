@@ -188,6 +188,7 @@ export interface Health {
   aliases?: Record<string, string>
   failoverProvider?: string
   failoverChain?: string[]
+  configDirs?: string[] // the directory this router serves, as it resolves it and as it was given; absent on older routers
   stats?: Record<string, ProviderStat>
   // What the router is doing right now; absent when it predates the switches
   switches?: { failover: boolean; retry: boolean; proxy: boolean; proxyReady: boolean }
@@ -232,6 +233,7 @@ export function parseHealth(stdout: string): Health | null {
     const failoverChain = Array.isArray(j.failoverChain)
       ? (j.failoverChain as unknown[]).filter((n): n is string => typeof n === 'string' && n.length > 0).map((n) => n.toLowerCase())
       : undefined
+    const configDirs = [j.configDir, j.configDirArg].filter((d): d is string => typeof d === 'string' && d.length > 0)
     const conf = typeof j.config === 'object' && j.config !== null ? (j.config as Record<string, unknown>) : null
     const px = typeof j.proxy === 'object' && j.proxy !== null ? (j.proxy as Record<string, unknown>) : null
     const switches = conf && typeof conf.failoverEnabled === 'boolean' && typeof conf.retryEnabled === 'boolean' && typeof conf.proxyEnabled === 'boolean'
@@ -246,6 +248,7 @@ export function parseHealth(stdout: string): Health | null {
       ...(aliases ? { aliases } : {}),
       ...(failoverProvider ? { failoverProvider } : {}),
       ...(failoverChain && failoverChain.length > 0 ? { failoverChain } : {}),
+      ...(configDirs.length > 0 ? { configDirs } : {}),
       ...(stats ? { stats } : {}),
       ...(switches ? { switches } : {}),
     }
@@ -291,6 +294,23 @@ export function buildPanelData(h: Health | null, cfg: RelayCfg, direct: boolean,
     lang,
     now,
   }
+}
+
+// The directory of a router that answers on our port but serves a different config dir; null when it is ours.
+// A router that reports no directory is an older relay and still counts as ours.
+export function foreignConfigDir(h: Health | null, myDir: string, isWin = true): string | null {
+  if (!h || !h.configDirs || h.configDirs.length === 0) return null
+  const key = (d: string) => {
+    const s = d.replace(/\\/g, '/').replace(/\/+$/, '')
+    return isWin ? s.toLowerCase() : s
+  }
+  return h.configDirs.some((d) => key(d) === key(myDir)) ? null : h.configDirs[0]!
+}
+
+export function foreignStatusText(dir: string, lang: 'zh' | 'en' = 'zh'): string {
+  return lang === 'en'
+    ? `Port is held by another relay (config dir ${dir}): connected directly to Claude`
+    : `連接埠被另一個轉發站（設定目錄 ${dir}）佔用：主線暫時直連 Claude`
 }
 
 export function statusText(h: Health | null, modelOrCfg: string | RelayCfg, direct: boolean, gemini: string | null = null, lang: 'zh' | 'en' = 'zh'): string {

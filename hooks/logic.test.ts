@@ -1,6 +1,8 @@
 import { test } from 'claude-code/testing'
 import {
   buildPanelData,
+  foreignConfigDir,
+  foreignStatusText,
   healthArgv,
   pingArgv,
   probeArgv,
@@ -113,4 +115,15 @@ test('switches are changed through the setup CLI', () => {
   assert(specs.length === 2 && specs[0]?.name === 'glm' && specs[0]?.model === 'glm-5.3[1m]' && specs[1]?.name === 'gemini' && specs[1]?.model === 'gemini-4-argon', 'providerAgentSpecs builds one spec per provider')
   assert(providerModelForSubagent('model-relay:gemini', multi) === 'gemini-4-argon', 'locks model-relay:gemini to gemini-4-argon')
   assert(providerModelForSubagent('Explore', multi) === null, 'leaves other subagent types untouched')
+})
+
+test('a router serving another config dir is not ours; one that reports no dir is an older relay and is', () => {
+  const mine = parseHealth('{"ok":true,"configDir":"/real/.claude","configDirArg":"/link/.claude"}')!
+  assert(foreignConfigDir(mine, '/real/.claude', false) === null, 'resolved spelling matches')
+  assert(foreignConfigDir(mine, '/link/.claude/', false) === null, 'given spelling matches, trailing slash ignored')
+  assert(foreignConfigDir(mine, '/other/.claude', false) === '/real/.claude', 'a different dir is foreign and named')
+  assert(foreignConfigDir(parseHealth('{"ok":true,"configDir":"C:/Users/x/.claude"}'), 'c:/users/x/.claude', true) === null, 'Windows ignores case')
+  assert(foreignConfigDir(parseHealth('{"ok":true}'), '/any', false) === null, 'older relay without configDir stays ours')
+  assert(foreignConfigDir(null, '/any', false) === null, 'no answer is not foreign')
+  assert(foreignStatusText('/other/.claude', 'en').includes('/other/.claude'), 'the status names the other dir')
 })
