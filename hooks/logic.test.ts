@@ -9,10 +9,12 @@ import {
   has,
   healthArgv,
   healthHints,
+  helpText,
   outdatedText,
   parseHealth,
   parseLocal,
   pingArgv,
+  pingReport,
   pingText,
   probeArgv,
   providerAgentSpecs,
@@ -28,6 +30,7 @@ import {
   spawnedElsewhere,
   startArgv,
   statusText,
+  switchedText,
   toggleArgv,
   wireKey,
 } from './logic'
@@ -96,13 +99,31 @@ test('health, panel data, and status texts (zh and en) come from the router alon
   assert(fit('1234567890', 6) === '12345…' && fit('中文字串', 5) === '中文…', 'fit truncates by terminal cells')
 })
 
+test('a switch answers in one line, and the command list waits for /provider help', () => {
+  for (const lang of ['zh', 'en'] as const) {
+    const one = switchedText('aaa', 'aaa-9', lang)
+    assert(!one.includes('\n') && one.includes('aaa-9'), `a switch is one line naming the model (${lang})`)
+    assert(!switchedText('claude', 'claude', lang).includes('\n'), `back to Claude is one line (${lang})`)
+  }
+  const h = health({ session: 'aaa', providers: { aaa: 'aaa-9', bbb: 'bbb-1' }, aliases: { haiku: 'bbb' }, failoverChain: ['bbb'], config: { failoverEnabled: true, retryEnabled: true, proxyEnabled: false }, ping: { aaa: { verdict: 'ok', status: 200, firstByteMs: 300, at: 1, detail: '' } } })
+  const rep = providerReport(h, 0, 'en')
+  assert(rep.includes('/provider help') && !rep.includes('/provider failover') && !rep.includes('/provider doctor'), 'the status points at help and lists no commands')
+  assert(rep.split('\n').filter((l) => l.startsWith('Shared by every window:')).length === 1 && rep.includes('haiku → bbb'), 'the shared switches and aliases on one line')
+  const ping = pingReport(h, 'en')
+  assert(ping.includes('test ok 300ms') && !ping.includes('/provider claude') && !ping.includes('Shared by every window'), 'a ping shows only the providers and their tests')
+  const help = helpText(['aaa'], 'zh')
+  assert(['這個視窗：', '所有視窗共用：', '設定與檢查：'].every((g) => help.includes(g)), 'commands grouped by what they reach')
+  assert(['status', 'ping', 'setup', 'doctor', 'restart', 'failover', 'retry', 'rc', 'alias', 'probe', 'init'].every((c) => help.includes(`/provider ${c}`)) && help.includes('model-relay:aaa'), 'every command and the subagent type')
+})
+
 test('a router with no usable provider, or no failover chain, is shown as such rather than guessed at', () => {
   const bare = health({ session: 'claude', providers: {}, failoverProvider: null, failoverChain: [] })
   assert(bare.failoverProvider === undefined && bare.failoverChain.length === 0 && Object.keys(bare.providers).length === 0, 'null failover provider')
   const pd = buildPanelData(bare, 8950, false, 'en', 0)
   assert(pd.failoverProvider === null && pd.failoverChain.length === 0 && Object.keys(pd.aliases).length === 0, 'no default alias or chain')
   const rep = providerReport(bare, 0, 'en')
-  assert(rep.includes('no provider is usable yet') && rep.includes('nobody to hand over to') && !rep.includes('model-relay:<name>  Spawn'), 'said plainly')
+  assert(rep.includes('no provider is usable yet') && rep.includes('nobody to hand over to'), 'said plainly')
+  assert(!helpText([], 'en').includes('model-relay:<name>'), 'no subagent line with no provider to run it on')
   assert(statusText({ ...bare, failoverSince: 1 }, false, 'en') === 'Claude limit reached', 'a 429 with nobody to take over')
   assert(Object.keys(buildPanelData(null, 8950, true, 'zh', 0).providers).length === 0, 'offline: nothing invented')
 })

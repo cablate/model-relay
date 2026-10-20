@@ -12,17 +12,19 @@
       .m { fill: #94a3b8; font-size: 12.5px; }
       .pingShow { animation: ps 10s linear infinite; }
       @keyframes ps { 0%, 24% { opacity: 0; } 28%, 94% { opacity: 1; } 98%, 100% { opacity: 0; } }
-      .selClaude { animation: sc 10s linear infinite; }
-      @keyframes sc { 0%, 54% { opacity: 1; } 56%, 100% { opacity: 0; } }
-      .selGem { animation: sg 10s linear infinite; }
-      @keyframes sg { 0%, 54% { opacity: 0; } 56%, 94% { opacity: 1; } 98%, 100% { opacity: 0; } }
+      .press { animation: pr 10s linear infinite; }
+      @keyframes pr { 0%, 44% { opacity: 0; } 46%, 54% { opacity: 1; } 56%, 100% { opacity: 0; } }
+      .panelOut { animation: po 10s linear infinite; }
+      @keyframes po { 0%, 54% { opacity: 1; } 58%, 94% { opacity: 0; } 98%, 100% { opacity: 1; } }
+      .toastIn { animation: ti 10s linear infinite; }
+      @keyframes ti { 0%, 56% { opacity: 0; } 60%, 92% { opacity: 1; } 96%, 100% { opacity: 0; } }
     </style>
   </defs>
 
   <rect width="960" height="380" rx="18" fill="#0d1117"/>
 
   <text x="36" y="42" class="sans" font-size="16" font-weight="600" fill="#f8fafc">子代理自動分流，或在輸入框上方的互動面板一鍵測速、切換單一視窗的模型。</text>
-  <text x="36" y="64" class="sans m">輸入 /provider 即可開啟上方控制面板：點 [測速] 即時檢查各供應商延遲，點 [切換] 固定當前對話。</text>
+  <text x="36" y="64" class="sans m">輸入 /provider 開啟上方面板：點 [測速] 檢查每個供應商，點 [切換] 只換這個視窗，換好後面板自動收起。</text>
 
   <!-- 左側：三種分流與守護機制 -->
   <g transform="translate(36 84)">
@@ -42,86 +44,47 @@
     <text x="18" y="258" class="mono m">launch: { command: "my-gateway", args: ["serve"] }</text>
   </g>
 
-  <!-- 右側：輸入框上方的互動面板 -->
   <g transform="translate(480 84)">
-    <rect width="444" height="274" rx="12" fill="#161b22" stroke="url(#accent)" stroke-width="2"/>
+   <g class="panelOut">
+    <rect width="444" height="244" rx="12" fill="#161b22" stroke="url(#accent)" stroke-width="2"/>
+    <text x="18" y="28" class="mono" font-size="13"><tspan fill="#38bdf8" font-weight="700">model-relay</tspan><tspan fill="#8b949e" font-size="13">・這個視窗用哪個模型</tspan></text>
+    <rect x="258" y="12" width="62" height="22" rx="5" fill="#1f6feb"/>
+    <text x="289" y="27" text-anchor="middle" class="mono" font-size="11" fill="#ffffff">測速 [p]</text>
+    <rect x="326" y="12" width="56" height="22" rx="5" fill="#21262d" stroke="#30363d"/>
+    <text x="354" y="27" text-anchor="middle" class="mono" font-size="11" fill="#c9d1d9">設定 [s]</text>
+    <rect x="388" y="12" width="40" height="22" rx="5" fill="#21262d"/>
+    <text x="408" y="27" text-anchor="middle" class="mono" font-size="11" fill="#8b949e">關閉</text>
+    <line x1="18" y1="46" x2="426" y2="46" stroke="#30363d"/>
 
-    <text x="18" y="28" class="mono" font-size="13"><tspan fill="#38bdf8" font-weight="700">model-relay</tspan><tspan fill="#8b949e">・模型路由與自動備援 (:8950)</tspan></text>
-    <rect x="314" y="12" width="62" height="22" rx="5" fill="#1f6feb"/>
-    <text x="345" y="27" text-anchor="middle" class="mono" font-size="11" fill="#ffffff">測速 [p]</text>
-    <rect x="382" y="12" width="46" height="22" rx="5" fill="#21262d"/>
-    <text x="405" y="27" text-anchor="middle" class="mono" font-size="11" fill="#8b949e">關閉</text>
-
-    <text x="18" y="50" class="sans m">子代理 (haiku) 與 429 備援 → backup (backup-9)・固定中對話：2</text>
-    <line x1="18" y1="62" x2="426" y2="62" stroke="#30363d"/>
-
-    <g class="pingShow">
-      <rect x="18" y="70" width="408" height="24" rx="5" fill="#1e293b"/>
-      <text x="28" y="86" class="mono" font-size="11.5" fill="#fbbf24">✓ 已完成上游連線測速・直接點按鈕或按 1–4 切換路由</text>
+    <g transform="translate(18 60)">
+      <text x="0" y="16" class="mono" font-size="12.5"><tspan fill="#4ade80" font-weight="700">● </tspan><tspan x="16" fill="#f8fafc" font-weight="700">claude</tspan><tspan x="84" fill="#8b949e">Anthropic Claude</tspan></text>
+      <text x="408" y="16" text-anchor="end" class="mono m">使用中</text>
     </g>
-
-    <!-- 第 1 列：Claude -->
-    <g transform="translate(18 106)">
-      <g class="selClaude">
-        <text x="0" y="16" class="mono" font-size="12.5"><tspan fill="#4ade80" font-weight="700">● 使用中</tspan> <tspan fill="#f8fafc" font-weight="700">claude  </tspan> <tspan fill="#8b949e">· Anthropic Claude（預設主線）</tspan></text>
-        <text x="408" y="16" text-anchor="end" class="mono m">目前路由</text>
-      </g>
-      <g class="selGem">
-        <text x="0" y="16" class="mono" font-size="12.5"><tspan fill="#8b949e">○ 待命  </tspan> <tspan fill="#c9d1d9">claude  </tspan> <tspan fill="#8b949e">· Anthropic Claude（預設主線）</tspan></text>
-        <rect x="332" y="0" width="76" height="22" rx="5" fill="#21262d" stroke="#30363d"/>
-        <text x="370" y="15" text-anchor="middle" class="mono" font-size="11" fill="#c9d1d9">切換 [1]</text>
-      </g>
-    </g>
-
-    <!-- 第 2 列：backup -->
-    <g transform="translate(18 142)">
-      <text x="0" y="16" class="mono" font-size="12.5">
-        <tspan fill="#8b949e">○ 待命  </tspan>
-        <tspan fill="#c9d1d9">backup  </tspan>
-        <tspan fill="#c9d1d9">backup-9</tspan>
-        <tspan fill="#c084fc"> [429 備援]</tspan>
-        <tspan class="pingShow" fill="#4ade80"> · 200 · 1.9s</tspan>
-      </text>
+    <g transform="translate(18 96)">
+      <text x="0" y="16" class="mono" font-size="12.5"><tspan fill="#8b949e">○ </tspan><tspan x="16" fill="#c9d1d9">backup</tspan><tspan x="84" fill="#c9d1d9">backup-9</tspan><tspan class="pingShow" fill="#4ade80"> · 測試正常 1.9s</tspan></text>
       <rect x="344" y="0" width="64" height="22" rx="5" fill="#1f6feb"/>
       <text x="376" y="15" text-anchor="middle" class="mono" font-size="11" fill="#ffffff">切換 [2]</text>
     </g>
-
-    <!-- 第 3 列：fast -->
-    <g transform="translate(18 178)">
-      <g class="selClaude">
-        <text x="0" y="16" class="mono" font-size="12.5">
-          <tspan fill="#8b949e">○ 待命  </tspan>
-          <tspan fill="#c9d1d9">fast    </tspan>
-          <tspan fill="#c9d1d9">fast-model</tspan>
-          <tspan class="pingShow" fill="#4ade80"> · 200 · 1.4s</tspan>
-        </text>
-        <rect x="344" y="0" width="64" height="22" rx="5" fill="#1f6feb"/>
-        <text x="376" y="15" text-anchor="middle" class="mono" font-size="11" fill="#ffffff">切換 [3]</text>
-      </g>
-      <g class="selGem">
-        <text x="0" y="16" class="mono" font-size="12.5">
-          <tspan fill="#4ade80" font-weight="700">● 固定中</tspan>
-          <tspan fill="#f8fafc" font-weight="700">fast    </tspan>
-          <tspan fill="#38bdf8">fast-model</tspan>
-          <tspan fill="#4ade80"> · 200 · 1.4s</tspan>
-        </text>
-        <text x="408" y="16" text-anchor="end" class="mono m">目前固定</text>
-      </g>
+    <g transform="translate(18 132)">
+      <text x="0" y="16" class="mono" font-size="12.5"><tspan fill="#8b949e">○ </tspan><tspan x="16" fill="#c9d1d9">fast</tspan><tspan x="84" fill="#c9d1d9">fast-model</tspan><tspan class="pingShow" fill="#4ade80"> · 測試正常 1.4s</tspan></text>
+      <rect x="344" y="0" width="64" height="22" rx="5" fill="#1f6feb"/>
+      <rect class="press" x="341" y="-3" width="70" height="28" rx="7" fill="none" stroke="#fbbf24" stroke-width="2"/>
+      <text x="376" y="15" text-anchor="middle" class="mono" font-size="11" fill="#ffffff">切換 [3]</text>
     </g>
-
-    <!-- 第 4 列：local -->
-    <g transform="translate(18 214)">
-      <text x="0" y="16" class="mono" font-size="12.5">
-        <tspan fill="#8b949e">○ 待命  </tspan>
-        <tspan fill="#c9d1d9">local   </tspan>
-        <tspan fill="#c9d1d9"> local-model</tspan>
-        <tspan class="pingShow" fill="#4ade80"> · 200 · 1.1s</tspan>
-      </text>
+    <g transform="translate(18 168)">
+      <text x="0" y="16" class="mono" font-size="12.5"><tspan fill="#8b949e">○ </tspan><tspan x="16" fill="#c9d1d9">local</tspan><tspan x="84" fill="#c9d1d9">local-model</tspan><tspan class="pingShow" fill="#4ade80"> · 測試正常 1.1s</tspan></text>
       <rect x="344" y="0" width="64" height="22" rx="5" fill="#1f6feb"/>
       <text x="376" y="15" text-anchor="middle" class="mono" font-size="11" fill="#ffffff">切換 [4]</text>
     </g>
 
-    <line x1="18" y1="244" x2="426" y2="244" stroke="#30363d"/>
-    <text x="18" y="262" class="sans m">提示：直接點按鈕，或按 ctrl+x tab 後按數字鍵 1–4 / p 測速・切回 Claude 具二次確認保護快取</text>
+    <line x1="18" y1="206" x2="426" y2="206" stroke="#30363d"/>
+    <text x="18" y="226" class="sans m">鍵盤：先按 ctrl+x tab，再按按鈕上標的鍵</text>
+   </g>
+   <g class="toastIn" transform="translate(0 84)">
+    <rect width="444" height="84" rx="12" fill="#161b22" stroke="#4ade80" stroke-width="1.5"/>
+    <text x="18" y="28" class="sans" font-size="14" font-weight="700" fill="#4ade80">✓ 這個視窗改用 fast（fast-model）</text>
+    <text x="18" y="50" class="mono m">狀態列：主線：fast-model（這個視窗固定用它）</text>
+    <text x="18" y="70" class="sans m">面板已自動收起；/provider 再打開</text>
+   </g>
   </g>
 </svg>

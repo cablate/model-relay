@@ -312,7 +312,7 @@ export function statusText(h: Health | null, direct: boolean, lang: 'zh' | 'en' 
     return direct ? '轉發站離線：主線暫時直連 Claude，model-relay 子代理無法使用' : '轉發站離線，正在重啟…'
   }
   const pinned = h.session !== 'claude' && has(h.providers, h.session) ? h.providers[h.session] : undefined
-  if (pinned) return lang === 'en' ? `Main: ${pinned} (pinned for this session)` : `主線：${pinned}（這個對話固定用它）`
+  if (pinned) return lang === 'en' ? `Main: ${pinned} (pinned for this window)` : `主線：${pinned}（這個視窗固定用它）`
   if (h.failoverSince) {
     const to = h.failoverProvider ? h.providers[h.failoverProvider] ?? h.failoverProvider : ''
     if (to) return lang === 'en' ? `Claude limit reached: routing to ${to}` : `Claude 額度用完：下一個請求起改用 ${to}`
@@ -350,6 +350,59 @@ export function statText(st: ProviderStat | undefined, lang: 'zh' | 'en'): { tex
   return { text: `${head} HTTP ${st.status}`, color: 'red' }
 }
 
+// What one switch came to, in one line: the status line and the panel already show the rest
+export function switchedText(target: string, model: string, lang: 'zh' | 'en' = 'zh'): string {
+  if (target === 'claude') {
+    return lang === 'en'
+      ? '✓ This window is back on Claude (the next turn rebuilds the prompt cache)'
+      : '✓ 這個視窗切回 Claude（下一輪會重建一次快取）'
+  }
+  return lang === 'en' ? `✓ This window now uses ${target} (${model})` : `✓ 這個視窗改用 ${target}（${model}）`
+}
+
+// One row per route, each written as the command that picks it
+function routeRows(h: Health, lang: 'zh' | 'en', withClaude: boolean): string[] {
+  const en = lang === 'en'
+  const active = h.session || 'claude'
+  const rows: string[] = []
+  if (withClaude) {
+    const desc = active === 'claude'
+      ? (en ? 'Anthropic Claude  ← in use' : 'Anthropic Claude  ← 使用中')
+      : (en ? 'Anthropic Claude (switching back rebuilds the prompt cache)' : 'Anthropic Claude（切回時長對話會重建一次快取）')
+    rows.push(`  ${active === 'claude' ? '●' : '○'} /provider ${'claude'.padEnd(8)} ${desc}`)
+  }
+  for (const [k, m] of Object.entries(h.providers)) {
+    const notes = [statText(h.stats?.[k], lang), pingText(h.ping?.[k], lang)].filter((x) => x !== null).map((x) => x.text)
+    const noteText = notes.length ? (en ? ` (${notes.join(' · ')})` : `（${notes.join(' · ')}）`) : ''
+    const mine = active === k ? (en ? '  ← in use' : '  ← 使用中') : ''
+    rows.push(`  ${active === k ? '●' : '○'} /provider ${k.padEnd(8)} ${m}${noteText}${mine}`)
+  }
+  if (Object.keys(h.providers).length === 0) {
+    rows.push(en
+      ? '  (no provider is usable yet: every request goes to Claude; /provider setup adds one)'
+      : '  （還沒有可用的供應商：所有請求都走 Claude；/provider setup 可以新增）')
+  }
+  return rows
+}
+
+// The switches every window shares, and where each Claude alias goes, on one line
+function sharedLine(h: Health, lang: 'zh' | 'en'): string {
+  const en = lang === 'en'
+  const sw = h.switches
+  const onOff = (on: boolean) => (on ? `● ${en ? 'on' : '開啟'}` : `○ ${en ? 'off' : '關閉'}`)
+  const foOn = sw ? sw.failover : true
+  const chain = h.failoverChain.length ? h.failoverChain.join(' → ') : en ? 'nobody to hand over to' : '沒有接手者'
+  const parts = [
+    `${en ? '429 failover' : '429 備援'} ${onOff(foOn)}${foOn ? (en ? ` (${chain})` : `（${chain}）`) : ''}`,
+    `${en ? 'Retry' : '失敗重試'} ${onOff(!sw || sw.retry)}`,
+    `${en ? 'Remote Control' : '手機遙控'} ${onOff(!!sw?.proxy)}`,
+  ]
+  const aliases = Object.entries(h.aliases).filter(([, p]) => has(h.providers, p)).map(([slot, p]) => `${slot} → ${p}`)
+  if (aliases.length) parts.push(`${en ? 'Aliases' : '別名'} ${aliases.join(en ? ', ' : '、')}`)
+  return `${en ? 'Shared by every window: ' : '所有視窗共用：'}${parts.join(en ? ' · ' : '・')}`
+}
+
+// /provider status: where this window goes, what every window shares, and what to fix; the commands are in /provider help
 export function providerReport(h: Health | null, now: number, lang: 'zh' | 'en' = 'zh'): string {
   const en = lang === 'en'
   if (!h) {
@@ -357,8 +410,6 @@ export function providerReport(h: Health | null, now: number, lang: 'zh' | 'en' 
       ? 'Relay is not responding; auto-restarting every 10s.'
       : '轉發站沒有回應；每 10 秒會自動重啟，稍後再試。'
   }
-  const providers = h.providers
-
   let head = statusText(h, false, lang)
   if (h.failoverSince) {
     const mins = Math.max(0, Math.round((h.nextClaudeTry - now) / 60000))
@@ -366,102 +417,56 @@ export function providerReport(h: Health | null, now: number, lang: 'zh' | 'en' 
       ? ` (retrying Claude in ~${mins}m; only new sessions switch back)`
       : `（約 ${mins} 分鐘後再試 Claude，恢復後只有新對話回到 Claude）`
   }
-
-  const aliasPairs = Object.entries(h.aliases)
-    .filter(([, p]) => has(providers, p))
-    .map(([slot, p]) => `${slot} → ${p} (${providers[p]})`)
-  const aliasLine = en
-    ? `Model aliases: ${aliasPairs.length > 0 ? aliasPairs.join(', ') : 'none (all Claude tiers use main route)'}`
-    : `別名自動分流：${aliasPairs.length > 0 ? aliasPairs.join('、') : '無（子代理全走主線）'}`
-
-  const chain = h.failoverChain
-  const sw = h.switches
-  const foOn = sw ? sw.failover : true
-  const chainText = chain.length ? chain.join(' → ') : en ? 'nobody to hand over to' : '沒有接手者'
-  const foSummary = foOn ? `● ${en ? 'on' : '開啟'} (${chainText})` : `○ ${en ? 'off' : '關閉'}`
-  const retrySummary = !sw || sw.retry ? `● ${en ? 'on' : '開啟'}` : `○ ${en ? 'off' : '關閉'}`
-  const rcSummary = sw?.proxy ? `● ${en ? 'on' : '開啟'}` : `○ ${en ? 'off' : '關閉'}`
-  const switchLine = en
-    ? `Global switches: 429 failover ${foSummary} · Retry ${retrySummary} · Remote Control ${rcSummary}`
-    : `全域開關狀態：429 備援 ${foSummary} · 失敗重試 ${retrySummary} · 手機遙控 ${rcSummary}`
-
-  const activeSession = h.session || 'claude'
-  const claudeMark = activeSession === 'claude' ? '●' : '○'
-  const claudeDesc = activeSession === 'claude'
-    ? (en ? 'Anthropic Claude  ← active' : 'Anthropic Claude（預設主線） ← 目前使用中')
-    : (en ? 'Anthropic Claude (switching back rebuilds prompt cache)' : '切回 Anthropic Claude（長對話會重建一次快取）')
-
-  const lines: string[] = [
+  return [
     head,
-    aliasLine,
-    switchLine,
+    sharedLine(h, lang),
     ...healthHints(h, lang).map((x) => `⚠ ${x}`),
     '',
-    en ? 'Switch this session:' : '切換這個對話的模型：',
-    `  ${claudeMark} /provider ${'claude'.padEnd(8)} ${claudeDesc}`,
-  ]
-
-  for (const [k, m] of Object.entries(providers)) {
-    const isCurrent = activeSession === k
-    const mark = isCurrent ? '●' : '○'
-    const badges: string[] = []
-    for (const [slot, target] of Object.entries(h.aliases)) {
-      if (target === k) badges.push(en ? `${slot} alias` : `${slot} 別名`)
-    }
-    if (foOn) {
-      const idx = chain.indexOf(k)
-      if (idx === 0 && chain.length === 1) badges.push(en ? '429 failover' : '429 備援')
-      else if (idx >= 0) badges.push(en ? `429 failover #${idx + 1}` : `429 備援 #${idx + 1}`)
-    }
-    const badgeText = badges.length > 0 ? ` [${badges.join(' · ')}]` : ''
-    const notes = [statText(h.stats?.[k], lang), pingText(h.ping?.[k], lang)].filter((x) => x !== null).map((x) => x.text)
-    const stText = notes.length ? ` (${notes.join(' · ')})` : ''
-    const activeSuffix = isCurrent ? (en ? '  ← pinned' : '  ← 目前固定') : ''
-    lines.push(`  ${mark} /provider ${k.padEnd(8)} ${m}${badgeText}${stText}${activeSuffix}`)
-  }
-  if (Object.keys(providers).length === 0) {
-    lines.push(en
-      ? '  (no provider is usable yet: every request goes to Claude; /provider setup adds one)'
-      : '  （還沒有可用的供應商：所有請求都走 Claude；/provider setup 可以新增）')
-  }
-
-  const agentNames = Object.keys(providers).map((k) => `model-relay:${k}`)
-  lines.push(
+    en ? 'Switch this window:' : '切換這個視窗：',
+    ...routeRows(h, lang, true),
     '',
-    en ? 'Controls & settings:' : '面板與快速設定：',
-    en
-      ? '  · /provider panel                      Toggle interactive panel above prompt (hotkeys 1-9 / p / f / t / x)'
-      : '  · /provider panel                      開關上方互動面板（熱鍵 1-9 切換 · p 測速 · f 備援 · t 重試 · x 遙控）',
-    en
-      ? '  · /provider ping                       Test every provider: does it answer, and how soon does the answer start'
-      : '  · /provider ping                       測試每個供應商：能不能回應、多快開始回應',
-    en
-      ? '  · /provider setup [goal]               Let Claude walk you through setup (e.g. /provider setup add deepseek)'
-      : '  · /provider setup [想要的設定]         讓 Claude 帶你設定（例：/provider setup 加上 deepseek）',
-    en
-      ? '  · /provider doctor [--ping]            Check the config, Claude Code settings and the relay, with fixes'
-      : '  · /provider doctor [--ping]            檢查設定檔、Claude Code 設定與轉發站，並列出修法',
-    en
-      ? '  · /provider restart                    Restart the relay so it runs this plugin version'
-      : '  · /provider restart                    重啟轉發站，讓它跑這個外掛版本的程式',
-    en
-      ? '  · /provider alias [haiku <name|claude>] View or point a Claude model alias (e.g. /provider alias haiku <name>)'
-      : '  · /provider alias [haiku <name|claude>] 查看或設定別名分流（例：/provider alias haiku <名稱>）',
-    en
-      ? '  · /provider failover <on|off|a,b>      Toggle 429 failover or set the failover chain'
-      : '  · /provider failover <on|off|a,b>      開關 429 備援或設定接手順序（例：/provider failover a,b）',
-    en
-      ? '  · /provider retry <on|off>             Toggle automatic provider retries'
-      : '  · /provider retry <on|off>             開關供應商失敗自動重試',
-    en
-      ? '  · /provider rc <on|off>                Toggle Remote Control HTTPS proxy mode (applies to new sessions)'
-      : '  · /provider rc <on|off>                開關手機 Remote Control 代理模式（新對話生效）',
-    ...(agentNames.length
-      ? [en
-          ? `  · subagent_type: "model-relay:<name>"  Spawn a full Agent on a provider (${agentNames.join(', ')})`
-          : `  · subagent_type: "model-relay:<name>"  派出等同預設 Agent 的子代理並走該供應商（${agentNames.join('、')}）`]
-      : []),
-  )
+    en ? 'All commands: /provider help' : '所有指令：/provider help',
+  ].join('\n')
+}
+
+// /provider ping: each provider with what its test came to
+export function pingReport(h: Health | null, lang: 'zh' | 'en' = 'zh'): string {
+  if (!h) return providerReport(null, 0, lang)
+  return [lang === 'en' ? 'Test results:' : '測試結果：', ...routeRows(h, lang, false)].join('\n')
+}
+
+// /provider help: every command, grouped by what it reaches
+export function helpText(providers: string[], lang: 'zh' | 'en' = 'zh'): string {
+  const en = lang === 'en'
+  const groups: [string, [string, string][]][] = [
+    [en ? 'This window:' : '這個視窗：', [
+      ['/provider', en ? "Open the panel to switch this window's model" : '開啟面板，切換這個視窗的模型'],
+      ['/provider <name> | claude', en ? 'Switch this window directly (e.g. /provider claude)' : '直接切換這個視窗（例：/provider claude）'],
+      ['/provider status', en ? 'The same status as text' : '文字版狀態'],
+    ]],
+    [en ? 'Shared by every window:' : '所有視窗共用：', [
+      ['/provider failover <on|off|a,b>', en ? 'Turn 429 failover on or off, or set who takes over' : '開關 429 備援或設定接手順序'],
+      ['/provider retry <on|off>', en ? 'Turn automatic provider retries on or off' : '開關供應商失敗自動重試'],
+      ['/provider rc <on|off>', en ? 'Turn Remote Control proxy mode on or off (new sessions)' : '開關手機遙控代理模式（新對話生效）'],
+      ['/provider alias [haiku <name|claude>]', en ? 'View or point a Claude model alias' : '查看或設定別名分流'],
+      ['/provider probe', en ? 'Reset the 429 cooldown so the next new session tries Claude' : '重置 429 冷卻，下一個新對話先試 Claude'],
+    ]],
+    [en ? 'Setup and checks:' : '設定與檢查：', [
+      ['/provider ping', en ? 'Test every provider: does it answer, and how soon' : '測試每個供應商：能不能回應、多快開始回應'],
+      ['/provider setup [goal]', en ? 'Let Claude walk you through setup (e.g. /provider setup add deepseek)' : '讓 Claude 帶你設定（例：/provider setup 加上 deepseek）'],
+      ['/provider doctor [--ping]', en ? 'Check the config, Claude Code settings and the relay, with fixes' : '檢查設定檔、Claude Code 設定與轉發站，並列出修法'],
+      ['/provider restart', en ? 'Restart the relay so it runs this plugin version' : '重啟轉發站，讓它跑這個外掛版本的程式'],
+      ['/provider init', en ? 'Create an empty config' : '建立空的設定檔'],
+    ]],
+  ]
+  const width = Math.max(...groups.flatMap(([, rows]) => rows.map(([cmd]) => cmd.length)))
+  const lines = groups.flatMap(([title, rows]) => [title, ...rows.map(([cmd, desc]) => `  ${cmd.padEnd(width)}  ${desc}`)])
+  if (providers.length) {
+    const names = providers.map((k) => `model-relay:${k}`).join(en ? ', ' : '、')
+    lines.push(en
+      ? `Subagents: subagent_type "model-relay:<name>" runs a full Agent on that provider (${names})`
+      : `子代理：subagent_type "model-relay:<名稱>" 派出等同預設 Agent 的子代理並走該供應商（${names}）`)
+  }
   return lines.join('\n')
 }
 

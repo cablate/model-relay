@@ -1,6 +1,6 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
-import type { PanelUi } from '../types'
+import type { PanelNote, PanelUi } from '../types'
 import {
   CONFIG_NAME,
   OLD_CONFIG_NAME,
@@ -12,11 +12,13 @@ import {
   has,
   healthArgv,
   healthWaitArgv,
+  helpText,
   missedRelayText,
   outdatedText,
   parseHealth,
   parseLocal,
   pingArgv,
+  pingReport,
   probeArgv,
   providerAgentSpecs,
   providerReport,
@@ -34,6 +36,7 @@ import {
   startArgv,
   startFailedText,
   statusText,
+  switchedText,
   toggleArgv,
   type Health,
   type LocalCfg,
@@ -61,7 +64,7 @@ let knownProviders: Record<string, string> = {}
 // model-relay:<name> subagents started and not finished yet, by agentId: checked against the router when their turn ends
 const pending = new Map<string, { name: string; model: string; since: number }>()
 
-const COMMAND_WORDS = ['claude', 'panel', 'ping', 'setup', 'init', 'doctor', 'restart', 'alias', 'failover', 'retry', 'rc']
+const COMMAND_WORDS = ['claude', 'status', 'help', 'ping', 'setup', 'doctor', 'restart', 'failover', 'retry', 'rc', 'alias']
 
 async function myVersion($: EngineInterface): Promise<string> {
   if (pluginVersion === null) {
@@ -85,7 +88,7 @@ async function syncProviders($: EngineInterface, providers: Record<string, strin
   }
   await $.command.register({
     name: 'provider',
-    description: '切換對話模型、設定別名、檢查設定或開關備援面板（/provider [name|claude|panel|ping|setup|init|doctor|restart|alias|failover|retry|rc]）',
+    description: '切換這個視窗的模型（不帶參數開面板，/provider help 看全部指令）',
     argumentHint: `[${[...Object.keys(providers), ...COMMAND_WORDS].join('|')}]`,
   })
   registeredSig = sig
@@ -151,10 +154,16 @@ async function syncPanelData($: EngineInterface, cfg: LocalCfg, h: Health | null
   } catch {}
 }
 
-async function setPanelNote($: EngineInterface, note: string | undefined): Promise<void> {
+async function setPanelNote($: EngineInterface, note: PanelNote | undefined): Promise<void> {
   try {
     await update($, panelUi, ({ confirmingClaude: _c, confirmingProxy: _p, note: _n, ...u }) => (note ? { ...u, confirmingClaude: false, note } : { ...u, confirmingClaude: false }))
   } catch {}
+}
+
+// Opened fresh each time: no note or open confirmation from last time, the shared settings folded away
+async function openPanel($: EngineInterface, cfg: LocalCfg, h: Health | null, lang: 'zh' | 'en'): Promise<void> {
+  await update($, panelData, () => buildPanelData(h, cfg.port, direct, lang, Date.now(), cfg.outdated))
+  await update($, panelUi, ({ note: _n, ...u }) => ({ ...u, open: true, confirmingClaude: false, confirmingProxy: false, showSettings: false }))
 }
 
 // Our router answered: it is the one source of what providers exist
@@ -256,9 +265,11 @@ async function checkReached($: EngineInterface, p: { name: string; model: string
 }
 
 function panelActions($: EngineInterface): PanelActions {
-  const run = (work: () => Promise<string | undefined>) => {
+  const good = (text: string): PanelNote => ({ text, ok: true })
+  const bad = (text: string): PanelNote => ({ text, ok: false })
+  const run = (work: () => Promise<PanelNote | undefined>) => {
     void work()
-      .catch((err) => String(err))
+      .catch((err) => bad(String(err)))
       .then(async (note) => {
         const cfg = await readLocal($)
         if (cfg) {
@@ -270,31 +281,28 @@ function panelActions($: EngineInterface): PanelActions {
         await setPanelNote($, note)
       })
   }
+  const close = () => update($, panelUi, (u) => ({ ...u, open: false, confirmingClaude: false, confirmingProxy: false }))
   return {
+    // A switch that took is the panel's job done: it closes, and a toast and the status line say where this window goes now
     switchTo: (target) =>
       run(async () => {
         const cfg = await readLocal($)
         const lang = await detectLang($)
-        if (!cfg) return lang === 'en' ? 'Config missing.' : '設定檔不存在。'
+        if (!cfg) return bad(lang === 'en' ? 'Config missing.' : '設定檔不存在。')
         const win = await isWindows($)
         const r = await $.process.run(sessionArgv(cfg, await $.session.id(), target, win), { timeoutMs: 8000 }).catch(() => null)
         if (!r || r.exitCode !== 0 || !r.stdout.includes('"ok":true')) {
-          return lang === 'en' ? 'Relay did not respond.' : '轉發站沒有回應。'
+          return bad(lang === 'en' ? 'Relay did not respond; nothing changed.' : '轉發站沒有回應，沒有改變。')
         }
         const h = await health($, cfg)
-        const model = h && has(h.providers, target) ? h.providers[target] : target
-        if (target === 'claude') {
-          return lang === 'en'
-            ? 'Switched this session back to Claude (next turn rebuilds cache).'
-            : '已切回 Claude（下一輪會重建整段快取）。'
-        }
-        return lang === 'en'
-          ? `Pinned this session to ${model} (other windows unaffected).`
-          : `這個對話已固定改用 ${model}（其他視窗不受影響）。`
+        await close()
+        $.ui.toast(switchedText(target, h && has(h.providers, target) ? h.providers[target]! : target, lang))
+        return undefined
       }),
     askClaude: (ask) => {
       void update($, panelUi, ({ note: _n, ...u }) => ({ ...u, confirmingClaude: ask }))
     },
+    // The rows show what each test came to, so a test that ran needs no note of its own
     ping: () =>
       run(async () => {
         const ui = await read($, panelUi)
@@ -302,14 +310,12 @@ function panelActions($: EngineInterface): PanelActions {
         const cfg = await readLocal($)
         const lang = await detectLang($)
         if (!cfg) return undefined
-        await update($, panelUi, (u) => ({ ...u, pinging: true }))
+        await update($, panelUi, ({ note: _n, ...u }) => ({ ...u, pinging: true }))
         try {
           const win = await isWindows($)
           const r = await $.process.run(pingArgv(cfg, '', win), { timeoutMs: (PING_LIMIT_S + 5) * 1000 }).catch(() => null)
-          if (!r || r.exitCode !== 0) {
-            return lang === 'en' ? 'Test failed: relay unreachable.' : '測試失敗：轉發站未回應。'
-          }
-          return lang === 'en' ? 'Every provider was tested; each row shows the result.' : '已測試每個供應商，結果顯示在各列。'
+          if (!r || r.exitCode !== 0) return bad(lang === 'en' ? 'Test failed: relay unreachable.' : '測試失敗：轉發站未回應。')
+          return undefined
         } finally {
           await update($, panelUi, (u) => ({ ...u, pinging: false }))
         }
@@ -321,8 +327,11 @@ function panelActions($: EngineInterface): PanelActions {
         if (!cfg) return undefined
         const win = await isWindows($)
         await $.process.run(probeArgv(cfg, win), { timeoutMs: 5000 }).catch(() => null)
-        return lang === 'en' ? 'Cooldown reset; next new session will try Claude.' : '已重置冷卻計時，下一個新對話將嘗試使用 Claude。'
+        return good(lang === 'en' ? '✓ Cooldown reset; the next new session tries Claude.' : '✓ 已重置冷卻，下一個新對話會先試 Claude。')
       }),
+    settings: (show) => {
+      void update($, panelUi, ({ note: _n, ...u }) => ({ ...u, showSettings: show, confirmingProxy: false }))
+    },
     askProxy: (ask) => {
       void update($, panelUi, ({ note: _n, ...u }) => ({ ...u, confirmingProxy: ask }))
     },
@@ -330,24 +339,24 @@ function panelActions($: EngineInterface): PanelActions {
       run(async () => {
         const cfg = await readLocal($)
         const lang = await detectLang($)
-        if (!cfg) return lang === 'en' ? 'Config missing.' : '設定檔不存在。'
+        if (!cfg) return bad(lang === 'en' ? 'Config missing.' : '設定檔不存在。')
         const argv = toggleArgv(cfg, setupScript($.plugin.root), which, on)
         // The proxy switch restarts the router and tests the certificate, which takes a few seconds
         const r = await $.process.run(argv, { timeoutMs: which === 'proxy' ? 60000 : 15000 }).catch(() => null)
         if (!r || r.exitCode !== 0) {
           const why = (r?.stderr || r?.stdout || '').trim().split(/\r?\n/).pop() ?? ''
-          return lang === 'en' ? `Not changed: ${why || 'setup command failed'}` : `沒有變更：${why || '設定指令失敗'}`
+          return bad(lang === 'en' ? `Not changed: ${why || 'setup command failed'}` : `沒有變更：${why || '設定指令失敗'}`)
         }
         if (which === 'proxy') {
-          return on
-            ? (lang === 'en' ? 'Remote Control enabled. Start a new Claude Code session to use it.' : '已開啟手機遙控；開新的 Claude Code 對話後生效。')
-            : (lang === 'en' ? 'Remote Control disabled. Sessions already running in proxy mode lose their connection.' : '已關閉手機遙控；已在代理模式執行的對話會斷線。')
+          return good(on
+            ? (lang === 'en' ? '✓ Remote Control on; new Claude Code sessions use it.' : '✓ 已開啟手機遙控；開新的 Claude Code 對話後生效。')
+            : (lang === 'en' ? '✓ Remote Control off; sessions already in proxy mode lose their connection.' : '✓ 已關閉手機遙控；已在代理模式執行的對話會斷線。'))
         }
         const name = which === 'failover' ? (lang === 'en' ? '429 failover' : '429 備援') : lang === 'en' ? 'Retry' : '失敗重試'
-        return lang === 'en' ? `${name} ${on ? 'on' : 'off'} (applies to the next request).` : `${name}已${on ? '開啟' : '關閉'}（下一個請求起生效）。`
+        return good(lang === 'en' ? `✓ ${name} ${on ? 'on' : 'off'} from the next request.` : `✓ ${name}已${on ? '開啟' : '關閉'}，下一個請求起生效。`)
       }),
     close: () => {
-      void update($, panelUi, (u) => ({ ...u, open: false, confirmingClaude: false, confirmingProxy: false }))
+      void close()
     },
   }
 }
@@ -416,6 +425,7 @@ export const register: Register = (on) => {
       const out = ((r?.stdout || '') + (r?.stderr || '')).trim()
       return { text: out || (lang === 'en' ? 'Setup command did not respond.' : '設定指令沒有回應。') }
     }
+    if (arg === 'help') return { text: helpText(Object.keys(knownProviders), lang) }
     if (!cfg) {
       return {
         text: lang === 'en'
@@ -425,36 +435,33 @@ export const register: Register = (on) => {
     }
     const win = await isWindows($)
 
-    if (arg === 'panel') {
-      const nextOpen = !(await read($, panelUi)).open
-      const h = await health($, cfg)
-      if (nextOpen) {
-        await update($, panelData, () => buildPanelData(h, cfg.port, direct, lang, Date.now(), cfg.outdated))
+    // Bare `/provider` opens the panel and says only that; `panel` toggles it
+    if (arg === '' || arg === 'panel') {
+      if (arg === 'panel' && (await read($, panelUi)).open) {
+        await update($, panelUi, (u) => ({ ...u, open: false, confirmingClaude: false, confirmingProxy: false }))
+        return { text: lang === 'en' ? 'Panel closed.' : '面板已關閉。' }
       }
-      await update($, panelUi, (u) => ({ ...u, open: nextOpen, confirmingClaude: false }))
-      return {
-        text: nextOpen
-          ? (lang === 'en'
-              ? 'model-relay panel opened above prompt (click buttons or press ctrl+x tab; run /provider panel again to close).'
-              : '已在輸入框上方開啟 model-relay 控制面板：直接點按鈕，或按 ctrl+x tab 用鍵盤操作；再打一次 /provider panel 關閉。')
-          : (lang === 'en' ? 'model-relay panel closed.' : '已關閉 model-relay 控制面板。'),
-      }
+      await openPanel($, cfg, await health($, cfg), lang)
+      const opened = lang === 'en' ? 'Panel open above the prompt (all commands: /provider help)' : '面板已開在輸入框上方（所有指令：/provider help）'
+      return { text: cfg.outdated ? `${outdatedText(lang)}\n${opened}` : opened }
+    }
+
+    if (arg === 'status') {
+      return { text: `${cfg.outdated ? `${outdatedText(lang)}\n\n` : ''}${providerReport(await health($, cfg), Date.now(), lang)}` }
     }
 
     if (arg === 'ping') {
       await $.process.run(pingArgv(cfg, '', win), { timeoutMs: (PING_LIMIT_S + 5) * 1000 }).catch(() => null)
       const h = await health($, cfg)
       await syncPanelData($, cfg, h, lang)
-      return { text: providerReport(h, Date.now(), lang) }
+      return { text: pingReport(h, lang) }
     }
 
     if (arg === 'probe') {
-      await $.process.run(probeArgv(cfg, win), { timeoutMs: 5000 }).catch(() => null)
-      const h = await health($, cfg)
-      await syncPanelData($, cfg, h, lang)
-      return {
-        text: (lang === 'en' ? 'Reset 429 cooldown timer.\n\n' : '已重置 429 冷卻計時。\n\n') + providerReport(h, Date.now(), lang),
-      }
+      const r = await $.process.run(probeArgv(cfg, win), { timeoutMs: 5000 }).catch(() => null)
+      await syncPanelData($, cfg, await health($, cfg), lang)
+      if (!r || r.exitCode !== 0) return { text: lang === 'en' ? 'Relay did not respond; nothing changed.' : '轉發站沒有回應，沒有改變。' }
+      return { text: lang === 'en' ? '✓ 429 cooldown reset; the next new session tries Claude.' : '✓ 已重置 429 冷卻，下一個新對話會先試 Claude。' }
     }
 
     const parts = arg.split(/\s+/).filter(Boolean)
@@ -485,7 +492,7 @@ export const register: Register = (on) => {
       const h = await health($, cfgNext)
       if (h) await showStatus($, statusText(h, false, lang))
       await syncPanelData($, cfgNext, h, lang)
-      return { text: `${out ? `${out}\n\n` : ''}${providerReport(h, Date.now(), lang)}` }
+      return { text: out || (lang === 'en' ? 'Setup command did not respond.' : '設定指令沒有回應。') }
     }
 
     const h0 = await health($, cfg)
@@ -493,25 +500,18 @@ export const register: Register = (on) => {
     if (arg === 'claude' || has(providers, arg)) {
       const r = await $.process.run(sessionArgv(cfg, await $.session.id(), arg, win), { timeoutMs: 8000 }).catch(() => null)
       if (!r || r.exitCode !== 0 || !r.stdout.includes('"ok":true')) {
-        return { text: lang === 'en' ? 'Relay did not respond; no change.' : '轉發站沒有回應，沒有改變。' }
+        return { text: lang === 'en' ? 'Relay did not respond; nothing changed.' : '轉發站沒有回應，沒有改變。' }
       }
       const h = await health($, cfg)
       if (h) await showStatus($, statusText(h, false, lang))
       await syncPanelData($, cfg, h, lang)
-      const done = arg === 'claude'
-        ? (lang === 'en' ? '✓ Switched this session back to Claude (next turn rebuilds cache; other windows unaffected).\n\n' : '✓ 已將這個對話切回 Claude（下一輪會重建快取；其他視窗不受影響）。\n\n')
-        : (lang === 'en' ? `✓ Pinned this session to ${arg} (${providers[arg]}; other windows unaffected).\n\n` : `✓ 已將這個對話固定改用 ${arg}（${providers[arg]}；其他視窗不受影響）。\n\n`)
-      return { text: `${done}${providerReport(h, Date.now(), lang)}` }
+      return { text: switchedText(arg, providers[arg] ?? arg, lang) }
     }
-    if (arg !== '' && arg !== 'status') {
-      const opts = [...Object.keys(providers), 'claude', 'panel', 'ping', 'doctor'].map((k) => `/provider ${k}`).join('、')
-      return { text: lang === 'en' ? `Usage: /provider (status & panel), ${opts}` : `用法：/provider（看狀態並開啟面板）、${opts}` }
+    const names = [...Object.keys(providers), 'claude'].join(lang === 'en' ? ', ' : '、')
+    return {
+      text: lang === 'en'
+        ? `No provider or command "${arg}". Switch with /provider <${names}>; all commands: /provider help`
+        : `沒有「${arg}」這個供應商或指令。切換用 /provider <${names}>；所有指令：/provider help`,
     }
-    // Bare `/provider` opens the interactive panel above prompt AND returns the status summary
-    if (arg === '') {
-      await update($, panelData, () => buildPanelData(h0, cfg.port, direct, lang, Date.now(), cfg.outdated))
-      await update($, panelUi, (u) => ({ ...u, open: true, confirmingClaude: false }))
-    }
-    return { text: `${cfg.outdated ? `${outdatedText(lang)}\n\n` : ''}${providerReport(h0, Date.now(), lang)}` }
   }).catch(() => ({ text: '/provider 執行失敗，設定未變更。' }))
 }

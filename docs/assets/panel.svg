@@ -12,17 +12,19 @@
       .m { fill: #94a3b8; font-size: 12px; }
       .pingShow { animation: ps 10s linear infinite; }
       @keyframes ps { 0%, 24% { opacity: 0; } 28%, 94% { opacity: 1; } 98%, 100% { opacity: 0; } }
-      .selClaude { animation: sc 10s linear infinite; }
-      @keyframes sc { 0%, 54% { opacity: 1; } 56%, 100% { opacity: 0; } }
-      .selGem { animation: sg 10s linear infinite; }
-      @keyframes sg { 0%, 54% { opacity: 0; } 56%, 94% { opacity: 1; } 98%, 100% { opacity: 0; } }
+      .press { animation: pr 10s linear infinite; }
+      @keyframes pr { 0%, 44% { opacity: 0; } 46%, 54% { opacity: 1; } 56%, 100% { opacity: 0; } }
+      .panelOut { animation: po 10s linear infinite; }
+      @keyframes po { 0%, 54% { opacity: 1; } 58%, 94% { opacity: 0; } 98%, 100% { opacity: 1; } }
+      .toastIn { animation: ti 10s linear infinite; }
+      @keyframes ti { 0%, 56% { opacity: 0; } 60%, 92% { opacity: 1; } 96%, 100% { opacity: 0; } }
     </style>
   </defs>
 
   <rect width="960" height="380" rx="18" fill="#0d1117"/>
 
   <text x="36" y="42" class="sans" font-size="16" font-weight="600" fill="#f8fafc">Offload subagents automatically, or switch any window from the interactive panel above your prompt.</text>
-  <text x="36" y="64" class="sans m">Type /provider to open the panel, test live latency with [Ping], or pin the current window with one click.</text>
+  <text x="36" y="64" class="sans m">Type /provider to open the panel: [Ping] tests every provider, [Use] switches only this window, then the panel closes.</text>
 
   <!-- Left Side: Subagent & Local Gateway Routing -->
   <g transform="translate(36 84)">
@@ -42,88 +44,47 @@
     <text x="18" y="258" class="mono m">launch: { command: "my-gateway", args: ["serve"] }</text>
   </g>
 
-  <!-- Right Side: Interactive AbovePrompt Panel -->
   <g transform="translate(480 84)">
-    <rect width="444" height="274" rx="12" fill="#161b22" stroke="url(#accent)" stroke-width="2"/>
+   <g class="panelOut">
+    <rect width="444" height="244" rx="12" fill="#161b22" stroke="url(#accent)" stroke-width="2"/>
+    <text x="18" y="28" class="mono" font-size="13"><tspan fill="#38bdf8" font-weight="700">model-relay</tspan><tspan fill="#8b949e" font-size="10.5"> · this window's model</tspan></text>
+    <rect x="246" y="12" width="54" height="22" rx="5" fill="#1f6feb"/>
+    <text x="273" y="27" text-anchor="middle" class="mono" font-size="11" fill="#ffffff">Ping [p]</text>
+    <rect x="304" y="12" width="78" height="22" rx="5" fill="#21262d" stroke="#30363d"/>
+    <text x="343" y="27" text-anchor="middle" class="mono" font-size="11" fill="#c9d1d9">Settings [s]</text>
+    <rect x="386" y="12" width="42" height="22" rx="5" fill="#21262d"/>
+    <text x="407" y="27" text-anchor="middle" class="mono" font-size="11" fill="#8b949e">Close</text>
+    <line x1="18" y1="46" x2="426" y2="46" stroke="#30363d"/>
 
-    <!-- Panel Header -->
-    <text x="18" y="28" class="mono" font-size="13"><tspan fill="#38bdf8" font-weight="700">model-relay</tspan><tspan fill="#8b949e"> · Model Router &amp; 429 Failover (:8950)</tspan></text>
-    <rect x="314" y="12" width="62" height="22" rx="5" fill="#1f6feb"/>
-    <text x="345" y="27" text-anchor="middle" class="mono" font-size="11" fill="#ffffff">Ping [p]</text>
-    <rect x="382" y="12" width="46" height="22" rx="5" fill="#21262d"/>
-    <text x="405" y="27" text-anchor="middle" class="mono" font-size="11" fill="#8b949e">Close</text>
-
-    <text x="18" y="50" class="sans m">Subagent (haiku) &amp; 429 Failover → backup (backup-9) · Pinned: 2</text>
-    <line x1="18" y1="62" x2="426" y2="62" stroke="#30363d"/>
-
-    <!-- Notification Banner -->
-    <g class="pingShow">
-      <rect x="18" y="70" width="408" height="24" rx="5" fill="#1e293b"/>
-      <text x="28" y="86" class="mono" font-size="11.5" fill="#fbbf24">✓ Upstream latency updated · Click [Use] or press 1–3</text>
+    <g transform="translate(18 60)">
+      <text x="0" y="16" class="mono" font-size="12.5"><tspan fill="#4ade80" font-weight="700">● </tspan><tspan x="16" fill="#f8fafc" font-weight="700">claude</tspan><tspan x="84" fill="#8b949e">Anthropic Claude</tspan></text>
+      <text x="408" y="16" text-anchor="end" class="mono m">In use</text>
     </g>
-
-    <!-- Row 1: Claude -->
-    <g transform="translate(18 106)">
-      <g class="selClaude">
-        <text x="0" y="16" class="mono" font-size="12.5"><tspan fill="#4ade80" font-weight="700">● Active </tspan> <tspan fill="#f8fafc" font-weight="700">claude  </tspan> <tspan fill="#8b949e">· Anthropic Claude (main)</tspan></text>
-        <text x="408" y="16" text-anchor="end" class="mono m">Current</text>
-      </g>
-      <g class="selGem">
-        <text x="0" y="16" class="mono" font-size="12.5"><tspan fill="#8b949e">○ Ready  </tspan> <tspan fill="#c9d1d9">claude  </tspan> <tspan fill="#8b949e">· Anthropic Claude (main)</tspan></text>
-        <rect x="332" y="0" width="76" height="22" rx="5" fill="#21262d" stroke="#30363d"/>
-        <text x="370" y="15" text-anchor="middle" class="mono" font-size="11" fill="#c9d1d9">Switch [1]</text>
-      </g>
-    </g>
-
-    <!-- Row 2: backup -->
-    <g transform="translate(18 142)">
-      <text x="0" y="16" class="mono" font-size="12.5">
-        <tspan fill="#8b949e">○ Ready  </tspan>
-        <tspan fill="#c9d1d9">backup  </tspan>
-        <tspan fill="#c9d1d9">backup-9</tspan>
-        <tspan fill="#c084fc"> [failover]</tspan>
-        <tspan class="pingShow" fill="#4ade80"> · 200 · 1.9s</tspan>
-      </text>
+    <g transform="translate(18 96)">
+      <text x="0" y="16" class="mono" font-size="12.5"><tspan fill="#8b949e">○ </tspan><tspan x="16" fill="#c9d1d9">backup</tspan><tspan x="84" fill="#c9d1d9">backup-9</tspan><tspan class="pingShow" fill="#4ade80"> · test ok 1.9s</tspan></text>
       <rect x="344" y="0" width="64" height="22" rx="5" fill="#1f6feb"/>
       <text x="376" y="15" text-anchor="middle" class="mono" font-size="11" fill="#ffffff">Use [2]</text>
     </g>
-
-    <!-- Row 3: fast -->
-    <g transform="translate(18 178)">
-      <g class="selClaude">
-        <text x="0" y="16" class="mono" font-size="12.5">
-          <tspan fill="#8b949e">○ Ready  </tspan>
-          <tspan fill="#c9d1d9">fast    </tspan>
-          <tspan fill="#c9d1d9">fast-model</tspan>
-          <tspan class="pingShow" fill="#4ade80"> · 200 · 1.4s</tspan>
-        </text>
-        <rect x="344" y="0" width="64" height="22" rx="5" fill="#1f6feb"/>
-        <text x="376" y="15" text-anchor="middle" class="mono" font-size="11" fill="#ffffff">Use [3]</text>
-      </g>
-      <g class="selGem">
-        <text x="0" y="16" class="mono" font-size="12.5">
-          <tspan fill="#4ade80" font-weight="700">● Pinned </tspan>
-          <tspan fill="#f8fafc" font-weight="700">fast    </tspan>
-          <tspan fill="#38bdf8">fast-model</tspan>
-          <tspan fill="#4ade80"> · 200 · 1.4s</tspan>
-        </text>
-        <text x="408" y="16" text-anchor="end" class="mono m">Pinned</text>
-      </g>
+    <g transform="translate(18 132)">
+      <text x="0" y="16" class="mono" font-size="12.5"><tspan fill="#8b949e">○ </tspan><tspan x="16" fill="#c9d1d9">fast</tspan><tspan x="84" fill="#c9d1d9">fast-model</tspan><tspan class="pingShow" fill="#4ade80"> · test ok 1.4s</tspan></text>
+      <rect x="344" y="0" width="64" height="22" rx="5" fill="#1f6feb"/>
+      <rect class="press" x="341" y="-3" width="70" height="28" rx="7" fill="none" stroke="#fbbf24" stroke-width="2"/>
+      <text x="376" y="15" text-anchor="middle" class="mono" font-size="11" fill="#ffffff">Use [3]</text>
     </g>
-
-    <!-- Row 4: local -->
-    <g transform="translate(18 214)">
-      <text x="0" y="16" class="mono" font-size="12.5">
-        <tspan fill="#8b949e">○ Ready  </tspan>
-        <tspan fill="#c9d1d9">local   </tspan>
-        <tspan fill="#c9d1d9"> local-model</tspan>
-        <tspan class="pingShow" fill="#4ade80"> · 200 · 1.1s</tspan>
-      </text>
+    <g transform="translate(18 168)">
+      <text x="0" y="16" class="mono" font-size="12.5"><tspan fill="#8b949e">○ </tspan><tspan x="16" fill="#c9d1d9">local</tspan><tspan x="84" fill="#c9d1d9">local-model</tspan><tspan class="pingShow" fill="#4ade80"> · test ok 1.1s</tspan></text>
       <rect x="344" y="0" width="64" height="22" rx="5" fill="#1f6feb"/>
       <text x="376" y="15" text-anchor="middle" class="mono" font-size="11" fill="#ffffff">Use [4]</text>
     </g>
 
-    <line x1="18" y1="244" x2="426" y2="244" stroke="#30363d"/>
-    <text x="18" y="262" class="sans m">Tip: Click a button or press ctrl+x tab then 1–4 / p · Two-click confirm before rebuilding cache</text>
+    <line x1="18" y1="206" x2="426" y2="206" stroke="#30363d"/>
+    <text x="18" y="226" class="sans m">Keyboard: ctrl+x tab, then the key shown on a button</text>
+   </g>
+   <g class="toastIn" transform="translate(0 84)">
+    <rect width="444" height="84" rx="12" fill="#161b22" stroke="#4ade80" stroke-width="1.5"/>
+    <text x="18" y="28" class="sans" font-size="14" font-weight="700" fill="#4ade80">✓ This window now uses fast (fast-model)</text>
+    <text x="18" y="50" class="mono m">Status line: Main: fast-model (pinned for this window)</text>
+    <text x="18" y="70" class="sans m">The panel closed by itself; /provider opens it again</text>
+   </g>
   </g>
 </svg>

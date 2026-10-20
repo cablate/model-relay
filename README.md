@@ -99,7 +99,7 @@ claude plugin install model-relay@model-relay
 
 ### Interactive `AbovePrompt` control panel and provider test
 
-Type `/provider` (or `/provider panel`) to open an interactive control panel right above your prompt input box. Click buttons or press `ctrl+x tab` to use keyboard hotkeys (`1`–`9` to switch routes, `p` to test every provider, `r` to reset 429 cooldown, `f` / `t` / `x` to flip 429 failover, retry and Remote Control). Switching a pinned session back to Claude requires a two-click confirmation so you never accidentally rebuild a massive prompt cache. Three switch rows turn 429 failover, retry and Remote Control on or off without editing JSON: failover and retry apply from the next request, while Remote Control asks first because it rewrites `settings.json`, and it only reaches new sessions.
+Type `/provider` to open a panel right above your prompt input box. It does one thing: pick which model this window uses, one button per row. Once a switch takes, the panel closes and the status line shows the model now in use. Click a button, or press `ctrl+x tab` and then the key shown on it (`1`–`9` to switch, `p` to test every provider, and `r` to try Claude again while a 429 cooldown runs). Switching a pinned window back to Claude takes a second press, so you never rebuild a long chat's prompt cache by accident. The switches every window shares stay folded under Settings [s]: press it to show 429 failover, retry and Remote Control (`f` / `t` / `x`) and the model aliases. They turn on or off without editing JSON: failover and retry apply from the next request, while Remote Control asks first because it rewrites `settings.json`, and it only reaches new sessions.
 
 Each provider row shows two things apart: the last real request (`last 200 · 45.0s`) and the last test (`test ok 640ms`). The test sends one 1-token request and stops at the first byte (15 seconds at most), so a long reply never reads as a slow provider, and a failure says what is wrong in words: the key was refused, the model name is wrong, the quota is used up, the local gateway is not running, or there was no answer in time. The router keeps the provider's key out of anything it shows. When the router skips a provider (its `env:` variable is unset for the router), the panel says so.
 
@@ -203,10 +203,10 @@ Configuration lives in `~/.claude/model-relay.json`. The directory defaults to `
 
 | Command | Description |
 |---|---|
-| `/provider` | Open the interactive control panel above the prompt and show current routing status |
-| `/provider panel` | Toggle the interactive `AbovePrompt` control panel open or closed |
-| `/provider <name>` | Pin the current conversation to provider `<name>` (e.g. `/provider backup`) |
-| `/provider claude` | Switch the current conversation back to Claude (rebuilds prompt cache on next turn) |
+| `/provider` | Open the panel above the prompt to pick this window's model |
+| `/provider <name>` · `/provider claude` | Switch this window without the panel, answered in one line (e.g. `/provider backup`); back to Claude, the next turn rebuilds the prompt cache |
+| `/provider status` | The status as text: where this window goes, the switches every window shares, and anything to fix |
+| `/provider help` | Every command, grouped by what it reaches: this window, every window, setup and checks |
 | `/provider setup [goal]` | Let Claude walk you through setup with the setup tool; keys stay out of the chat |
 | `/provider init` · `/provider doctor [--ping]` | First-run setup and health check; work from any folder, with or without a config file |
 | `/provider restart` | Restart the relay so it runs the installed plugin's code. After `claude plugin update` the plugin does this by itself once the relay answers no request; a relay left by an older plugin cannot report that, so the status line asks you to run it when no window has a reply in progress |

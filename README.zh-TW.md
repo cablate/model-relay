@@ -99,7 +99,7 @@ claude plugin install model-relay@model-relay
 
 ### 輸入框上方的 `AbovePrompt` 互動面板與供應商測試
 
-輸入 `/provider`（或 `/provider panel`）即可在輸入框上方開啟互動控制面板。可直接用滑鼠點擊按鈕，或按 `ctrl+x tab` 用鍵盤熱鍵操作（按 `1`–`9` 切換模型、按 `p` 測試每個供應商、按 `r` 重置 429 冷卻計時、按 `f` / `t` / `x` 開關 429 備援、重試與 Remote Control）。當要把已固定的長對話切回 Claude 時，面板設有二次確認防呆，避免誤觸重建巨量快取。面板上有三列開關，不必改 JSON 就能開關 429 備援、重試與 Remote Control：備援與重試從下一個請求起生效；Remote Control 會改寫 `settings.json`，所以先確認再執行，而且只有新對話會生效。
+輸入 `/provider` 會在輸入框上方開啟面板。它只做一件事：選這個視窗用哪個模型，每列一個按鈕。切換成功後面板自動收起，狀態列會顯示現在用的模型。可以直接點按鈕，或先按 `ctrl+x tab`，再按按鈕上標的鍵（`1`–`9` 切換、`p` 測試每個供應商；429 冷卻中多一個 `r`，重新試 Claude）。把已固定的視窗切回 Claude 要再按一次確認，避免誤觸而重建長對話的整段快取。所有視窗共用的開關收在「設定 [s]」裡：按下才展開 429 備援、重試、Remote Control（`f` / `t` / `x`）和別名分流。不必改 JSON 就能開關：備援與重試從下一個請求起生效；Remote Control 會改寫 `settings.json`，所以先確認再執行，而且只有新對話會生效。
 
 每個供應商那一列把兩件事分開顯示：上一個真實請求（`last 200 · 45.0s`）與上一次測試（`test ok 640ms`）。測試只送一個 1 token 的請求，收到第一個位元組就停（最多 15 秒），所以很長的回覆不會被看成供應商很慢；失敗時直接用白話說出問題：金鑰被拒、模型名稱不對、額度用完、本機 Gateway 沒開，或時間內沒有回應。轉發站顯示的任何內容都不會帶出供應商的金鑰。轉發站略過某個供應商（轉發站看不到它的 `env:` 變數）時，面板也會提醒。
 
@@ -203,10 +203,10 @@ node tools/setup.mjs rc
 
 | 指令 | 說明 |
 |---|---|
-| `/provider` | 在輸入框上方開啟互動控制面板，並顯示目前對話的路由狀態 |
-| `/provider panel` | 開關輸入框上方的 `AbovePrompt` 互動控制面板 |
-| `/provider <name>` | 將目前這個對話固定改用 `<name>` 供應商（例如 `/provider backup`） |
-| `/provider claude` | 將目前這個對話切回 Claude（下一輪會重建整段對話快取） |
+| `/provider` | 在輸入框上方開啟面板，選這個視窗用哪個模型 |
+| `/provider <name>` · `/provider claude` | 不開面板直接切換這個視窗，回覆只有一行（例如 `/provider backup`）；切回 Claude 時，下一輪會重建整段對話快取 |
+| `/provider status` | 用文字看狀態：這個視窗走哪裡、所有視窗共用的開關、需要處理的問題 |
+| `/provider help` | 列出所有指令，依影響範圍分組：這個視窗、所有視窗、設定與檢查 |
 | `/provider setup [goal]` | 讓 Claude 用設定工具帶你完成設定，金鑰不會進對話 |
 | `/provider init` · `/provider doctor [--ping]` | 首次設定與健康檢查；不論在哪個資料夾、有沒有設定檔都能用 |
 | `/provider restart` | 重啟轉發站，讓它跑已安裝外掛的程式。`claude plugin update` 之後，外掛會在轉發站沒有請求進行中時自動做這件事；舊外掛留下的轉發站無法回報這件事，所以改在狀態列提示你在所有視窗都沒有回覆進行中時執行 |

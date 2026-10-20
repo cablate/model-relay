@@ -22,6 +22,7 @@
 
 ### 變更
 
+- **`/provider` 說得更少：** `/provider <name>` 與 `/provider claude` 只回一行；不帶參數的 `/provider` 只開面板、回一行，不再同時附上一整份報告。面板只負責選這個視窗用哪個模型：切換成功就自動收起，只有轉發站離線或 429 冷卻中才多一行提示，所有視窗共用的開關（429 備援、重試、Remote Control）和別名收進「設定 [s]」。文字版狀態改用 `/provider status`，指令說明移到 `/provider help`，依每個指令影響的範圍分組。
 - **不相容變更，影響 0.6 或更早的使用者：舊設定不再被讀取。** 這一版的轉發站不讀檔名為 `custom-agent.json` 的檔案，也不讀沒有 `"format": 2` 的 `model-relay.json`，所以在你執行 `node tools/setup.mjs migrate --go` 之前，外掛不會為它啟動或替換轉發站：還在執行的 0.6 轉發站照常運作，沒有的話所有請求都走 Claude。`doctor` 會列出一項 `outdated`。`migrate --go` 會寫出格式 2，並把舊版本當初補上的每一個值都寫進去（preset 的模型、舊 `zai`／`glm` preset 攔下的 `haiku`、舊 `gemini`／`magpie` 的 Gateway 值、依供應商名稱猜出的設定、隱含的備援名單），所以轉發站的路由不變，還在執行的 0.6 轉發站讀到新檔案也一樣；寫入結果會讓路由改變時，它會拒絕。見 [UPGRADING.zh-TW.md](UPGRADING.zh-TW.md)。
 - **`migrate` 是唯一看得懂舊格式的指令：** `set`、`add`、`remove`、`alias`、`providers`、`init`、`restart`、`rc` 與 `proxy enable` 遇到舊設定都會拒絕，並請你先執行 `migrate`。`set` 以前會順便把舊版面換成新版面，現在不會了。
 - **沒有設定檔明講，就不會送給供應商（格式 2）：** 內建 preset（`zai`、`deepseek`、`kimi`、`minimax`、`openrouter`）只帶網址與相容參數，`model` 由你決定；`glm`、`gemini`、`magpie` preset 已移除；沒有 preset 會攔 `haiku`；沒設 `failover.chain` 時 429 原樣回傳；不再從供應商名稱猜任何設定。

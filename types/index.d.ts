@@ -34,12 +34,17 @@ export type PanelData = {
   now: number
 }
 
+// What the last panel action came to: green when it did what was asked, yellow when it did not
+export type PanelNote = { text: string; ok: boolean }
+
 export type PanelUi = {
   open: boolean
   confirmingClaude: boolean
   confirmingProxy?: boolean
   pinging: boolean
-  note?: string
+  // The switches every window shares stay folded away until asked for: the panel is for this window's model
+  showSettings?: boolean
+  note?: PanelNote
 }
 
 declare module 'claude-code' {
