@@ -8,6 +8,7 @@ const fs = require('fs')
 const path = require('path')
 const net = require('net')
 const tls = require('tls')
+const { pipeline } = require('stream')
 const L = require('./logic')
 const PKI = require('./pki')
 
@@ -106,7 +107,12 @@ const json = (res, obj) => {
   res.end(JSON.stringify(obj))
 }
 
-function send(base, req, body, headers, onResponse, onError) {
+// Streams an upstream answer whose headers are already sent. pipe() alone never ends `res` when the upstream drops
+// mid-stream, so the caller would wait forever; pipeline() destroys `res` instead, and the caller sees the failure.
+const relay = (ur, res) => pipeline(ur, res, () => {})
+
+function send(base, req, res, body, headers, onResponse, onError) {
+  if (res.destroyed) return // the caller left while a retry or fallback was waiting
   const u = new URL(base)
   const lib = u.protocol === 'http:' ? http : https
   const up = lib.request(
@@ -119,7 +125,15 @@ function send(base, req, body, headers, onResponse, onError) {
     },
     onResponse,
   )
-  up.on('error', onError)
+  // A socket error after the answer started streaming (a reset mid-stream) can neither be retried nor reported:
+  // the headers are gone, and a second writeHead would throw and take the router down. Cut the caller off instead.
+  up.on('error', (e) => (res.headersSent ? res.destroy() : onError(e)))
+  // The caller gave up (Esc in Claude Code): stop the upstream generation instead of paying for the rest of it
+  const callerLeft = () => {
+    if (!res.writableEnded) up.destroy()
+  }
+  res.on('close', callerLeft)
+  up.on('close', () => res.off('close', callerLeft))
   up.end(body)
 }
 
@@ -228,7 +242,7 @@ function toProvider(provider, req, res, body, rewrite, sid, attempt = 0, tried =
     return true
   }
 
-  send(provider.url, req, out, headers, (ur) => {
+  send(provider.url, req, res, out, headers, (ur) => {
     const status = ur.statusCode || 0
     if (status >= 200 && status < 300) {
       res.writeHead(ur.statusCode, ur.headers)
@@ -243,7 +257,7 @@ function toProvider(provider, req, res, body, rewrite, sid, attempt = 0, tried =
         const tag = provider.name === 'glm' ? 'zai' : provider.name
         logReq({ to: `${tag}-reply`, sid: short(sid), rewrite, status, bytes: out.length, inputTokens: last, attempt })
       })
-      return ur.pipe(res)
+      return relay(ur, res)
     }
     // Failure: buffer the whole answer, then retry, fail over, or pass it through untouched
     const chunks = []
@@ -262,11 +276,11 @@ function toProvider(provider, req, res, body, rewrite, sid, attempt = 0, tried =
 }
 
 function toClaude(cfg, req, res, body, trial, sid) {
-  send(cfg.claudeUrl, req, body, { ...req.headers }, (ur) => {
+  send(cfg.claudeUrl, req, res, body, { ...req.headers }, (ur) => {
     if (ur.statusCode !== 429) {
       if (trial && ur.statusCode < 400) setState(L.onClaudeOk(state), 'claude ok again: new sessions use Claude')
       res.writeHead(ur.statusCode, ur.headers)
-      return ur.pipe(res)
+      return relay(ur, res)
     }
     const chunks = []
     ur.on('data', (c) => chunks.push(c))
@@ -353,7 +367,7 @@ function passthrough(cfg, req, res) {
     { hostname: u.hostname, port: u.port || (u.protocol === 'http:' ? 80 : 443), path: L.upstreamPath(cfg.claudeUrl, req.url), method: req.method, headers },
     (ur) => {
       res.writeHead(ur.statusCode, ur.headers)
-      ur.pipe(res)
+      relay(ur, res)
     },
   )
   up.on('error', (e) => apiError(res, 502, `Anthropic unreachable: ${e.message}`))

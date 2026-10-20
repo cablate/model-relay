@@ -9,6 +9,7 @@
 ### 修正
 
 - `~/.claude/settings.json` 的 `availableModels` 沒有列出某個供應商的非 Claude 模型時，`doctor` 現在會發出警告。否則 Claude Code 會把 `model-relay:<name>` 子代理改跑在 `CLAUDE_CODE_SUBAGENT_MODEL` 或主線模型上，只在 debug log 留一行警告，請求永遠不會經過轉發站。
+- 供應商或 Anthropic 的回應在串流途中斷線時，不再讓 Claude Code 一直等不到回覆；開啟重試時，串流途中連線被重置也不再讓轉發站當掉：現在會直接中斷呼叫端的連線，讓它知道請求失敗。呼叫端放棄時（按 Esc），現在也會中斷送往上游的請求，不再讓它跑到結束。
 
 ## [0.6.0] - 2026-10-20
 

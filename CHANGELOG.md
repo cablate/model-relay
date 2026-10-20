@@ -9,6 +9,7 @@ All notable changes to `model-relay` are documented in this file. Format follows
 ### Fixed
 
 - `doctor` now warns when `availableModels` in `~/.claude/settings.json` does not list a provider's non-Claude model. Claude Code otherwise runs `model-relay:<name>` subagents on `CLAUDE_CODE_SUBAGENT_MODEL` or the parent's model, with a warning only in its debug log, so they never reach the relay.
+- A provider or Anthropic answer that drops mid-stream no longer leaves Claude Code waiting with no reply, and a connection reset mid-stream no longer crashes the router when retries are on: the caller's connection is cut so it sees the failure. A caller that gives up (Esc) now stops the upstream request instead of letting it run to the end.
 
 ## [0.6.0] - 2026-10-20
 
