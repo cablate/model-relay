@@ -10,6 +10,7 @@
 
 - **`setup.mjs set port <n>`：** 修改轉發站連接埠（`1025`–`65535`），保留 `.relay-backup` 備份，並同步改寫 `settings.json`（`ANTHROPIC_BASE_URL`，代理模式則是 `HTTPS_PROXY`，照例備份）。會拒絕已有程式在回應的埠。已在執行的轉發站會一直用舊埠直到你把它停掉；指令會印出它的 pid，但不會替你結束它。
 - **`/__health` 回報 `configDir`：** 轉發站是為哪個設定目錄啟動的，讓 `doctor`、`proxy` 與外掛 hook 能分辨連接埠上回應的是誰的轉發站。路徑以實際路徑比對，Windows 上不分大小寫。
+- **`/provider setup [goal]`：讓 Claude 帶你設定。** Claude 會拿到已安裝設定工具的路徑並帶你執行：不會要你在對話貼金鑰、套用前先預演變更、改 `~/.claude/settings.json` 之前先問你。還沒有設定檔時也能用。
 
 ### 變更
 
@@ -27,6 +28,7 @@
 - **`init --fix` 寫死連接埠 8950：** 改為寫入設定檔中的連接埠。
 - **設定檔的 `env:` token 未設定時，轉發站會綁到 8950、並對任何主機開放 `CONNECT`：** 現在轉發站會綁設定檔自己的連接埠，沒有可用設定時對 `CONNECT` 的處理和代理模式關閉時相同（拒絕）。
 - **`custom-agent-router.log` 無限成長：** 現在和 `custom-agent-requests.log` 一樣超過 5 MB 就清空，與文件一致。
+- **首次設定不再需要路徑：** 安裝步驟原本要執行 `node tools/setup.mjs …`，但只有在外掛安裝目錄或 clone 的原始碼資料夾裡才找得到這個檔案；用 `claude plugin install` 安裝後在其他資料夾照著做會出現 `Cannot find module`。現在 `/provider init` 與 `/provider doctor [--ping]` 能在 Claude Code 裡直接完成同樣的事，不論目前在哪個資料夾、也不需要先有設定檔，README 也說明了 `node tools/setup.mjs …` 適用的情境。
 
 ### 安全性
 

@@ -45,16 +45,18 @@ claude plugin marketplace add cablate/model-relay
 claude plugin install model-relay@model-relay
 ```
 
-Initialize `~/.claude/model-relay.json`, wire `ANTHROPIC_BASE_URL` into `~/.claude/settings.json`, and verify your upstream providers with one command:
+1. **Set your provider's API key before starting Claude Code.** The relay reads it from the environment of Claude Code, so a variable set in a shell that is already running Claude Code is not seen. Make it permanent, for example `export ZAI_API_KEY="your-api-key"` in `~/.zshrc` (macOS/Linux) or `setx ZAI_API_KEY "your-api-key"` (Windows), then open a new terminal.
+2. **Open Claude Code and let it set things up with you.** Run `/reload-plugins` first if Claude Code was already open.
 
-```bash
-cd ~/.claude/plugins/cache/model-relay/model-relay/<version>   # the plugin's install directory (see below)
-node tools/setup.mjs init --fix
-export ZAI_API_KEY="your-api-key"
-node tools/setup.mjs doctor --ping
-```
+   ```text
+   /provider setup
+   ```
 
-Every `node tools/setup.mjs ...` command in this README runs from the plugin's install directory, which is `~/.claude/plugins/cache/model-relay/model-relay/<version>/` (`$CLAUDE_CONFIG_DIR/plugins/cache/model-relay/model-relay/<version>/` when you set `CLAUDE_CONFIG_DIR`; `ls` that folder for your version). Elsewhere, use the full path to `tools/setup.mjs` inside it. The command acts on the config directory in `$CLAUDE_CONFIG_DIR`, or `~/.claude` if unset.
+   Claude runs the setup tool for you, never asks you to paste a key into the chat, and asks before it changes `~/.claude/settings.json`. Add what you want, such as `/provider setup use deepseek for haiku`.
+
+To do it by hand instead, run `/provider init` (creates `~/.claude/model-relay.json` and points `ANTHROPIC_BASE_URL` in `~/.claude/settings.json` at the relay), restart Claude Code, then run `/provider doctor --ping`.
+
+The `node tools/setup.mjs ...` commands later in this README are the same tool. They run from the plugin's install directory, which is `~/.claude/plugins/cache/model-relay/model-relay/<version>/` (`$CLAUDE_CONFIG_DIR/plugins/cache/model-relay/model-relay/<version>/` when you set `CLAUDE_CONFIG_DIR`; `ls` that folder for your version). Elsewhere, use the full path to `tools/setup.mjs` inside it. The command acts on the config directory in `$CLAUDE_CONFIG_DIR`, or `~/.claude` if unset. `/provider setup` runs them for you from anywhere.
 
 `env:VAR` tokens are read from the router process's own environment, which it inherits from whichever Claude Code session (or setup command) started it. A variable exported after the router started is not seen until the router restarts: stop the router process (`doctor` prints its pid) and start a new Claude Code session. `doctor` reads your shell, so it can report the key as set while the router cannot see it.
 
@@ -190,6 +192,8 @@ Configuration lives in `~/.claude/model-relay.json` (or legacy `~/.claude/custom
 | `/provider panel` | Toggle the interactive `AbovePrompt` control panel open or closed |
 | `/provider <name>` | Pin the current conversation to provider `<name>` (e.g. `/provider glm`, `/provider gemini`) |
 | `/provider claude` | Switch the current conversation back to Claude (rebuilds prompt cache on next turn) |
+| `/provider setup [goal]` | Let Claude walk you through setup with the setup tool; keys stay out of the chat |
+| `/provider init` · `/provider doctor [--ping]` | First-run setup and health check; work from any folder, with or without a config file |
 | `/provider ping` | Probe live latency and HTTP status across all configured providers |
 | `/provider probe` | Reset the 429 cooldown timer so the next new session tries Claude immediately |
 | `/provider alias [haiku\|sonnet\|opus] [<name>\|claude]` | Inspect or point a Claude model alias at a provider (updates both `settings.json` and `matchModels`) |
@@ -220,8 +224,8 @@ Configuration lives in `~/.claude/model-relay.json` (or legacy `~/.claude/custom
 
 | Symptom | What to check |
 |---|---|
-| `/provider` says config is missing or invalid | Run `node tools/setup.mjs doctor` to verify JSON syntax and check if any `env:VAR` variables are unset in your shell |
-| Status bar shows `Relay offline: connected directly to Claude` | In `ANTHROPIC_BASE_URL` mode the plugin bypassed a stopped router so your chat keeps working. In proxy mode there is no such bypass: Claude Code cannot connect until the router is restarted. Run `node tools/setup.mjs doctor` or check `~/.claude/custom-agent-router.log` (a router that finds its port taken by another process or another config directory logs that there and exits) |
+| `/provider` says config is missing or invalid | Run `/provider doctor` (or `node tools/setup.mjs doctor` from the install directory) to verify JSON syntax and check if any `env:VAR` variables are unset in your shell |
+| Status bar shows `Relay offline: connected directly to Claude` | In `ANTHROPIC_BASE_URL` mode the plugin bypassed a stopped router so your chat keeps working. In proxy mode there is no such bypass: Claude Code cannot connect until the router is restarted. Run `/provider doctor` or check `~/.claude/custom-agent-router.log` (a router that finds its port taken by another process or another config directory logs that there and exits) |
 | Remote Control says it is only available via `api.anthropic.com` | Claude Code still uses the relay as its API address; run `node tools/setup.mjs proxy enable --go` and start a new session |
 | Claude Code cannot connect after enabling proxy mode | The router is probably down: run `node tools/setup.mjs proxy status`, start it with `node tools/setup.mjs rc`, or go back with `node tools/setup.mjs proxy disable --go` |
 | Tools are missing on a third-party provider | Set `"stripToolSearch": true` on that provider in `model-relay.json` so `ToolSearch` does not hide other tools |

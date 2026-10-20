@@ -160,6 +160,28 @@ export function toggleArgv(cfg: RelayCfg, script: string, which: Toggle, on: boo
   return [cfg.nodePath, script, 'set', which === 'failover' ? 'failover.enabled' : 'retry.enabled', on ? 'on' : 'off']
 }
 
+// The turn /provider setup hands to the model: where the CLI is, what the person asked for, and the rules that keep keys and settings safe.
+export function setupBrief(script: string, nodePath: string, goal: string, hasCfg: boolean, lang: 'zh' | 'en'): string {
+  const cli = `"${nodePath}" "${script}"`
+  return [
+    lang === 'en'
+      ? 'Help me set up the model-relay plugin for Claude Code. Reply in English.'
+      : '請幫我設定 Claude Code 的 model-relay 外掛，用繁體中文（台灣）回覆。',
+    goal ? `What I want: ${goal}` : 'What I want: a working setup with one provider; ask me which provider if it is not clear.',
+    '',
+    `The setup CLI is ${cli} (run it by this absolute path; it is not in the current folder). Run it with no arguments for usage, and "presets" for the built-in providers.`,
+    hasCfg
+      ? `A config already exists. Start with ${cli} doctor and ${cli} providers to see the current state.`
+      : `There is no config yet. Start with ${cli} presets, then create it with "init --fix" or "add <name> --token env:<VAR>".`,
+    '',
+    'Rules:',
+    '- Never ask me to paste an API key into this chat, and never print one. Use "env:VAR_NAME" tokens; tell me which variable to set, how to make it permanent on my OS, and that Claude Code must be restarted to see it.',
+    '- Commands that accept --go (migrate, remove, proxy): run without --go first, show me the result, and add --go only after I agree.',
+    '- Tell me before anything changes ~/.claude/settings.json (init --fix, doctor --fix, alias, proxy) and wait for my yes.',
+    `- Finish with ${cli} doctor --ping and tell me in plain words what works, what does not, and what I still have to do.`,
+  ].join('\n')
+}
+
 export function setupCliArgv(cfg: RelayCfg, script: string, cliArgs: string[]): string[] {
   return [cfg.nodePath, script, ...cliArgs]
 }
@@ -411,6 +433,9 @@ export function providerReport(h: Health | null, modelOrCfg: string | RelayCfg, 
     en
       ? '  · /provider ping                       Test live latency across all providers'
       : '  · /provider ping                       即時測試所有供應商的回應延遲',
+    en
+      ? '  · /provider setup [goal]               Let Claude walk you through setup (e.g. /provider setup add deepseek)'
+      : '  · /provider setup [想要的設定]         讓 Claude 帶你設定（例：/provider setup 加上 deepseek）',
     en
       ? '  · /provider alias [haiku <name|claude>] View or point a Claude model alias (e.g. /provider alias haiku glm)'
       : '  · /provider alias [haiku <name|claude>] 查看或設定別名分流（例：/provider alias haiku glm）',

@@ -10,6 +10,7 @@ All notable changes to `model-relay` are documented in this file. Format follows
 
 - **`setup.mjs set port <n>`:** Changes the router port (`1025`–`65535`), keeps a `.relay-backup` copy, and rewires `settings.json` (`ANTHROPIC_BASE_URL`, or `HTTPS_PROXY` in proxy mode) with the usual backup. Refuses a port that already answers. The router already running keeps the old port until you stop it; the command prints its pid and does not kill it.
 - **`/__health` reports `configDir`:** The config directory the router was started for, so `doctor`, `proxy` and the plugin hook can tell whose router answers on a port. Paths compare by real path, and case-insensitively on Windows.
+- **`/provider setup [goal]`: let Claude set it up with you.** Claude gets the path of the installed setup tool and runs it with you: it never asks for a key in the chat, previews changes before applying them, and asks before touching `~/.claude/settings.json`. Works before a config file exists.
 
 ### Changed
 
@@ -27,6 +28,7 @@ All notable changes to `model-relay` are documented in this file. Format follows
 - **`init --fix` wired port 8950:** It now wires the port from the config file.
 - **A config with an unset `env:` token made the router bind 8950, and open `CONNECT` to any host:** The router now binds the config file's own port, and without a usable config it refuses `CONNECT` like proxy mode off.
 - **`custom-agent-router.log` grew without limit:** It is now emptied past 5 MB like `custom-agent-requests.log`, as documented.
+- **First-run setup no longer needs a path:** the install steps ran `node tools/setup.mjs …`, which only works from the plugin's install folder or a cloned copy, so running them from any other folder after `claude plugin install` failed with `Cannot find module`. `/provider init` and `/provider doctor [--ping]` now do the same work from inside Claude Code, from any folder and before a config file exists, and the README says where `node tools/setup.mjs …` applies.
 
 ### Security
 

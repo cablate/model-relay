@@ -14,6 +14,7 @@ import {
   providerReport,
   routerScript,
   routerUrl,
+  setupBrief,
   setupScript,
   startArgv,
   statusText,
@@ -96,6 +97,15 @@ test('the failover chain leads the panel, and the router reports its switches', 
   assert(pd.failoverChain.join() === 'deepseek,glm', 'chain from the router, lower-cased')
   assert(pd.switches?.failover === true && pd.switches.retry === false && pd.switches.proxy === true && pd.switches.proxyReady === true, 'switches as the router reports them')
   assert(parseHealth('{"ok":true,"config":{"failoverEnabled":true}}')!.switches === undefined, 'a partial report is ignored')
+})
+
+test('/provider setup hands Claude the CLI path and the safety rules', () => {
+  const b = setupBrief('C:/p/tools/setup.mjs', 'node', 'add deepseek', false, 'zh')
+  assert(b.includes('"node" "C:/p/tools/setup.mjs"') && b.includes('add deepseek') && b.includes('繁體中文'), 'path, goal and language')
+  assert(b.includes('presets') && !b.includes('already exists'), 'no config yet starts from presets')
+  assert(b.includes('Never ask me to paste an API key') && b.includes('without --go first') && b.includes('settings.json'), 'safety rules')
+  const en = setupBrief('/p/tools/setup.mjs', '/usr/bin/node', '', true, 'en')
+  assert(en.includes('already exists') && en.includes('ask me which provider') && en.includes('Reply in English'), 'existing config, no goal, english')
 })
 
 test('switches are changed through the setup CLI', () => {

@@ -18,6 +18,7 @@ import {
   routerUrl,
   sessionArgv,
   setupCliArgv,
+  setupBrief,
   setupScript,
   startArgv,
   statusText,
@@ -274,8 +275,8 @@ export const register: Register = (on) => {
     if (cfg) await syncProviderAgents($, cfg, null)
     await $.command.register({
       name: 'provider',
-      description: '切換對話模型、設定 haiku 別名或開關備援面板（/provider [name|claude|panel|ping|alias|failover|retry|rc]）',
-      argumentHint: `[${[...keys, 'claude', 'panel', 'ping', 'alias', 'failover', 'retry', 'rc'].join('|')}]`,
+      description: '切換對話模型、設定 haiku 別名或開關備援面板（/provider [name|claude|panel|ping|setup|init|doctor|alias|failover|retry|rc]）',
+      argumentHint: `[${[...keys, 'claude', 'panel', 'ping', 'setup', 'init', 'doctor', 'alias', 'failover', 'retry', 'rc'].join('|')}]`,
     })
     await tick($)
     $.clock.every(10000, () => {
@@ -307,14 +308,27 @@ export const register: Register = (on) => {
   on('command.run', { command: 'provider' }, async ($, e) => {
     const cfg = await readCfg($)
     const lang = await detectLang($)
+    const arg = e.args.trim().toLowerCase()
+    // First-run setup works without a config, and without knowing where the plugin was installed
+    const first = arg.split(/\s+/)[0] ?? ''
+    if (first === 'setup') {
+      const goal = e.args.trim().slice('setup'.length).trim()
+      void $.prompt.submit({ text: setupBrief(setupScript($.plugin.root), cfg?.nodePath ?? 'node', goal, !!cfg, lang) })
+      return { text: lang === 'en' ? 'Handing setup to Claude…' : '已交給 Claude 協助設定…' }
+    }
+    if (first === 'init' || first === 'doctor' || first === 'presets') {
+      const cliArgs = first === 'init' ? ['init', '--fix'] : first === 'doctor' ? ['doctor', '--fix', ...(arg.includes('--ping') ? ['--ping'] : [])] : ['presets']
+      const r = await $.process.run([cfg?.nodePath ?? 'node', setupScript($.plugin.root), ...cliArgs], { timeoutMs: 60000 }).catch(() => null)
+      const out = ((r?.stdout || '') + (r?.stderr || '')).trim()
+      return { text: out || (lang === 'en' ? 'Setup command did not respond.' : '設定指令沒有回應。') }
+    }
     if (!cfg) {
       return {
         text: lang === 'en'
-          ? 'model-relay.json (or custom-agent.json) is missing or invalid.'
-          : 'model-relay.json（或 custom-agent.json）不存在或格式錯誤。',
+          ? 'model-relay.json (or custom-agent.json) is missing or invalid. Run /provider init to create it, then /provider doctor to check it.'
+          : 'model-relay.json（或 custom-agent.json）不存在或格式錯誤。請先執行 /provider init 建立，再用 /provider doctor 檢查。',
       }
     }
-    const arg = e.args.trim().toLowerCase()
     const win = await isWindows($)
 
     if (arg === 'panel') {

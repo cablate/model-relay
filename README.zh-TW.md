@@ -45,16 +45,18 @@ claude plugin marketplace add cablate/model-relay
 claude plugin install model-relay@model-relay
 ```
 
-初始化 `~/.claude/model-relay.json`、自動將 `ANTHROPIC_BASE_URL` 寫入 `~/.claude/settings.json`，並用一行指令實測所有上游供應商連線：
+1. **啟動 Claude Code 之前，先設好供應商的 API 金鑰。** 轉發站從 Claude Code 的環境變數讀金鑰，在已經跑著 Claude Code 的 shell 裡才設，它看不到。請設成永久的，例如在 `~/.zshrc` 加上 `export ZAI_API_KEY="your-api-key"`（macOS／Linux），或執行 `setx ZAI_API_KEY "your-api-key"`（Windows），再開一個新的終端機。
+2. **打開 Claude Code，讓它帶你設定。** 如果 Claude Code 原本就開著，先執行 `/reload-plugins`。
 
-```bash
-cd ~/.claude/plugins/cache/model-relay/model-relay/<version>   # 外掛的安裝目錄（見下方說明）
-node tools/setup.mjs init --fix
-export ZAI_API_KEY="your-api-key"
-node tools/setup.mjs doctor --ping
-```
+   ```text
+   /provider setup
+   ```
 
-本文所有 `node tools/setup.mjs ...` 指令都要在外掛的安裝目錄下執行，也就是 `~/.claude/plugins/cache/model-relay/model-relay/<version>/`（有設定 `CLAUDE_CONFIG_DIR` 時為 `$CLAUDE_CONFIG_DIR/plugins/cache/model-relay/model-relay/<version>/`；用 `ls` 看該資料夾即可知道版本）。在其他位置則改用該目錄內 `tools/setup.mjs` 的完整路徑。指令操作的是 `$CLAUDE_CONFIG_DIR` 指定的設定目錄，未設定則為 `~/.claude`。
+   Claude 會替你執行設定工具，不會要你把金鑰貼進對話，改動 `~/.claude/settings.json` 之前也會先問你。可以直接寫出想要的設定，例如 `/provider setup use deepseek for haiku`。
+
+想自己手動設定的話：執行 `/provider init`（建立 `~/.claude/model-relay.json`，並把 `~/.claude/settings.json` 的 `ANTHROPIC_BASE_URL` 指向轉發站），重開 Claude Code，再執行 `/provider doctor --ping`。
+
+本文後面的 `node tools/setup.mjs ...` 是同一個工具，要在外掛的安裝目錄下執行，也就是 `~/.claude/plugins/cache/model-relay/model-relay/<version>/`（有設定 `CLAUDE_CONFIG_DIR` 時為 `$CLAUDE_CONFIG_DIR/plugins/cache/model-relay/model-relay/<version>/`；用 `ls` 看該資料夾即可知道版本）。在其他位置則改用該目錄內 `tools/setup.mjs` 的完整路徑。指令操作的是 `$CLAUDE_CONFIG_DIR` 指定的設定目錄，未設定則為 `~/.claude`。`/provider setup` 可以在任何位置替你執行這些指令。
 
 `env:VAR` 的 token 是從轉發站程序自己的環境變數讀取，而它的環境繼承自啟動它的 Claude Code 對話（或 setup 指令）。轉發站啟動之後才匯出的變數，要等轉發站重新啟動才讀得到：請結束轉發站程序（`doctor` 會印出它的 pid）並開新的 Claude Code 對話。`doctor` 讀的是你當下的 shell，所以可能顯示金鑰已設定、轉發站卻看不到。
 
@@ -190,6 +192,8 @@ node tools/setup.mjs rc
 | `/provider panel` | 開關輸入框上方的 `AbovePrompt` 互動控制面板 |
 | `/provider <name>` | 將目前這個對話固定改用 `<name>` 供應商（例如 `/provider glm`、`/provider gemini`） |
 | `/provider claude` | 將目前這個對話切回 Claude（下一輪會重建整段對話快取） |
+| `/provider setup [goal]` | 讓 Claude 用設定工具帶你完成設定，金鑰不會進對話 |
+| `/provider init` · `/provider doctor [--ping]` | 首次設定與健康檢查；不論在哪個資料夾、有沒有設定檔都能用 |
 | `/provider ping` | 即時測試所有已設定供應商的連線狀態與回應延遲 |
 | `/provider probe` | 重置 429 冷卻計時，讓下一個新對話立即嘗試使用 Claude |
 | `/provider alias [haiku\|sonnet\|opus] [<name>\|claude]` | 查看或設定 Claude 模型別名要走哪個供應商（同步更新 `settings.json` 與 `matchModels`） |
@@ -220,8 +224,8 @@ node tools/setup.mjs rc
 
 | 症狀 | 檢查項目 |
 |---|---|
-| `/provider` 顯示設定檔不存在或格式錯誤 | 執行 `node tools/setup.mjs doctor` 檢查 JSON 語法，並確認 `env:VAR` 環境變數是否已在當前 shell 匯出 |
-| 狀態列顯示轉發站離線（`Relay offline: connected directly to Claude`） | `ANTHROPIC_BASE_URL` 模式下，外掛偵測到轉發站未回應時會自動退回直連確保對話不中斷；代理模式沒有這個退路，轉發站重新啟動前 Claude Code 連不上。可執行 `node tools/setup.mjs doctor` 或查看 `~/.claude/custom-agent-router.log`（連接埠被其他程序或其他設定目錄的轉發站佔用時，轉發站會把原因寫在這個日誌並結束） |
+| `/provider` 顯示設定檔不存在或格式錯誤 | 執行 `/provider doctor`（在外掛安裝目錄也可用 `node tools/setup.mjs doctor`）檢查 JSON 語法，並確認 `env:VAR` 環境變數是否已在當前 shell 匯出 |
+| 狀態列顯示轉發站離線（`Relay offline: connected directly to Claude`） | `ANTHROPIC_BASE_URL` 模式下，外掛偵測到轉發站未回應時會自動退回直連確保對話不中斷；代理模式沒有這個退路，轉發站重新啟動前 Claude Code 連不上。可執行 `/provider doctor` 或查看 `~/.claude/custom-agent-router.log`（連接埠被其他程序或其他設定目錄的轉發站佔用時，轉發站會把原因寫在這個日誌並結束） |
 | Remote Control 說只能經由 `api.anthropic.com` 使用 | Claude Code 還把轉發站當成 API 位址；執行 `node tools/setup.mjs proxy enable --go` 後開新的對話 |
 | 開啟代理模式後 Claude Code 連不上 | 多半是轉發站沒在跑：執行 `node tools/setup.mjs proxy status` 查看，用 `node tools/setup.mjs rc` 啟動，或用 `node tools/setup.mjs proxy disable --go` 退回 |
 | 切到第三方供應商後工具消失或無法呼叫工具 | 確認該供應商在 `model-relay.json` 中設有 `"stripToolSearch": true` |

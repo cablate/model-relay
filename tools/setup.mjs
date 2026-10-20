@@ -169,7 +169,7 @@ function pingProvider(p) {
 }
 
 if (cmd === 'presets') {
-  console.log('Built-in provider presets (use in model-relay.json or "node tools/setup.mjs add <name>"):')
+  console.log('Built-in provider presets (use the name in model-relay.json, or ask "/provider setup add <name>" in Claude Code):')
   for (const [k, v] of Object.entries(L.PRESETS)) {
     console.log(`  - ${k.padEnd(10)} model=${v.model.padEnd(25)} url=${v.baseUrl}`)
   }
@@ -189,7 +189,7 @@ if (cmd === 'init') {
     const w = ensureSettingsWiring(relayPort(), true)
     console.log(`  ${w.msg}`)
   }
-  console.log('Set your API key environment variables (e.g. ZAI_API_KEY) or run "node tools/setup.mjs add <name> --token ..." before starting Claude Code.')
+  console.log('Next: set the API key variable your provider needs (e.g. ZAI_API_KEY), restart Claude Code, then run "/provider doctor --ping". "/provider setup" lets Claude walk you through it.')
   process.exit(0)
 }
 
