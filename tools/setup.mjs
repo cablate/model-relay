@@ -845,6 +845,17 @@ if (cmd === 'rc') {
       lint.push(`settings.json ${envKey}="${envVal}" does not match any provider's matchModels; requests for it will go to Claude`)
     }
   }
+  // Claude Code drops a subagent model missing from availableModels (a warning in its debug log only) and runs
+  // CLAUDE_CODE_SUBAGENT_MODEL or the parent's model instead, so model-relay:<name> agents never reach the relay.
+  // Observed on Claude Code 2.1.300 with an exact entry for a non-Claude id. Claude-named models are skipped: aliases
+  // and families may admit them, which this exact match cannot tell. Only the user settings.json is read here;
+  // project, local and managed settings can set availableModels too.
+  if (Array.isArray(curSettings?.availableModels)) {
+    const allowed = new Set(curSettings.availableModels.map((m) => String(m).toLowerCase()))
+    const blocked = [...new Set(Object.values(cfg.providers).map((p) => p.model))]
+      .filter((m) => !L.isClaudeModel(m) && !/claude/i.test(m) && !allowed.has(m.toLowerCase()))
+    if (blocked.length) lint.push(`${settingsPath} availableModels does not list ${blocked.join(', ')}; Claude Code runs model-relay:<name> subagents on another model (CLAUDE_CODE_SUBAGENT_MODEL or the parent's) instead. Add each exactly as written here`)
+  }
   for (const w of lint) console.log(`  ⚠ ${w}`)
 
   const wiring = ensureSettingsWiring(cfg.port, hasFlag('--fix'))

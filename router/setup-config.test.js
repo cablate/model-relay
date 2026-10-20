@@ -140,6 +140,25 @@ test('doctor points out an old layout, an unknown failover name and a model anot
   assert.match(r.out, /glm-9 go to aaa, not bbb/)
 })
 
+test('doctor warns when settings.json availableModels would drop a provider subagent model', (t) => {
+  const f = fixture(t, {
+    port: 8999,
+    providers: {
+      aaa: { baseUrl: 'https://a.example', token: 't1', model: 'glm-5.3[1m]', matchModels: ['^glm'] },
+      bbb: { baseUrl: 'https://b.example', token: 't2', model: 'gemini-4-argon', matchModels: ['^gemini'] },
+    },
+  })
+  const settingsFile = path.join(f.dir, 'settings.json')
+  fs.writeFileSync(settingsFile, JSON.stringify({ availableModels: ['opus', 'glm-5.3[1m]'] }))
+  const r = f.run('doctor')
+  assert.match(r.out, /availableModels does not list gemini-4-argon;/, 'a missing model is named')
+  assert.doesNotMatch(r.out, /does not list[^\n]*glm/, 'a listed model is not named')
+  fs.writeFileSync(settingsFile, JSON.stringify({ availableModels: ['glm-5.3[1m]', 'GEMINI-4-ARGON'] }))
+  assert.doesNotMatch(f.run('doctor').out, /availableModels/, 'every model listed, no warning')
+  fs.writeFileSync(settingsFile, JSON.stringify({}))
+  assert.doesNotMatch(f.run('doctor').out, /availableModels/, 'no allowlist, no warning')
+})
+
 test('alias points haiku at a provider in both settings.json and matchModels, and resets back to claude', (t) => {
   const f = fixture(t, {
     providers: {

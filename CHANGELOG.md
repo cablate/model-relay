@@ -6,6 +6,10 @@ All notable changes to `model-relay` are documented in this file. Format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- `doctor` now warns when `availableModels` in `~/.claude/settings.json` does not list a provider's non-Claude model. Claude Code otherwise runs `model-relay:<name>` subagents on `CLAUDE_CODE_SUBAGENT_MODEL` or the parent's model, with a warning only in its debug log, so they never reach the relay.
+
 ## [0.6.0] - 2026-10-20
 
 Use Remote Control without losing the relay (`proxy.enabled` with a local CA constrained to `api.anthropic.com`), point `haiku` / `sonnet` / `opus` aliases at any provider in one command (`setup.mjs alias` & `/provider alias`), and spawn provider subagents on the fly (`subagent_type: "model-relay:<name>"`) without `.claude/agents/*.md` files or restarting your session. The `/provider` panel also adds live toggles for 429 failover (`failover.chain`), retries (`retry.enabled`), and Remote Control (`f` / `t` / `x`).
