@@ -38,15 +38,22 @@ const REQLOG = path.join(dir, 'custom-agent-requests.log')
 // The file is re-read on every request so edits apply at once. A read that fails (an editor mid-save, a typo) keeps
 // the last good config instead of failing requests; "doctor" is what tells a person the file is broken.
 let lastGoodCfg = null
+// env:VAR tokens that did not resolve in THIS process (a router started before the key was exported never sees it)
+let unresolved = []
 const readCfg = () => {
+  unresolved = [] // a file that cannot be read or parsed must not be blamed on an env var
   try {
-    const parsed = L.parseCfg(JSON.parse(fs.readFileSync(resolveCfgPath(), 'utf8')))
+    const raw = JSON.parse(fs.readFileSync(resolveCfgPath(), 'utf8'))
+    unresolved = L.unresolvedEnv(raw)
+    const parsed = L.parseCfg(raw)
     if (parsed) lastGoodCfg = parsed
     return parsed || lastGoodCfg
   } catch {
     return lastGoodCfg
   }
 }
+
+const cfgMissing = () => L.cfgMissingMessage(unresolved)
 
 let state = (() => {
   try {
@@ -317,6 +324,7 @@ function control(req, res, body) {
       aliases: cfg ? L.detectAliases(cfg) : {},
       config: cfg ? { failoverEnabled: cfg.failoverEnabled, retryEnabled: cfg.retry.enabled, proxyEnabled: cfg.proxy.enabled } : null,
       providers,
+      unresolved,
       stats: providerStats,
       sessionsOnCustom: Object.keys(state.sticky || {}).length,
       session: L.getSessionProvider(state, cfg, sid),
@@ -343,7 +351,7 @@ function control(req, res, body) {
     return json(res, { ok: true, failoverSince: state.failoverSince, nextClaudeTry: 0 })
   }
   if (u.pathname === '/__ping' && req.method === 'POST') {
-    if (!cfg) return apiError(res, 500, 'config missing')
+    if (!cfg) return apiError(res, 500, cfgMissing())
     let target = ''
     try {
       target = String(JSON.parse(body.toString('utf8')).provider || '').trim().toLowerCase()
@@ -379,7 +387,7 @@ function passthrough(cfg, req, res) {
 function dispatch(req, res, tunneled) {
   if (tunneled) {
     const cfg = readCfg()
-    if (!cfg) return apiError(res, 500, 'model-relay.json / custom-agent.json is missing or invalid')
+    if (!cfg) return apiError(res, 500, cfgMissing())
     if (!L.isRoutedRequest(req.method, req.url)) return passthrough(cfg, req, res)
   }
   const chunks = []
@@ -388,7 +396,7 @@ function dispatch(req, res, tunneled) {
     const body = Buffer.concat(chunks)
     if (!tunneled && req.url.startsWith('/__')) return control(req, res, body)
     const cfg = readCfg()
-    if (!cfg) return apiError(res, 500, 'model-relay.json / custom-agent.json is missing or invalid')
+    if (!cfg) return apiError(res, 500, cfgMissing())
     const sid = String(req.headers['x-claude-code-session-id'] || '')
     let model = null
     let nMsgs = 0
@@ -425,11 +433,12 @@ let mitmCache = null // { server, cert, checkedAt }
 
 function mitmServer() {
   const now = Date.now()
-  if (mitmCache && now - mitmCache.checkedAt < 10000) return mitmCache.server
+  if (mitmCache && mitmCache.server && now - mitmCache.checkedAt < 10000) return mitmCache.server
   const leaf = PKI.loadLeaf(dir)
   if (!leaf) {
+    // an absent certificate is not cached: `proxy enable` writes it while the router is already up, and the next CONNECT must use it
     if (mitmCache && mitmCache.server) log('proxy: certificate missing or expired; api.anthropic.com is tunnelled unrouted until it is renewed')
-    mitmCache = { server: null, cert: '', checkedAt: now }
+    mitmCache = null
     return null
   }
   const cert = leaf.cert.toString('utf8')
@@ -437,7 +446,15 @@ function mitmServer() {
     mitmCache.checkedAt = now
     return mitmCache.server
   }
-  const srv = https.createServer({ key: leaf.key, cert: leaf.cert, ALPNProtocols: ['http/1.1'] }, (req, res) => dispatch(req, res, true))
+  let srv
+  try {
+    srv = https.createServer({ key: leaf.key, cert: leaf.cert, ALPNProtocols: ['http/1.1'] }, (req, res) => dispatch(req, res, true))
+  } catch (e) {
+    // key and certificate read mid-renewal do not match; tunnel for this call and try again on the next
+    if (mitmCache?.failed !== e.message) log(`proxy: certificate unusable (${e.message}); api.anthropic.com is tunnelled unrouted until it is renewed`)
+    mitmCache = { server: null, cert: '', checkedAt: 0, failed: e.message }
+    return null
+  }
   srv.on('upgrade', tunnelUpgrade)
   srv.on('tlsClientError', (e) => {
     if (Date.now() - lastTlsError < 60000) return

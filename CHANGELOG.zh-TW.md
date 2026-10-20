@@ -10,6 +10,8 @@
 
 - `~/.claude/settings.json` 的 `availableModels` 沒有列出某個供應商的非 Claude 模型時，`doctor` 現在會發出警告。否則 Claude Code 會把 `model-relay:<name>` 子代理改跑在 `CLAUDE_CODE_SUBAGENT_MODEL` 或主線模型上，只在 debug log 留一行警告，請求永遠不會經過轉發站。
 - 供應商或 Anthropic 的回應在串流途中斷線時，不再讓 Claude Code 一直等不到回覆；開啟重試時，串流途中連線被重置也不再讓轉發站當掉：現在會直接中斷呼叫端的連線，讓它知道請求失敗。呼叫端放棄時（按 Esc），現在也會中斷送往上游的請求，不再讓它跑到結束。
+- **路由器看不到的 token 變數現在看得到了：** 路由器從「啟動當下」的環境解析 `env:VAR` token，所以之後才 export 的金鑰在重啟前都不會生效，而從你的 shell 執行的 `doctor` 卻顯示「Config OK」。現在 `/__health` 會以 `unresolved` 列出未解析的供應商與變數名稱（絕不顯示值）、「config missing」錯誤會指出被略過的供應商並說明需重啟路由器，`doctor` 也會在執行中的路由器缺少你 shell 裡已有的變數時提出警告。
+- **第一次 `proxy enable --go` 不再因「unable to get local issuer certificate」自我測試失敗：** 路由器會把「沒有憑證」記住 10 秒，而外掛的健康檢查輪詢可能恰好在 `proxy enable` 建立憑證之前記下這個結果，導致自我測試的連線被直接轉送到 Anthropic，而不是由轉發站的憑證回應。現在不再快取「憑證不存在」。
 
 ## [0.6.0] - 2026-10-20
 

@@ -10,6 +10,8 @@ All notable changes to `model-relay` are documented in this file. Format follows
 
 - `doctor` now warns when `availableModels` in `~/.claude/settings.json` does not list a provider's non-Claude model. Claude Code otherwise runs `model-relay:<name>` subagents on `CLAUDE_CODE_SUBAGENT_MODEL` or the parent's model, with a warning only in its debug log, so they never reach the relay.
 - A provider or Anthropic answer that drops mid-stream no longer leaves Claude Code waiting with no reply, and a connection reset mid-stream no longer crashes the router when retries are on: the caller's connection is cut so it sees the failure. A caller that gives up (Esc) now stops the upstream request instead of letting it run to the end.
+- **A token variable the router cannot see is now visible:** the router resolves `env:VAR` tokens from the environment it was started with, so a key exported later was ignored until a restart while `doctor` (run from your shell) said "Config OK". `/__health` now lists `unresolved` providers with their variable name (never the value), the "config missing" error names the skipped providers and says to restart the router, and `doctor` warns when the running router lacks a variable your shell has.
+- **First `proxy enable --go` no longer fails its self-test with "unable to get local issuer certificate":** the router remembered "no certificate" for 10 seconds, and the plugin's health poll could record that just before `proxy enable` created the certificate, so the self-test connection was tunnelled to Anthropic instead of answered with the relay certificate. A missing certificate is no longer cached.
 
 ## [0.6.0] - 2026-10-20
 
