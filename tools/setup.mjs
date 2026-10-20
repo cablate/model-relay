@@ -1011,9 +1011,13 @@ if (cmd === 'rc') {
   report.providers = Object.fromEntries(names.map((k) => [k, cfg.providers[k].model]))
   report.failover = { enabled: cfg.failoverEnabled, chain: cfg.failoverChain, cooldownMs: cfg.cooldownMs }
   report.retry = { enabled: cfg.retry.enabled }
-  say(names.length ? `Config OK (${active})` : `Config read (${active}), but no provider is usable yet; every request goes to Claude`)
+  // An older config is not judged: only a router of that older version, if one still runs, routes with it
+  const notRead = 'not read (older config)'
+  say(outdated
+    ? `Config from an older version (${active}): this version reads its port only, so until "migrate --go" only an older router still running routes with it; with none running, every request goes to Claude`
+    : names.length ? `Config OK (${active})` : `Config read (${active}), but no provider is usable yet; every request goes to Claude`)
   say(`  Port: ${cfg.port}`)
-  say(`  Providers: ${names.length ? names.map((k) => `${k} -> ${cfg.providers[k].model}`).join(', ') : 'none usable'}`)
+  say(`  Providers: ${outdated ? notRead : names.length ? names.map((k) => `${k} -> ${cfg.providers[k].model}`).join(', ') : 'none usable'}`)
   // fix: the arguments to run this CLI with, so the caller supplies its own path to it
   if (outdated) find('outdated', `${active} is from an older version of model-relay, which this version does not read; "migrate" shows what it becomes and "migrate --go" applies it`, { fix: 'migrate --go', needsConsent: true })
   for (const u of outdated ? [] : L.unresolvedEnv(raw, process.env)) {
@@ -1022,7 +1026,9 @@ if (cmd === 'rc') {
       : `provider ${u.provider} is skipped: its token "env:" names no variable`, { provider: u.provider, env: u.env || null })
   }
   if (!shape && !outdated) find('no-provider', 'no provider has an address, a model and a token yet; add one with "add <name> --preset <p> --model <id> --token env:<VAR>"', { fix: 'add <name> --preset <preset> --model <model id> --token env:<VAR>' })
-  say(`  Failover: ${cfg.failoverEnabled ? (cfg.failoverChain.length ? `${cfg.failoverChain.join(' → ')} (back to Claude after ${cfg.cooldownMs / 60000} min)` : 'on, but no chain') : 'disabled'}    Retry: ${cfg.retry.enabled ? 'on' : 'off'}`)
+  say(outdated
+    ? `  Failover, retry: ${notRead}`
+    : `  Failover: ${cfg.failoverEnabled ? (cfg.failoverChain.length ? `${cfg.failoverChain.join(' → ')} (back to Claude after ${cfg.cooldownMs / 60000} min)` : 'on, but no chain') : 'disabled'}    Retry: ${cfg.retry.enabled ? 'on' : 'off'}`)
 
   let curSettings = {}
   try { curSettings = readSettings() } catch {}
@@ -1037,7 +1043,7 @@ if (cmd === 'rc') {
     }
   }
   if (curEnv.CLAUDE_CODE_SUBAGENT_MODEL) aliasDesc.push(`subagent default -> ${curEnv.CLAUDE_CODE_SUBAGENT_MODEL}`)
-  say(`  Aliases:  ${aliasDesc.length ? aliasDesc.join(', ') : 'none (run "node tools/setup.mjs alias haiku <provider>" to route haiku)'}`)
+  say(`  Aliases:  ${outdated ? notRead : aliasDesc.length ? aliasDesc.join(', ') : 'none (run "node tools/setup.mjs alias haiku <provider>" to route haiku)'}`)
 
   // ---- the config itself: names that go nowhere, a model another provider claims first ----
   if (cfg.failoverEnabled && names.length && !cfg.failoverChain.length) {
@@ -1051,7 +1057,7 @@ if (cmd === 'rc') {
     const taker = L.matchProviderByModel(cfg, p.model)
     if (taker && taker !== k) find('model-claimed', `requests for ${p.model} go to ${taker}, not ${k}: ${taker} matches that name first (narrow its matchModels)`)
   }
-  for (const [, envKey] of Object.entries(ALIAS_ENV_KEYS)) {
+  for (const [, envKey] of outdated ? [] : Object.entries(ALIAS_ENV_KEYS)) {
     const envVal = curEnv[envKey]
     if (envVal && !L.isClaudeModel(envVal) && !L.matchProviderByModel(cfg, envVal)) {
       find('alias-unrouted', `settings.json ${envKey}="${envVal}" does not match any provider's matchModels; requests for it will go to Claude`)
@@ -1088,7 +1094,9 @@ if (cmd === 'rc') {
       say(`  Router health: ⚠ ${foreign}`)
       findings.push({ id: 'foreign-router', level: 'warn', text: foreign })
     } else {
-      if (olderRouter(h)) {
+      // restart refuses an older config, and this version's router could not read it: migrate comes first
+      if (olderRouter(h) && outdated) say(`  Router health: ⚠ an older model-relay router (no configDir) answers on 127.0.0.1:${cfg.port} and keeps routing with the older config; restart it once "migrate --go" is done`)
+      else if (olderRouter(h)) {
         say(`  Router health: ⚠ ${olderNote(cfg.port)}`)
         findings.push({ id: 'router-older', level: 'warn', text: olderNote(cfg.port), fix: 'restart --if-idle' })
       }
@@ -1096,7 +1104,7 @@ if (cmd === 'rc') {
       const pxState = h.proxy ? `proxy ${h.proxy.enabled ? 'on' : 'off'} (${h.proxy.mitm} routed / ${h.proxy.tunnel} tunnelled)` : 'no proxy'
       say(`  Router health: ✓ up on 127.0.0.1:${cfg.port} (pid ${h.pid}${h.version ? `, ${h.version}` : ''}, pinned sessions: ${h.sessionsOnCustom ?? 0}, 429 failover: ${foState}, ${pxState})`)
       const mine = pluginVersion()
-      if (h.version && mine && compareVersions(h.version, mine) < 0) {
+      if (!outdated && h.version && mine && compareVersions(h.version, mine) < 0) {
         find('router-older', `the running router is ${h.version} and this tool is ${mine}, so the router still runs the older code; run "/provider restart" (or "restart") when no reply is in progress`, { fix: 'restart --if-idle' })
       }
       // the router resolves env:VAR from the environment it was started with, which may differ from this shell's;
@@ -1109,7 +1117,8 @@ if (cmd === 'rc') {
     }
   }
 
-  if (hasFlag('--ping')) {
+  if (hasFlag('--ping') && outdated) say(`  Upstream ping: skipped, the config is ${notRead}`)
+  else if (hasFlag('--ping')) {
     say('  Upstream ping:')
     report.ping = {}
     for (const [k, p] of Object.entries(cfg.providers)) {

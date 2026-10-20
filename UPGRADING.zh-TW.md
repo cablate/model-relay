@@ -37,6 +37,6 @@ Claude 會先跑 `doctor`，給你看 `migrate` 會寫入什麼，你同意之�
 1. 執行 `node tools/setup.mjs doctor`。它會回報這份設定是過時的（`doctor --json` 裡的 `outdated`）；這一項正是 `migrate` 要處理的。
 2. 執行 `node tools/setup.mjs migrate`。它只會印出會寫入什麼、會改名哪些檔案。如果有一行以 `!` 開頭，表示某個供應商的金鑰變數在這個 shell 裡沒設，遷移後 429 時由誰接手會改變；請先設好金鑰（或自己指定 chain）。
 3. 執行 `node tools/setup.mjs migrate --go`。原本的設定檔會保留為 `<name>.model-relay-backup`，舊檔案會改名，token 原封不動複製過去。
-4. 沒有回覆進行中時，執行 `/provider restart`（或 `node tools/setup.mjs restart`），讓轉發站改跑目前的程式。0.6 的轉發站無法回報自己忙不忙，所以外掛只會提醒你做這一步；在那之前它照舊路由。
+4. 所有 Claude Code 視窗都沒有回覆進行中時，執行 `/provider restart`（或 `node tools/setup.mjs restart`），讓轉發站改跑目前的程式。每個視窗共用同一個轉發站，而 0.6 的轉發站無法回報自己忙不忙，所以外掛只會提醒你做這一步；在那之前它照舊路由。被切斷的回覆，Claude Code 會重新送出。重啟之前，0.6 轉發站會把請求重新記到 `custom-agent-requests.log`，重啟後可以刪掉。
 5. 決定以前那些「沒問你就做」的行為還要不要。要讓 `haiku` 留在 Claude，執行 `node tools/setup.mjs alias haiku claude`。要指定 429 時由誰接手，執行 `node tools/setup.mjs set failover.chain <a,b>`；不要任何人接手就用 `set failover.enabled off`。
 6. 執行 `/provider doctor --ping`。每一行都應該是 ✓，每個供應商都應該有回應。

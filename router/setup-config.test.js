@@ -5,7 +5,8 @@ const assert = require('node:assert')
 const fs = require('node:fs')
 const os = require('node:os')
 const path = require('node:path')
-const { spawnSync } = require('node:child_process')
+const http = require('node:http')
+const { spawnSync, execFile } = require('node:child_process')
 
 const SETUP = path.join(__dirname, '..', 'tools', 'setup.mjs')
 
@@ -40,16 +41,19 @@ function fixture(t, raw = CFG, name = 'model-relay.json') {
   const file = path.join(dir, name)
   fs.writeFileSync(file, JSON.stringify(raw, null, 2))
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }))
+  const env = { ...process.env, CLAUDE_CONFIG_DIR: dir, RELAY_TEST_GEMINI: 'SECRET-GEM' }
   const run = (...args) => {
-    const r = spawnSync(process.execPath, [SETUP, ...args], {
-      cwd: dir,
-      env: { ...process.env, CLAUDE_CONFIG_DIR: dir, RELAY_TEST_GEMINI: 'SECRET-GEM' },
-      encoding: 'utf8',
-    })
+    const r = spawnSync(process.execPath, [SETUP, ...args], { cwd: dir, env, encoding: 'utf8' })
     return { code: r.status, out: `${r.stdout}${r.stderr}`, stdout: r.stdout }
   }
+  // For a run that talks to a server in this process, which spawnSync would block
+  const runAsync = (...args) => new Promise((resolve) => {
+    execFile(process.execPath, [SETUP, ...args], { cwd: dir, env }, (e, stdout, stderr) => {
+      resolve({ code: e ? e.code : 0, out: `${stdout}${stderr}`, stdout })
+    })
+  })
   const read = () => JSON.parse(fs.readFileSync(file, 'utf8'))
-  return { dir, file, run, read }
+  return { dir, file, run, runAsync, read }
 }
 
 test('migrate is a dry run until --go, and then keeps a copy and never prints a token', (t) => {
@@ -187,6 +191,25 @@ test('doctor --json on an older config reads its port only, and its one finding 
     assert.strictEqual(j.router.up, false)
     assert.match(f.run('doctor').out, /older version of model-relay/)
   }
+})
+
+test('doctor on an older config with an older router still running says that router routes, and points at nothing that refuses it', async (t) => {
+  // An older router: it reports no configDir and no version
+  const old = http.createServer((req, res) => res.end(JSON.stringify({ ok: true, pid: 4242, providers: {} })))
+  await new Promise((r) => old.listen(0, '127.0.0.1', r))
+  t.after(() => old.close())
+  const f = fixture(t, { ...LEGACY, port: old.address().port }, 'custom-agent.json')
+  fs.writeFileSync(path.join(f.dir, 'settings.json'), JSON.stringify({ env: { ANTHROPIC_DEFAULT_HAIKU_MODEL: 'glm-5.3[1m]' } }))
+  const j = JSON.parse((await f.runAsync('doctor', '--json')).stdout)
+  assert.strictEqual(j.router.up, true)
+  const found = j.findings.filter((x) => x.id !== 'wiring').map((x) => x.id)
+  assert.deepStrictEqual(found, ['outdated'], 'no alias or restart finding: migrate comes first')
+  const r = await f.runAsync('doctor', '--ping')
+  assert.strictEqual(r.code, 0, r.out)
+  assert.match(r.out, /only an older router still running routes with it/)
+  assert.match(r.out, /keeps routing with the older config; restart it once "migrate --go" is done/)
+  assert.match(r.out, /Upstream ping: skipped/)
+  assert.doesNotMatch(r.out, /no provider is usable|none usable|but no chain|will go to Claude|restart it to pick up/, r.out)
 })
 
 test('every command but migrate and doctor turns an older config away and changes nothing', (t) => {
