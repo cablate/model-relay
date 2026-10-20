@@ -118,7 +118,7 @@ test('/__health reports the config dir, and a second router for the same dir exi
   const dir = configDir(t, port)
   startRouter(t, dir)
   const h = await waitHealth(port)
-  assert.strictEqual(h.configDir, fs.realpathSync(dir))
+  assert.strictEqual(h.configDir, fs.realpathSync.native(dir))
   const again = startRouter(t, dir)
   assert.strictEqual(await again.exited, 0)
 })
@@ -131,7 +131,7 @@ test('a router that finds its port taken by another config dir or an unknown pro
   await waitHealth(port)
   const b = startRouter(t, dirB)
   assert.notStrictEqual(await b.exited, 0)
-  assert.match(routerLog(dirB), new RegExp(`port ${port} is already used by another model-relay router \\(config dir ${fs.realpathSync(dirA).replace(/[\\/.]/g, '\\$&')}\\)`))
+  assert.match(routerLog(dirB), new RegExp(`port ${port} is already used by another model-relay router \\(config dir ${fs.realpathSync.native(dirA).replace(/[\\/.]/g, '\\$&')}\\)`))
 
   const port2 = await freePort()
   const plain = http.createServer((q, r) => r.end('not a relay'))
@@ -156,14 +156,14 @@ test('doctor warns and proxy enable refuses when the router on the port belongs 
 
   const doc = setup(mine, 'doctor')
   assert.match(doc.out, /Router health: ⚠ .*belongs to config dir .*relay-flow-/)
-  assert.ok(doc.out.includes(fs.realpathSync(other)) && doc.out.includes(mine))
+  assert.ok(doc.out.includes(fs.realpathSync.native(other)) && doc.out.includes(mine))
   assert.ok(!/Router health: ✓/.test(doc.out))
 
   for (const args of [['proxy', 'enable'], ['proxy', 'enable', '--go']]) {
     const r = setup(mine, ...args)
     assert.strictEqual(r.code, 1, r.out)
     assert.match(r.out, /Refusing to enable: .*belongs to config dir/)
-    assert.ok(r.out.includes(fs.realpathSync(other)) && r.out.includes(mine))
+    assert.ok(r.out.includes(fs.realpathSync.native(other)) && r.out.includes(mine))
   }
   assert.strictEqual(fs.readFileSync(settings, 'utf8'), before)
   assert.strictEqual(fs.readFileSync(path.join(mine, 'model-relay.json'), 'utf8'), cfgBefore)
@@ -229,7 +229,7 @@ test('an older router (no configDir) is asked to restart by doctor and restarted
   const go = setup(dir, 'proxy', 'enable', '--go')
   assert.strictEqual(go.code, 0, go.out)
   assert.match(go.out, /Restarting the router/)
-  assert.strictEqual((await waitHealth(port)).configDir, fs.realpathSync(dir), 'the router now running is this dir\'s')
+  assert.strictEqual((await waitHealth(port)).configDir, fs.realpathSync.native(dir), 'the router now running is this dir\'s')
 })
 
 test('a router whose port is held by an older relay leaves it running and exits 0', async (t) => {
@@ -248,7 +248,7 @@ test('a config whose only token is unset still binds its own port, and refuses C
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }))
   fs.writeFileSync(path.join(dir, 'model-relay.json'), JSON.stringify({ port, providers: { glm: { preset: 'zai', token: 'env:RELAY_FLOW_UNSET_TOKEN' } } }))
   startRouter(t, dir)
-  assert.strictEqual((await waitHealth(port)).configDir, fs.realpathSync(dir))
+  assert.strictEqual((await waitHealth(port)).configDir, fs.realpathSync.native(dir))
   let dialled = 0
   const target = net.createServer((sock) => {
     dialled++
@@ -308,7 +308,7 @@ test('a router from before 0.6.1 is never restarted by --if-idle, only by a plai
   assert.strictEqual(r.code, 0, r.out)
   assert.match(r.out, /older than 0\.6\.1/)
   const h = await waitHealth(port)
-  assert.strictEqual(h.configDir, fs.realpathSync(dir), 'the router now running is this version\'s')
+  assert.strictEqual(h.configDir, fs.realpathSync.native(dir), 'the router now running is this version\'s')
   assert.ok(h.version)
 })
 
@@ -354,7 +354,7 @@ test('an open blind tunnel keeps restart --if-idle from cutting it', async (t) =
 test('restart --if-stale leaves a current or newer router alone, and refuses another config dir\'s', async (t) => {
   const port = await freePort()
   const dir = configDir(t, port)
-  const newer = fakeRouter(t, port, { configDir: fs.realpathSync(dir), version: '99.0.0', inflight: 0 })
+  const newer = fakeRouter(t, port, { configDir: fs.realpathSync.native(dir), version: '99.0.0', inflight: 0 })
   await waitHealth(port)
   const r = setup(dir, 'restart', '--if-stale', '--if-idle')
   assert.strictEqual(r.code, 0, r.out)
@@ -364,7 +364,7 @@ test('restart --if-stale leaves a current or newer router alone, and refuses ano
   for (let i = 0; i < 30 && (await getHealth(port)); i++) await sleep(100)
 
   const other = configDir(t, port)
-  fakeRouter(t, port, { configDir: fs.realpathSync(other), version: '0.0.1', inflight: 0 })
+  fakeRouter(t, port, { configDir: fs.realpathSync.native(other), version: '0.0.1', inflight: 0 })
   await waitHealth(port)
   const f = setup(dir, 'restart')
   assert.strictEqual(f.code, 1, f.out)
