@@ -8,76 +8,80 @@
 
 ## [0.7.0] - 2026-10-21
 
-如果你開了 HTTPS proxy 模式（為了手機遙控而執行 `proxy enable`），切到非 Claude 供應商的 Claude Code 視窗現在會保有整段對話。以前供應商常常只收到你最新的一則訊息，沒有前文也沒有工具，回答得像剛開新對話。用 `/provider` 切換現在只回一行，`/provider ping` 會說出供應商為什麼不通（金鑰被拒、模型不存在、額度、本機服務沒開），瀏覽器裡開著的網頁也不能再透過轉發站送請求、花掉你的供應商額度。
+開啟 HTTPS proxy 模式（為了手機遙控而執行 `proxy enable`）時，切到非 Claude 供應商的視窗不會再聊到一半突然「失憶」或弄丟工具了——現在每一輪都會把完整對話送給供應商，不再只送只有 Anthropic 伺服器才接得上的差異片段。日常操作也全面精簡：`/provider` 切換只回一行確認、選完模型面板自動收起、`/provider ping` 直接告訴你連不上的具體原因（金鑰被拒、模型名稱錯誤、額度用盡、本機服務沒開），並擋掉瀏覽器網頁偷連 `127.0.0.1` 消耗你供應商額度的漏洞。
 
-**升級：** 從 0.6 或更早升上來時，這一版只讀設定格式 2。執行 `claude plugin update model-relay@model-relay` 之後，在 Claude Code 輸入 `/provider setup upgrade my model-relay config`（或在外掛資料夾裡執行 `node tools/setup.mjs migrate --go`），再趁沒有回覆進行中時執行 `/provider restart`，因為 0.6 的轉發站無法替你自動重啟。遷移之前，仍在執行的 0.6 轉發站會繼續用舊設定檔；如果沒有 0.6 轉發站在跑，所有請求都交給 Claude。詳見 [UPGRADING.zh-TW.md](https://github.com/cablate/model-relay/blob/main/UPGRADING.zh-TW.md)。
+**升級：** 從 0.6 或更早版本升級上來，需要做一次設定檔格式升級（轉為 `"format": 2`），新版轉發站才會讀取你的設定：
+1. 更新外掛：`claude plugin update model-relay@model-relay`。
+2. 轉換設定檔：在 Claude Code 裡輸入 `/provider setup upgrade my model-relay config`（或在外掛資料夾執行 `node tools/setup.mjs migrate --go`），會自動備份舊檔並保留你原有的所有分流行為。
+3. 重啟轉發站：趁沒有對話正在回覆時，執行 `/provider restart` 把背景的 0.6 舊轉發站換成新版。
+*（完成遷移前，背景若還有 0.6 轉發站在跑會照舊運作；若沒有，請求會全部直連 Claude。詳見 [UPGRADING.zh-TW.md](https://github.com/cablate/model-relay/blob/main/UPGRADING.zh-TW.md)。）*
 
 ### 新增
 
-- **設定格式 2（`"format": 2`）：** `init`、`add` 與 `migrate --go` 會寫入它。舊設定（檔名為 `custom-agent.json` 的檔案，或沒有這個欄位的 `model-relay.json`）這一版的轉發站不讀，所以在 `migrate --go` 重寫之前，外掛不會為它啟動或替換轉發站：還在執行的 0.6 轉發站照舊用舊檔案路由，沒有轉發站回應時，對話直接連 Claude。外掛會用提示、狀態列和面板告訴你，[UPGRADING.zh-TW.md](https://github.com/cablate/model-relay/blob/main/UPGRADING.zh-TW.md) 說明怎麼升級，並附一段給 `/provider setup` 的提示詞。
-- **`doctor --json`：** 和文字輸出相同的檢查結果，每一項都有 `id`、`fix`（執行 `setup.mjs` 時要帶的參數），以及在那個指令會改到需要你先同意的東西時標上 `needsConsent`。供應商因金鑰變數沒設而被略過時，會有一項 `missing-key`，寫出變數名稱，絕不寫出值。舊設定是一項 `outdated`，修正方式是 `migrate --go`，並標上 `needsConsent`。
-- **`doctor` 會警告比外掛舊的轉發站。**
-- **會說出哪裡壞掉的供應商測試：** `/provider ping`、面板的 `p` 與 `doctor --ping` 共用同一個測試：送一個 1 token 的串流請求，量到第一個位元組為止，最多 15 秒，結果分成可用／金鑰被拒／模型名稱不對／額度用完或被限流／本機服務沒開／連不到／逾時。面板與 `/provider` 把它和上一個真實請求分開顯示，很長的回覆不會被看成供應商很慢；上游錯誤訊息裡的供應商金鑰會被遮掉。
-- **`model-relay:<name>` 子代理跑到別處時會被發現：** Claude Code 讓它跑在供應商以外的模型上，或它跑完時轉發站從沒收到那個模型的請求，外掛都會跳出提示並指向 `/provider doctor`。`/__health` 為此回報 `seenModels`，另外也回報 `ping`。
-- **CI 會跑外掛的邏輯測試與中性名稱檢查：** `hooks/logic.test.ts` 改用純 Node 執行；`tools/neutral.mjs` 會在「每個使用者都會跑到的程式」於標記的舊格式區塊以外寫死供應商、私人 Gateway 或 0.6 檔名時失敗。
-- **`setup.mjs set port <n>`：** 修改轉發站連接埠（`1025`–`65535`），保留 `.model-relay-backup` 備份，並同步改寫 `settings.json`（`ANTHROPIC_BASE_URL`，代理模式則是 `HTTPS_PROXY`，照例備份）。會拒絕已有程式在回應的埠。已在執行的轉發站會一直用舊埠直到你把它停掉；指令會印出它的 pid，但不會替你結束它。
-- **`/__health` 回報 `configDir`：** 轉發站是為哪個設定目錄啟動的，讓 `doctor`、`proxy` 與外掛 hook 能分辨連接埠上回應的是誰的轉發站。路徑以實際路徑比對，Windows 上不分大小寫。
-- **`/provider setup [goal]`：讓 Claude 帶你設定。** Claude 會拿到已安裝設定工具的路徑並帶你執行：不會要你在對話貼金鑰、套用前先預演變更、改 `~/.claude/settings.json` 之前先問你。還沒有設定檔時也能用。
-- **`/provider restart` 與 `setup.mjs restart [--if-stale] [--if-idle]`：** 重啟轉發站，讓它跑已安裝外掛的程式。`/__health` 現在會回報 `version`、`inflight`（正在回應的請求數）與 `tunnels`（開著的 `CONNECT` 通道數），分得出舊外掛留下來的轉發站，也只在它閒置時重啟。
-- **`tools/smoke.mjs`：** 在臨時連接埠起這份原始碼的轉發站，用真實的 Claude Code 送一次請求（`--provider <name>` 再加一次供應商請求）。需要已登入的 `claude`，所以是發版步驟，不在 CI 裡。
+- **在 Claude Code 裡直接讓 AI 帶你完成設定與升級（`/provider setup [goal]`）：** 在任何資料夾都能直接執行 `/provider setup`（連設定檔都還沒有時也能用），Claude 會一步步帶你跑完 `setup.mjs`——套用前先預覽差異、改 `~/.claude/settings.json` 前先徵求同意，而且絕不會要你在對話視窗裡貼上 API 金鑰。
+- **測試供應商時直接指出哪裡出問題（`/provider ping`）：** `/provider ping`、面板熱鍵 `p` 與 `doctor --ping` 現在會送出 1 token 的串流測試（上限 15 秒），並明確區分結果：正常可用、金鑰被拒、模型名稱錯誤、額度用盡或被限流、本機服務未啟動、無法連線、連線逾時。測試延遲獨立存在 `ping` 欄位，不與真實請求的 `stats` 混算（避免長文回覆讓供應商看起來很慢），且上游錯誤訊息中的 API 金鑰會自動遮罩。
+- **在對話視窗內一鍵重啟背景轉發站（`/provider restart`）：** `/provider restart` 與 `setup.mjs restart [--if-stale] [--if-idle]` 可將背景轉發站換成目前外掛的版本。`/__health` 現在會回報 `version`、`inflight`（處理中的請求數）與 `tunnels`（開啟中的 `CONNECT` 通道數），讓外掛之後能在轉發站完全閒置時自動重啟舊版。
+- **`model-relay:<name>` 子代理沒走轉發站時主動提醒：** 當 Claude Code 用別的模型啟動 `model-relay:<name>` 子代理，或子代理結束時轉發站根本沒收到該模型的請求（透過 `/__health` 的 `seenModels` 比對），外掛會跳出通知並引導你執行 `/provider doctor` 排查。
+- **一行指令更換轉發站連接埠（`setup.mjs set port <n>`）：** 將連接埠改為 `1025`–`65535`、自動留存 `.model-relay-backup` 備份，並同步更新 `settings.json`（`ANTHROPIC_BASE_URL` 或 `HTTPS_PROXY`）。若目標連接埠已被佔用會直接拒絕；舊轉發站的 PID 會印在畫面上讓你自行決定何時關閉。
+- **機器可讀的健康檢查輸出（`doctor --json`）：** 與文字版檢查項目相同，每筆結果包含 `id`、對應的 `setup.mjs` 修復參數 `fix`，以及會修改使用者設定時標記的 `needsConsent`。環境變數未設定的金鑰會回報為 `missing-key`（只列變數名、不印機密值），舊版設定檔則回報為 `outdated` 並指向 `migrate --go`。
+- **設定格式 2（`"format": 2`）：** 由 `init`、`add` 與 `migrate --go` 寫入，讓所有分流規則都明確寫在檔案裡。若偵測到舊設定檔（`custom-agent.json` 或沒有 `"format": 2` 的 `model-relay.json`），外掛不會動正在跑的 0.6 轉發站（沒在跑則直連 Claude），並在狀態列、面板與 [UPGRADING.zh-TW.md](https://github.com/cablate/model-relay/blob/main/UPGRADING.zh-TW.md) 提醒你升級。
+- **`doctor` 會在背景轉發站版本比外掛舊時發出警告。**
+- **`/__health` 回報 `configDir`：** 標明轉發站是讀取哪個設定資料夾啟動的（以真實路徑比對，Windows 不分大小寫），讓 `doctor`、`proxy` 與外掛不會誤連其他設定檔啟動的轉發站。
+- **真實環境發版前測試腳本（`tools/smoke.mjs`）：** 發版前在臨時連接埠啟動轉發站，透過真實的 `claude` CLI 送出請求驗證（加上 `--provider <name>` 可連同供應商一起實測）。
+- **CI 自動跑外掛邏輯測試與中性命名守門：** `hooks/logic.test.ts` 直接在 Node 環境下跑 CI；`tools/neutral.mjs` 會在舊版遷移區塊以外發現寫死的供應商名稱、私人 Gateway 位址或 0.6 舊檔名時攔截失敗。
 
 ### 變更
 
-- **`/provider` 說得更少：** `/provider <name>` 與 `/provider claude` 只回一行；不帶參數的 `/provider` 只開面板、回一行，不再同時附上一整份報告。面板只負責選這個視窗用哪個模型：切換成功就自動收起，只有轉發站離線或 429 冷卻中才多一行提示，所有視窗共用的開關（429 備援、重試、Remote Control）和別名收進「設定 [s]」。文字版狀態改用 `/provider status`，指令說明移到 `/provider help`，依每個指令影響的範圍分組。
-- **不相容變更，影響 0.6 或更早的使用者：舊設定不再被讀取。** 這一版的轉發站不讀檔名為 `custom-agent.json` 的檔案，也不讀沒有 `"format": 2` 的 `model-relay.json`，所以在你執行 `node tools/setup.mjs migrate --go` 之前，外掛不會為它啟動或替換轉發站：還在執行的 0.6 轉發站照常運作，沒有的話所有請求都走 Claude。`doctor` 會列出一項 `outdated`。`migrate --go` 會寫出格式 2，並把舊版本當初補上的每一個值都寫進去（preset 的模型、舊 `zai`／`glm` preset 攔下的 `haiku`、舊 `gemini`／`magpie` 的 Gateway 值、依供應商名稱猜出的設定、隱含的備援名單），所以轉發站的路由不變，還在執行的 0.6 轉發站讀到新檔案也一樣；寫入結果會讓路由改變時，它會拒絕。見 [UPGRADING.zh-TW.md](https://github.com/cablate/model-relay/blob/main/UPGRADING.zh-TW.md)。
-- **`migrate` 是唯一看得懂舊格式的指令：** `set`、`add`、`remove`、`alias`、`providers`、`init`、`restart`、`rc` 與 `proxy enable` 遇到舊設定都會拒絕，並請你先執行 `migrate`。`set` 以前會順便把舊版面換成新版面，現在不會了。
-- **沒有設定檔明講，就不會送給供應商（格式 2）：** 內建 preset（`zai`、`deepseek`、`kimi`、`minimax`、`openrouter`）只帶網址與相容參數，`model` 由你決定；`glm`、`gemini`、`magpie` preset 已移除；沒有 preset 會攔 `haiku`；沒設 `failover.chain` 時 429 原樣回傳；不再從供應商名稱猜任何設定。
-- **`setup.mjs add <name> --model <model id> --token <token|env:VAR> (--preset <preset> | --url <address>)` 一定要給模型和網址：** 原本缺少時會自己編一個模型（`<name>-default`）和網址（`api.example.com`）、把供應商名稱當成 preset、整筆取代既有的供應商，還會覆蓋讀不懂的設定檔。現在缺少就拒絕；更新既有供應商時只換網址、金鑰與模型；會留 `.model-relay-backup` 備份；讀不懂的檔案不去動它。新設定檔的第一個供應商會成為 429 時的接手者。
-- **`presets` 只列出各服務的網址，** 因為 preset 不再替你選模型。
-- **`/__ping` 把測試結果放在 `ping`，和 `stats`（最近的真實請求）分開。** 還在跑 0.6 外掛的 Claude Code 視窗，要重啟後才看得到測試時間。
-- **檔名：** `model-relay.json`、`model-relay-state.json`、`model-relay.log`、`model-relay-requests.log`，備份為 `*.model-relay-backup`。舊檔名（`custom-agent.json`、`custom-agent-state.json`、`custom-agent-router.log`、`custom-agent-requests.log`）不再讀取，`migrate --go` 會把它們改名。
-- **`init` 改為寫入沒有供應商的格式 2 設定檔**，不再複製範例，所以新安裝在加入供應商之前，所有請求都走 Claude；`doctor` 會說明這點，而不是直接失敗。
-- **外掛只從轉發站取得供應商：** 它從設定檔只讀 `port` 與 `nodePath`，所以不會再顯示或鎖定轉發站實際沒在用的模型。
-- **`model-relay.example.json`、README 與示意圖不再寫死任何供應商。**
-- **轉發站拿不到連接埠時會說明原因：** 遇到 `EADDRINUSE`，只有佔用者回報相同設定目錄時才靜默結束；否則把連接埠與另一個設定目錄（或未知程序）寫進 `model-relay.log`，並以非零狀態結束。不回報設定目錄的是舊版轉發站，照舊不去動它。
-- **`doctor`、`proxy status` 與 `proxy enable|renew` 會察覺別人的轉發站：** 連接埠上的轉發站屬於其他設定目錄時，`doctor` 與 `proxy status` 會警告、`proxy enable|renew` 會拒絕並指出兩個目錄，且在變更任何東西之前。不回報目錄的是舊版轉發站：`doctor` 會請你重新啟動它，`proxy enable` 照舊替你重啟。
-- **外掛 hook 不會經由其他設定目錄的轉發站轉送：** 連接埠上的轉發站回報了不同的設定目錄時，這個對話改為直連 Claude，狀態列會指出另一個目錄。沒有回報目錄的仍視為你自己的。
-- **README：** 說明 `tools/setup.mjs` 的位置與執行方式、`env:VAR` token 讀的是轉發站自己的環境、自動直連退路只在 `ANTHROPIC_BASE_URL` 模式有效、`HTTPS_PROXY` 也會套用到 `git`／`curl`／`gh`、`proxy.enabled` 實際開放了什麼、CI 實際測了什麼，以及完整的移除清單。
+- **`/provider` 回覆精簡為一行，面板專心負責切換模型：** 輸入 `/provider <name>` 或 `/provider claude` 現在只回一行確認，不再每次倒出 20 多行的完整狀態報告與指令表。單獨輸入 `/provider` 只打開面板（選完模型自動收起，只有在轉發站離線或 429 冷卻中才顯示提示）；會影響所有視窗的共用開關（429 備援、失敗重試、Remote Control）與模型別名都收進「設定 `[s]`」。要看文字版狀態改用 `/provider status`，查指令說明改用 `/provider help`。
+- **不相容變更（影響 0.6 及更早版本）：舊設定檔需先執行 `migrate --go`。** 0.7 轉發站不再讀取 `custom-agent.json` 或缺少 `"format": 2` 的 `model-relay.json`（`doctor` 會顯示 `outdated`）。執行 `node tools/setup.mjs migrate --go` 會將設定檔轉為格式 2，並把 0.6 以前在背景偷偷幫你補上的所有預設值（preset 預設模型、舊 `zai`／`glm` preset 自動攔截 `haiku`、舊 `gemini`／`magpie` 的 Gateway 位址、從供應商名稱猜測的參數、預設 429 備援名單）全部明確寫進檔案，確保升級前後的分流行為 100% 一致。詳見 [UPGRADING.zh-TW.md](https://github.com/cablate/model-relay/blob/main/UPGRADING.zh-TW.md)。
+- **其他 `setup.mjs` 子指令不再自動夾帶格式轉換：** `set`、`add`、`remove`、`alias`、`providers`、`init`、`restart`、`rc` 與 `proxy enable` 遇到舊設定檔時會直接拒絕並請你先跑 `migrate`，不再像以前跑 `set` 時順手改寫設定結構。
+- **格式 2 不再有任何隱藏的預設分流：** 內建 preset（`zai`、`deepseek`、`kimi`、`minimax`、`openrouter`）只提供 API 網址與相容開關，`model` 一律由你指定；移除舊的 `glm`、`gemini`、`magpie` preset；沒有設定別名時不會再有 preset 自動攔截 `haiku`；`failover.chain` 為空時遇到 429 直接回傳原錯誤；不再根據供應商名稱猜測任何參數。
+- **`setup.mjs add <name> --model <model id> --token <token|env:VAR> (--preset <preset> | --url <address>)` 強制檢查必填參數並保留自訂欄位：** 漏填參數時不再自己亂編 `<name>-default` 或 `api.example.com`；修改既有供應商時只更新網址、金鑰與模型（不會洗掉你的重試等自訂設定），修改前自動留存 `.model-relay-backup` 備份，遇到損毀無法解析的設定檔則拒絕覆寫。新設定檔加入的第一個供應商會自動設為 429 備援對象。
+- **`presets` 只列出各服務的 API 網址，** 不再綁定預設模型。
+- **`/__ping` 將測試延遲獨立存放在 `ping`，不再覆蓋真實請求的 `stats`：** 還在跑 0.6 外掛的 Claude Code 視窗重啟後即可看到獨立的測試時間。
+- **檔名統一為 `model-relay*`：** 設定、狀態、日誌與備份檔統一為 `model-relay.json`、`model-relay-state.json`、`model-relay.log`、`model-relay-requests.log` 與 `*.model-relay-backup`。0.6 的 `custom-agent*` 舊檔名（`custom-agent.json`、`custom-agent-state.json`、`custom-agent-router.log`、`custom-agent-requests.log`）在執行 `migrate --go` 時會自動改名。
+- **`init` 改為建立空白的格式 2 設定檔，不再複製範例供應商：** 全新安裝在還沒設定供應商之前，所有請求都會安全直連 Claude，`doctor` 也會清楚引導下一步怎麼加供應商，而不是直接報錯。
+- **外掛改為只從執行中的轉發站讀取供應商清單與狀態：** 外掛在磁碟上只讀 `port` 與 `nodePath`，避免面板顯示或切換到轉發站實際上根本沒載入的模型。
+- **`model-relay.example.json`、README 與架構圖改用中性範例名稱，不再寫死特定供應商。**
+- **轉發站連接埠被佔用時寫明原因：** 遇到 `EADDRINUSE` 時，只有當佔用該埠的轉發站服務的是同一個設定資料夾才安靜退出；若是其他設定資料夾或未知程式佔用，會把衝突連接埠與對方目錄寫進 `model-relay.log` 並以非零狀態碼結束。
+- **`doctor` 與 `proxy` 指令會辨識並攔截「別人的轉發站」：** 當連接埠上的轉發站屬於其他設定資料夾時，`doctor` 與 `proxy status` 會發出警告，`proxy enable|renew` 會在修改任何設定前直接拒絕並印出雙方的資料夾路徑。
+- **外掛不會把請求送進其他設定資料夾的轉發站：** 若連接埠上的轉發站屬於別的設定資料夾，當前視窗會改為直連 Claude，並在狀態列標示對方的資料夾路徑。
+- **補齊 README 常見問題與運作邊界說明：** 寫明 `tools/setup.mjs` 的安裝位置、`env:VAR` 金鑰如何讀取轉發站啟動時的環境變數、為什麼只有 `ANTHROPIC_BASE_URL` 模式有自動直連退路、`HTTPS_PROXY` 對 `git`／`curl`／`gh` 的影響、`proxy.enabled` 實際攔截的範圍、CI 測試涵蓋範圍，以及完整解除安裝步驟。
 
 ### 修正
 
-- **proxy 模式下供應商只看得到最新一則訊息：** 在 HTTPS proxy 模式，Claude Code 以為自己在跟 Anthropic 講話，於是啟用 Message Threads：對話存在 Anthropic 的伺服器上，之後每輪只送新增的訊息，不帶系統提示與工具。轉發站把這種請求原樣轉給供應商，而供應商沒有這段對話，所以模型只能回答最後一則訊息，沒有前文也沒有工具，直到 Claude Code 剛好重送整段對話才恢復。轉發站現在遇到要轉給供應商的請求，會像 Anthropic 拒絕不認得的 beta 那樣拒絕 `message-threads`，Claude Code 隨即改送完整對話。每次拒絕會在請求紀錄記成 `<供應商>-thread-refused`。`ANTHROPIC_BASE_URL` 模式不受影響。
-- **沒有可用供應商時，轉發站把所有請求交給 Claude：** 原本回 500「config missing」，所以金鑰還沒設好的新安裝連 Claude 都不能用。
-- **名為 `zai` 的供應商永遠不會被用到：** 轉發站在路由裡把名為 `glm` 的供應商寫成 `zai`，又把每個 `zai` 讀回 `glm`。現在路由一律用供應商自己的名稱，所以請求日誌會寫 `glm`，不再是 `zai`。
-- **供應商測試不再讓轉發站結束：** 金鑰裡有標頭放不進去的字元（例如換行）時，會回報成錯誤，而且不會把金鑰寫出來。
-- **`doctor --fix` 不再覆蓋指向別處的 `ANTHROPIC_BASE_URL`：** 原本會把另一個 Gateway 的位址蓋成轉發站的。現在保留原值並說明。
-- **轉發站沒有啟動時，外掛會說明：** 原本對話默默改連 Claude，狀態列只寫「轉發站離線」；現在會跳出提示，指出記錄原因的日誌。
-- **`/provider ping` 原本 10 秒就放棄，** 慢一點的供應商，或轉發站要自己啟動的本機 Gateway 還來不及回應。現在會等到轉發站自己的時限。
-- **外掛不再把 `/provider constructor` 這類名稱當成供應商查詢。**
-- `~/.claude/settings.json` 的 `availableModels` 沒有列出某個供應商的非 Claude 模型時，`doctor` 現在會發出警告。否則 Claude Code 會把 `model-relay:<name>` 子代理改跑在 `CLAUDE_CODE_SUBAGENT_MODEL` 或主線模型上，只在 debug log 留一行警告，請求永遠不會經過轉發站。
-- 供應商或 Anthropic 的回應在串流途中斷線時，不再讓 Claude Code 一直等不到回覆；開啟重試時，串流途中連線被重置也不再讓轉發站當掉：現在會直接中斷呼叫端的連線，讓它知道請求失敗。呼叫端放棄時（按 Esc），現在也會中斷送往上游的請求，不再讓它跑到結束。
-- **路由器看不到的 token 變數現在看得到了：** 路由器從「啟動當下」的環境解析 `env:VAR` token，所以之後才 export 的金鑰在重啟前都不會生效，而從你的 shell 執行的 `doctor` 卻顯示「Config OK」。現在 `/__health` 會以 `unresolved` 列出未解析的供應商與變數名稱（絕不顯示值）、「config missing」錯誤會指出被略過的供應商並說明需重啟路由器，`doctor` 也會在執行中的路由器缺少你 shell 裡已有的變數時提出警告。
-- **第一次 `proxy enable --go` 不再因「unable to get local issuer certificate」自我測試失敗：** 路由器會把「沒有憑證」記住 10 秒，而外掛的健康檢查輪詢可能恰好在 `proxy enable` 建立憑證之前記下這個結果，導致自我測試的連線被直接轉送到 Anthropic，而不是由轉發站的憑證回應。現在不再快取「憑證不存在」。
-- **`init --fix` 寫死連接埠 8950：** 改為寫入設定檔中的連接埠。
-- **設定檔的 `env:` token 未設定時，轉發站會綁到 8950、並對任何主機開放 `CONNECT`：** 現在轉發站會綁設定檔自己的連接埠，即使還沒有可用的供應商，`CONNECT` 也依設定檔的 `proxy.enabled` 處理（沒有你自己打開就是關閉）。
-- **轉發站日誌無限成長：** 現在和請求日誌一樣超過 5 MB 就清空，與文件一致。
-- **首次設定不再需要路徑：** 安裝步驟原本要執行 `node tools/setup.mjs …`，但只有在外掛安裝目錄或 clone 的原始碼資料夾裡才找得到這個檔案；用 `claude plugin install` 安裝後在其他資料夾照著做會出現 `Cannot find module`。現在 `/provider init` 與 `/provider doctor [--ping]` 能在 Claude Code 裡直接完成同樣的事，不論目前在哪個資料夾、也不需要先有設定檔，README 也說明了 `node tools/setup.mjs …` 適用的情境。
-- **更新外掛現在也會更新轉發站：** 外掛只在沒有轉發站回應時才啟動新的，所以 `claude plugin update` 之後舊的轉發站會繼續跑，這一版的修正要等有人手動結束它才生效。現在外掛發現轉發站是舊外掛留下的，會在它沒有請求進行中、也沒有開著的通道時自動重啟。這一版之前的轉發站兩件事都無法回報，所以外掛不會自己重啟它，而是在狀態列提示你在沒有回覆進行中時執行 `/provider restart`。比外掛新的轉發站一律不動。
-- **`proxy enable` 不再蓋掉既有的 `NODE_EXTRA_CA_CERTS`：** 代理模式會把它指向轉發站的 CA，而 `settings.json` 的 env 優先於 shell，所以原本在那裡或環境變數中設定的憑證（常見是公司網路的）會默默不再被信任。現在 `proxy enable` 與 `proxy renew` 會在改動任何東西之前拒絕，並指出原本的值。
-- **轉發站 10 秒內有服務過時，`proxy renew --go` 的自我測試會失敗：** `renew` 換掉憑證後，轉發站最多還會沿用舊憑證 10 秒，自我測試拿到新 CA 不認得的憑證，於是不更新 `settings.json`。現在轉發站會立刻發現憑證檔已重寫。
+- **HTTPS proxy 模式下非 Claude 供應商聊到一半「失憶」、看不到歷史對話與工具：** 在 HTTPS proxy 模式下，Claude Code 以為自己直連 `api.anthropic.com`，於是開啟 `message-threads` beta——把前文存在 Anthropic 伺服器上，後續每輪只送最新一句話，連系統提示詞與工具定義都省略。第三方供應商沒有這份雲端對話紀錄，只收到沒頭沒尾的一句話，才會回答「這是新對話」或「我無法存取你的本機檔案」。現在轉發站遇到要送往非 Claude 供應商的請求時，會拒絕 `message-threads` beta（請求日誌記為 `<provider>-thread-refused`），讓 Claude Code 當場改送包含完整前文與工具的請求。（`ANTHROPIC_BASE_URL` 模式本來就不會啟用此 beta，不受影響。）
+- **剛裝好還沒填金鑰時連 Claude 都不能用：** 以前沒有任何可用供應商時轉發站會回傳 HTTP 500 `"config missing"`，導致新安裝連 Claude 都打不通；現在會把所有請求直接交給 Claude。
+- **名稱設為 `zai` 的供應商永遠不會被用到：** 以前轉發站內部把 `glm` 與 `zai` 互相轉寫，導致設為 `zai` 的路由被改寫成 `glm`。現在所有供應商一律使用設定檔裡自己的名稱分流與記錄日誌。
+- **API 金鑰不小心帶了換行等非法標頭字元時，執行 `/provider ping` 不再讓轉發站當掉：** 會攔下並回報錯誤訊息，且不會把金鑰印出來。
+- **`doctor --fix` 不再覆蓋指向其他服務的 `ANTHROPIC_BASE_URL`：** 若你的 `settings.json` 原本指向別的 Gateway，現在會保留原設定並告知你。
+- **轉發站啟動失敗時主動跳出通知：** 以前只會在狀態列默默顯示 `"Relay offline"`（轉發站離線）並退回直連 Claude，現在會跳出通知告訴你去哪個 `model-relay.log` 看失敗原因。
+- **`/provider ping` 不再等 10 秒就提早放棄：** 改為等待轉發站完整的測試時限，讓需要轉發站自動喚醒的本機 Gateway 有足夠時間啟動並回應。
+- **輸入 `/provider constructor` 等 JavaScript `Object.prototype` 內建屬性名稱時，外掛不再誤判為有效的供應商。**
+- **當 `~/.claude/settings.json` 的 `availableModels` 漏列供應商模型時，`doctor` 會主動提醒：** 若沒列進去，Claude Code 派發 `model-relay:<name>` 子代理時會默默改用 `CLAUDE_CODE_SUBAGENT_MODEL` 或主對話模型，只在 debug log 留一行警告，導致子代理根本沒走轉發站。
+- **串流中途斷線或按 `Esc` 取消時，前後端連線都能乾淨收尾：** 上游串流中途斷線時，轉發站會立即切斷呼叫端連線，不再讓 Claude Code 卡死乾等（開啟重試時也不會因連線重置而當掉）；在 Claude Code 按 `Esc` 取消回覆時，轉發站也會同步中斷上游請求，不再讓供應商繼續空燒 token。
+- **啟動轉發站之後才 `export` 的 `env:VAR` 金鑰變數，現在會明確提示需重啟：** 轉發站讀的是它啟動當下的環境變數，事後在 shell 補設金鑰在重啟轉發站前不會生效，但以前在 shell 跑 `doctor` 卻會顯示 `"Config OK"`。現在 `/__health` 會列出未解析的變數名 `unresolved`（絕不印出金鑰值），當 `doctor` 發現你的 shell 有變數而執行中的轉發站沒有時，會直接提醒你重啟轉發站。
+- **首次執行 `proxy enable --go` 不再因 `"unable to get local issuer certificate"` 自測失敗：** 以前轉發站會把「憑證不存在」快取 10 秒，若外掛的健康檢查剛好在建立憑證前觸發快取，自測連線就會被直接穿隧送到 Anthropic 而非使用新憑證回應。現在不再快取「憑證不存在」的狀態。
+- **`init --fix` 不再寫死連接埠 `8950`，改為讀取設定檔中實際設定的連接埠。**
+- **當設定檔裡所有 `env:` 金鑰變數都還沒設定時，轉發站仍會遵守設定檔的連接埠與 `proxy.enabled` 開關，** 不再退回綁定 `8950` 或對外開放任意 `CONNECT` 連線。
+- **`model-relay.log` 現在與 `model-relay-requests.log` 一樣超過 5 MB 自動清空，** 不再無限膨脹。
+- **在任何資料夾都能直接跑 `/provider init` 與 `/provider doctor [--ping]`：** 用 `claude plugin install` 安裝外掛後，不必再自己找外掛安裝路徑 `cd` 進去跑 `node tools/setup.mjs …`。
+- **`claude plugin update` 更新外掛後不再放任舊轉發站一直跑：** 升上 0.7 之後，未來更新外掛時只要轉發站的 `inflight` 與 `tunnels` 歸零，外掛就會自動重啟轉發站套用新版。（0.6 以前的轉發站無法回報閒置狀態，狀態列會提醒你手動執行 `/provider restart`。）
+- **`proxy enable` 與 `proxy renew` 不再蓋掉你原有的 `NODE_EXTRA_CA_CERTS`：** 若你的環境或 `settings.json` 已經設了自訂憑證（例如公司內網憑證），現在會事前攔截並印出原有路徑，不會默默覆蓋導致公司網路斷線。
+- **`proxy renew --go` 換發憑證後立即生效：** 轉發站不再沿用舊憑證快取 10 秒，解決了剛換完憑證時自我測試失敗的問題。
 
 ### 安全性
 
-- **網頁不能再使用轉發站：** 轉發站以前會回應任何連到 `127.0.0.1` 的請求，瀏覽器裡開著的網頁可以送一個單純的 `text/plain` POST 到 `/v1/messages`，花掉你的供應商額度，或利用 DNS rebinding 讀取回應、呼叫 `/__session`、`/__probe` 與 `/__ping`。現在轉發站的監聽埠會以 403 拒絕三種請求：來自瀏覽器的請求（帶有 `Origin` 或 `Sec-Fetch-Site` 標頭，本機其他連接埠上的網頁也算）、`Host` 不是 `127.0.0.1` 或 `localhost` 加上轉發站正在監聽的連接埠的請求，以及絕對形式的請求網址。`api.anthropic.com` 代理通道裡的請求不受影響。
-- **轉發站不再把 `constructor` 這類名稱當成供應商：** 每個 JavaScript 物件都有的名稱（`constructor`、`toString`、`__proto__`）以前會被當成已設定的供應商，`/__session` 可以把對話固定到這些名稱上，該對話的下一個請求就會讓轉發站當掉。現在轉發站一律視為不存在的供應商，對話 ID 為 `__proto__` 時也會和其他 ID 一樣正常記錄。
+- **阻擋瀏覽器網頁偷連本機轉發站消耗你的供應商額度：** 以前轉發站接受任何連往 `127.0.0.1` 的請求，瀏覽器中打開的惡意網頁只要送一個簡單的 `text/plain` POST 到 `/v1/messages`（或透過 DNS rebinding），就能盜用你的供應商額度，甚至呼叫 `/__session`、`/__probe` 與 `/__ping`。現在轉發站遇到帶有瀏覽器標頭（`Origin` 或 `Sec-Fetch-Site`）、`Host` 不是轉發站連接埠上的 `127.0.0.1`／`localhost`，或使用絕對網址的請求，一律回傳 HTTP 403 拒絕。（`api.anthropic.com` 代理通道內的請求不受影響。）
+- **防範供應商與對話名稱的原型鏈污染（Prototype Pollution）：** `constructor`、`toString`、`__proto__` 等 JavaScript 物件內建屬性名稱不再被當成已設定的供應商，透過 `/__session` 傳入也不會再讓轉發站當掉。
 
 ### 未涵蓋
 
-- **上游卡住但沒有斷線時，沒有閒置逾時：** 由 Claude Code 自己的逾時處理。
-- **代理模式裡，呼叫端放棄的非模型請求，不會在上游被中斷。**
-- **子代理的委派說明文字沒有更動，** 等量測之後再說。
-- **`model-relay.json` 還沒有 JSON Schema 或參考文件。**
-- **不支援上游（公司）代理。**
+- **上游伺服器卡住但未斷開 TCP 連線時，轉發站不設獨立的閒置逾時：** 交由 Claude Code 自身的請求逾時機制處理。
+- **HTTPS proxy 模式下，呼叫端中途放棄非模型請求時，不會主動切斷上游連線。**
+- **子代理的委派提示詞尚未調整，** 待後續基準測試後再評估。
+- **`model-relay.json` 尚無 JSON Schema 與獨立欄位參考文件。**
+- **尚未支援串接上游（公司內網）Proxy。**
 
 ## [0.6.0] - 2026-10-20
 
