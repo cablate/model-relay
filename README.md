@@ -271,7 +271,7 @@ Start with `/provider doctor --ping`: it lists each problem with a `⚠` and the
 ## Uninstall
 
 1. Run `claude plugin uninstall model-relay@model-relay` and remove `ANTHROPIC_BASE_URL` from `~/.claude/settings.json` (in proxy mode remove `HTTPS_PROXY`, `NODE_EXTRA_CA_CERTS` and `NO_PROXY` instead; running `node tools/setup.mjs proxy disable --go` first does that and puts `ANTHROPIC_BASE_URL` back, which you then remove).
-2. Delete optional state files (`~/.claude/model-relay.json`, `~/.claude/model-relay-state.json`, `~/.claude/model-relay-pki/`, `~/.claude/model-relay.log`, `~/.claude/model-relay-requests.log`, and any `*.model-relay-backup` copies).
+2. Delete optional state files (`~/.claude/model-relay.json`, `~/.claude/model-relay-state.json`, `~/.claude/model-relay-status/`, `~/.claude/model-relay-pki/`, `~/.claude/model-relay.log`, `~/.claude/model-relay-requests.log`, and any `*.model-relay-backup` copies).
 
 ## Run from source
 

@@ -85,6 +85,8 @@ test('set changes one switch and validates the value', (t) => {
   assert.strictEqual(f.read().failover.cooldownMs, 900000)
   assert.strictEqual(f.run('set', 'failover.chain', 'gemini,glm').code, 0)
   assert.deepStrictEqual(f.read().failover.chain, ['gemini', 'glm'])
+  assert.strictEqual(f.run('set', 'statusBar', 'on').code, 0)
+  assert.strictEqual(f.read().statusBar, true)
 })
 
 test('set refuses bad values and names, and leaves the file alone', (t) => {

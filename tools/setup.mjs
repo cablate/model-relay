@@ -329,6 +329,7 @@ const SETTABLE = {
     if (!/^\d+$/.test(v) || !L.isPort(Number(v))) throw new Error('expected a port from 1025 to 65535')
     return Number(v)
   }, hint: '1025-65535 — the router\'s port; restart the router afterwards (settings.json is rewired for you)' },
+  statusBar: { parse: bool, hint: 'on|off — also show the relay state in Claude Code\'s plugin status line' },
   'failover.enabled': { parse: bool, hint: 'on|off — switch to the failover chain when Claude hits its usage limit' },
   'failover.chain': { parse: names, hint: 'a,b,c — who takes over, in order (provider names)' },
   'failover.cooldownMs': { parse: wholeNumber(60000), hint: 'how long to stay off Claude after a 429, e.g. 10m (minimum 1m)' },
@@ -507,9 +508,9 @@ if (cmd === 'set') {
     const name = Object.keys(config.providers).find((k) => k.trim().toLowerCase() === pk[1].toLowerCase())
     holder = config.providers[name] = { ...config.providers[name] }
     field = pk[2]
-  } else if (key === 'port') {
+  } else if (!key.includes('.')) {
     holder = config
-    field = 'port'
+    field = key
   } else {
     const [section, f] = key.split('.')
     holder = config[section] = isObj(config[section]) ? { ...config[section] } : {}

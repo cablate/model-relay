@@ -10,12 +10,17 @@ const provider = (args: string) => ({ command: 'provider', args, origin: { kind:
 
 test('/provider opens the panel in one line; the panel offers this window\'s routes, and the shared switches only when asked', async ($, on) => {
   const toasts: string[] = []
+  const written: Array<{ path: string; text: string }> = []
   on('env.get', () => ({ value: undefined }))
   on('ui.toast', (_$, e) => {
     toasts.push(e.text)
     return { value: undefined }
   })
   on('ui.status', () => ({ value: undefined }))
+  on('fs.write', (_$, e) => {
+    written.push({ path: e.path, text: e.text })
+    return { value: undefined }
+  })
   // A closed panel passes to the engine's own drawing, which this stands for
   on('ui.render', { component: 'AbovePrompt' }, ($, e) => {
     const { Box } = $.ui.resolve(e)
@@ -66,4 +71,6 @@ test('/provider opens the panel in one line; the panel offers this window\'s rou
   const sw = await $.command.run(provider('aaa'))
   expect(sw.text?.includes('\n')).toBe(false)
   expect(sw.text).toContain('aaa-9')
+  expect(written.at(-1)?.path.replace(/\\/g, '/')).toContain('/.claude/model-relay-status/s1')
+  expect(written.at(-1)?.text).toBe('pinned\taaa-9\n')
 })

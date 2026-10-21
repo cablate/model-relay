@@ -125,14 +125,17 @@ async function configDir($: EngineInterface): Promise<string> {
 async function readLocal($: EngineInterface): Promise<LocalCfg | null> {
   const base = await configDir($)
   const read = async (name: string) => JSON.parse(await $.fs.read(`${base}/${name}`)) as unknown
+  let cfg: LocalCfg | null = null
   try {
-    return parseLocal(await read(CONFIG_NAME))
+    cfg = parseLocal(await read(CONFIG_NAME))
   } catch {}
-  try {
-    return parseLocal(await read(OLD_CONFIG_NAME), true)
-  } catch {
-    return null
+  if (!cfg) {
+    try {
+      cfg = parseLocal(await read(OLD_CONFIG_NAME), true)
+    } catch {}
   }
+  if (cfg) statusBar = cfg.statusBar
+  return cfg
 }
 
 async function health($: EngineInterface, cfg: LocalCfg): Promise<Health | null> {
@@ -201,7 +204,6 @@ async function tick($: EngineInterface): Promise<void> {
   try {
     const cfg = await readLocal($)
     if (!cfg) return
-    statusBar = cfg.statusBar
     const lang = await detectLang($)
     const seen = await health($, cfg)
     // Another config dir's router on our port is not ours: never route through it, same as a router that is down
