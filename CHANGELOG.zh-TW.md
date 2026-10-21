@@ -8,13 +8,17 @@
 
 ## [0.7.0] - 2026-10-21
 
-開啟 HTTPS proxy 模式（為了手機遙控而執行 `proxy enable`）時，切到非 Claude 供應商的視窗不會再聊到一半突然「失憶」或弄丟工具了——現在每一輪都會把完整對話送給供應商，不再只送只有 Anthropic 伺服器才接得上的差異片段。日常操作也全面精簡：`/provider` 切換只回一行確認、選完模型面板自動收起、`/provider ping` 直接告訴你連不上的具體原因（金鑰被拒、模型名稱錯誤、額度用盡、本機服務沒開），並擋掉瀏覽器網頁偷連 `127.0.0.1` 消耗你供應商額度的漏洞。
+**⚠️ 強烈建議所有使用者立即升級（修復對話失憶與工具遺失 Bug ＋ 堵住本機額度盜用漏洞）：**
+- **修復 HTTPS proxy 模式（`proxy enable`）下聊到一半「失憶」與弄丟工具的重大 Bug：** 切到非 Claude 供應商的視窗現在每一輪都會送出完整對話，不再只送只有 Anthropic 伺服器才接得上的差異片段。
+- **修補本機安全漏洞：** 阻擋瀏覽器開啟的網頁偷連 `127.0.0.1` 盜用你的供應商額度或竄改分流設定。
+- **日常操作全面精簡：** `/provider` 切換只回一行確認、選完模型面板自動收起，`/provider ping` 會直接告訴你連不上的具體原因（金鑰被拒、模型名稱錯誤、額度用盡、本機服務沒開）。
 
-**升級：** 從 0.6 或更早版本升級上來，需要做一次設定檔格式升級（轉為 `"format": 2`），新版轉發站才會讀取你的設定：
-1. 更新外掛：`claude plugin update model-relay@model-relay`。
-2. 轉換設定檔：在 Claude Code 裡輸入 `/provider setup upgrade my model-relay config`（或在外掛資料夾執行 `node tools/setup.mjs migrate --go`），會自動備份舊檔並保留你原有的所有分流行為。
-3. 重啟轉發站：趁沒有對話正在回覆時，執行 `/provider restart` 把背景的 0.6 舊轉發站換成新版。
-*（完成遷移前，背景若還有 0.6 轉發站在跑會照舊運作；若沒有，請求會全部直連 Claude。詳見 [UPGRADING.zh-TW.md](https://github.com/cablate/model-relay/blob/main/UPGRADING.zh-TW.md)。）*
+**升級（必做——只更新外掛不會生效）：**
+0.7 版只讀取格式 2（`"format": 2`）設定檔。從 0.6 或更早版本升上來，**必須**完成以下三步，否則新版轉發站不會接手（背景會繼續跑有 Bug 的 0.6 舊轉發站，或全部退回直連 Claude）：
+1. **更新外掛：** `claude plugin update model-relay@model-relay`。
+2. **轉換設定檔（必做）：** 在 Claude Code 輸入 `/provider setup upgrade my model-relay config`（或在外掛資料夾執行 `node tools/setup.mjs migrate --go`），會自動備份舊檔並保留你原有的所有分流規則。
+3. **重啟轉發站（必做）：** 趁沒有對話正在回覆時，執行 `/provider restart`，把背景的 0.6 舊轉發站換成 0.7 新版。
+*（完整說明見 [UPGRADING.zh-TW.md](https://github.com/cablate/model-relay/blob/main/UPGRADING.zh-TW.md)。）*
 
 ### 新增
 

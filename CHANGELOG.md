@@ -8,13 +8,17 @@ All notable changes to `model-relay` are documented in this file. Format follows
 
 ## [0.7.0] - 2026-10-21
 
-Non-Claude providers in HTTPS proxy mode (`proxy enable`, for Remote Control) no longer lose conversation history or tools mid-chat: every turn now sends the full conversation instead of a delta only Anthropic's server could resolve. `/provider` switches now reply in one line, the `/provider` panel closes automatically after you pick a model, `/provider ping` tells you the exact reason a provider failed (key refused, unknown model, quota reached, or local service not running), and browser pages can no longer send requests to `127.0.0.1` to spend your provider quota.
+**⚠️ Recommended upgrade for all users (fixes conversation & tool loss + local security flaw):**
+- **Fixes mid-chat "amnesia" in HTTPS proxy mode (`proxy enable`):** Non-Claude providers no longer lose your conversation history, system prompt, or tools mid-chat—every turn now sends the full conversation instead of a delta only Anthropic's server could resolve.
+- **Closes a local quota-theft vulnerability:** Browser web pages can no longer send requests to `127.0.0.1` to spend your provider quota or change your session routing.
+- **Streamlined daily controls:** `/provider` switches now reply in one line, the `/provider` panel closes automatically after you pick a model, and `/provider ping` tells you the exact reason a provider failed (key refused, unknown model, quota reached, or local service not running).
 
-**Upgrading:** If you are upgrading from 0.6 or earlier, your config file needs a one-time migration to format 2 (`"format": 2`) before the new router will read it:
-1. Run `claude plugin update model-relay@model-relay`.
-2. In Claude Code, run `/provider setup upgrade my model-relay config` (or run `node tools/setup.mjs migrate --go` in the plugin folder)—this backs up your old file and keeps your exact routing rules.
-3. Run `/provider restart` when no reply is in progress to replace the old 0.6 background router.
-*(Until you migrate, a running 0.6 router keeps working with your old file; if no 0.6 router is running, requests go straight to Claude. Details: [UPGRADING.md](https://github.com/cablate/model-relay/blob/main/UPGRADING.md).)*
+**Upgrading (Required—updating the plugin alone is not enough):**
+Version 0.7 only reads config format 2 (`"format": 2`). If you are on 0.6 or earlier, you **must** run the 3 steps below, or your new router will not start (leaving your old 0.6 router running with the unpatched bugs, or sending all requests straight to Claude):
+1. **Update the plugin:** `claude plugin update model-relay@model-relay`.
+2. **Migrate your config file (required):** In Claude Code, run `/provider setup upgrade my model-relay config` (or run `node tools/setup.mjs migrate --go` in the plugin folder)—this backs up your old file and keeps your exact routing rules.
+3. **Restart the background router (required):** Run `/provider restart` when no reply is in progress to replace the old 0.6 background router with 0.7.
+*(Full details: [UPGRADING.md](https://github.com/cablate/model-relay/blob/main/UPGRADING.md).)*
 
 ### Added
 
