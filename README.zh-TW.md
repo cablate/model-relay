@@ -26,14 +26,15 @@
 
 ## 為什麼需要
 
-長時間使用 Claude Code 常撞上四個既中斷心流又浪費額度的路由問題。`model-relay` 在本機端（`127.0.0.1:8950`）直接解決它們，不需要依賴外部雲端代理。
+長時間使用 Claude Code 常撞上六個既中斷心流又浪費額度的路由問題。`model-relay` 在本機端（`127.0.0.1:8950`）直接解決它們，不需要依賴外部雲端代理。
 
 | 當… | 沒裝 `model-relay` | 裝了 `model-relay` |
 |---|---|---|
 | 寫到一半遇到 Claude 5 小時額度上限（HTTP 429） | 這一輪直接報錯中斷，只能等額度重置或關視窗改環境變數 | 同一個請求當場自動轉給備援供應商完成回覆，工作完全不中斷 |
 | 10 分鐘後 Claude 額度恢復了 | 把 620k token 的長對話切回 Claude 會全價重送 620k 快取，瞬間燒光額度 | 已切走的長對話固定留在備援供應商（7 天有效）；只有新開的對話回到 Claude |
-| 想把 `haiku` 子代理交給便宜快速的模型 | 改全域環境變數會連主線的 Opus/Sonnet 一起換掉 | 透過 `matchModels` 把 `haiku` 子代理導向你選的供應商，主線繼續留在 Claude |
-| 只想把眼前這一個視窗切去別的供應商 | 改 `settings.json` 會把所有開著的終端機視窗一起換掉 | 輸入 `/provider` 打開輸入框上方的互動面板，只固定當前視窗 |
+| 只想把眼前這一個視窗切去別的供應商 | 改 `settings.json` 會把所有開著的終端機視窗一起換掉 | 輸入 `/provider` 從輸入框上方面板只固定當前視窗（並把狀態寫進 `model-relay-status/<session id>` 供你的 statusline 顯示） |
+| 想把 `haiku` 或特定子代理交給別的模型 | 改全域環境變數會連主線的 Opus/Sonnet 一起換掉 | 用 `/provider alias haiku <name>` 全域分流 `haiku`，或直接派 `model-relay:<name>` 一次性子代理（保留完整工具） |
+| 想邊用手機／網頁 Remote Control（`claude.ai/code`）邊轉發，或在代理模式切換模型 | 自訂 `ANTHROPIC_BASE_URL` 會讓 Remote Control 無法連線；而 Anthropic 的 `message-threads` 差量格式會讓非 Claude 供應商失去歷史對話與工具 | 本機 HTTPS 代理模式（`/provider rc on`）支援 Remote Control，並自動讓第三方供應商收到完整歷史對話與工具定義 |
 | 第三方轉發站遇到 `ToolSearch` 或 `cache_control` 報錯 | 工具整批消失或請求直接回 HTTP 400 | 每個供應商可獨立設定 `stripToolSearch` 與 `stripCacheControl` 自動清洗請求 |
 
 ## 適合誰用
@@ -42,9 +43,9 @@
 
 ## 安裝
 
-需要 Node.js 20+ 與 Claude Code 2.1.287 以上（已於 Node.js 22.23.2 及 Claude Code 2.1.302 實測）。
+需要 Node.js 20+ 與 Claude Code 2.1.287 以上（已於 Node.js 22.23.2 及 Claude Code 2.1.306 實測）。
 
-> **從 0.6 或更早的版本升級？** 這一版只讀目前格式（`"format": 2`）的設定檔。轉換之前，外掛不會為舊檔案啟動轉發站，也不會動還在執行的 0.6 轉發站，所以你的對話照舊路由。要轉換，執行 `/provider setup upgrade my model-relay config` 讓 Claude 帶你做；或照 [UPGRADING.zh-TW.md](UPGRADING.zh-TW.md) 手動執行（`node tools/setup.mjs migrate`、`migrate --go`，再 `/provider restart`）。
+> **⚠️ 從 0.6 或更早的版本升級？只更新外掛不會生效。** 0.7+ 只讀目前格式（`"format": 2`）的 `~/.claude/model-relay.json`。在你完成轉換並重啟轉發站之前，背景若還留著 0.6 轉發站，會繼續跑舊版程式（沒有 0.7 的對話與工具遺失修復及本機安全檢查）；一旦舊程序結束，外掛在轉換完成前也不會啟動新轉發站。請執行 `/provider setup upgrade my model-relay config` 讓 Claude 帶你做；或照 [UPGRADING.zh-TW.md](UPGRADING.zh-TW.md) 手動執行（`node tools/setup.mjs migrate`、`migrate --go`，再 `/provider restart`）。
 
 ```sh
 claude plugin marketplace add cablate/model-relay

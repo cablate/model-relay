@@ -26,14 +26,15 @@
 
 ## Why
 
-Long Claude Code sessions run into four costly routing problems. `model-relay` solves them on localhost (`127.0.0.1:8950`) with zero external proxies.
+Long Claude Code sessions run into six everyday routing problems. `model-relay` solves them on localhost (`127.0.0.1:8950`) with zero external proxies.
 
 | When… | Without `model-relay` | With `model-relay` |
 |---|---|---|
 | Claude hits a 5-hour usage limit (HTTP 429) mid-turn | Your turn fails and the conversation stops until quota resets | The same request automatically fails over to your backup provider and completes |
 | Claude quota recovers 10 minutes later | Switching a 620k-token chat back to Claude resends all 620k tokens and burns fresh quota | Sticky sessions stay on the backup provider for 7 days; only new chats return to Claude |
-| You want `haiku` subagents on a fast/cheap endpoint | Changing global env vars forces your main Opus/Sonnet thread onto that endpoint too | `matchModels` routes `haiku` subagents to the provider you choose while your main thread stays on Claude |
-| You want to switch just one window to another provider | Editing `settings.json` switches every open terminal at once | Type `/provider` to open the interactive panel and pin only the current window |
+| You want to switch just one window to another provider | Editing `settings.json` switches every open terminal at once | Type `/provider` to pin only the current window from the panel above the prompt (and write its state to `model-relay-status/<session id>` for your statusline) |
+| You want `haiku` or a specific subagent on another model | Changing global env vars forces your main Opus/Sonnet thread onto that endpoint too | `/provider alias haiku <name>` offloads `haiku` globally, or `model-relay:<name>` spawns a one-off subagent on that provider with all tools intact |
+| You use Remote Control (`claude.ai/code`) or switch providers in proxy mode | Custom `ANTHROPIC_BASE_URL` blocks Remote Control, and Anthropic's `message-threads` delta format makes non-Claude providers lose conversation history and tools | Local HTTPS proxy mode (`/provider rc on`) keeps Remote Control working and automatically sends the full conversation and tools to third-party providers |
 | Third-party gateways choke on `ToolSearch` or `cache_control` | All tools vanish or requests fail with HTTP 400 | Per-provider `stripToolSearch` and `stripCacheControl` clean requests on the fly |
 
 ## Who this is for
@@ -42,9 +43,9 @@ Long Claude Code sessions run into four costly routing problems. `model-relay` s
 
 ## Install
 
-Requires Node.js 20+ and Claude Code 2.1.287 or later (tested on Node.js 22.23.2 and Claude Code 2.1.302).
+Requires Node.js 20+ and Claude Code 2.1.287 or later (tested on Node.js 22.23.2 and Claude Code 2.1.306).
 
-> **Upgrading from 0.6 or earlier?** This version reads only a config in the current format (`"format": 2`). Until you convert yours, the plugin starts no router for the older file and leaves a 0.6 router that is still running alone, so your chats keep routing as before. To convert it, run `/provider setup upgrade my model-relay config` and Claude does it with you, or follow [UPGRADING.md](UPGRADING.md) by hand (`node tools/setup.mjs migrate`, then `migrate --go`, then `/provider restart`).
+> **⚠️ Upgrading from 0.6 or earlier? Updating the plugin alone is not enough.** Version 0.7+ reads only `"format": 2` in `~/.claude/model-relay.json`. Until you migrate your config and restart the router, an old 0.6 router still running in the background keeps running 0.6 code (without 0.7's conversation/tool loss fix or localhost security check), and once that process stops, the plugin will not start a new router until you migrate. Run `/provider setup upgrade my model-relay config` and Claude does it with you, or follow [UPGRADING.md](UPGRADING.md) by hand (`node tools/setup.mjs migrate`, then `migrate --go`, then `/provider restart`).
 
 ```sh
 claude plugin marketplace add cablate/model-relay
