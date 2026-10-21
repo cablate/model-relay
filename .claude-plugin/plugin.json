@@ -1,6 +1,6 @@
 {
   "name": "model-relay",
-  "version": "0.7.0",
+  "version": "0.7.1",
   "description": "Local model relay & failover router — switch conversations between Claude and any Anthropic-compatible provider with an interactive panel and cache-safe sticky sessions.",
   "author": { "name": "CabLate" }
 }

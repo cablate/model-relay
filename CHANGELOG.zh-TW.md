@@ -6,11 +6,25 @@
 
 ## [未發布]
 
+## [0.7.1] - 2026-10-22
+
+讓自訂狀態列（例如 [coralline](https://github.com/Nanako0129/coralline) 的 `relay` segment）能直接顯示每個 Claude Code 視窗實際連線的模型與分流狀態，並預設收起輸入框上方的外掛黃字狀態列，畫面不再重複佔位。
+
+**⚠️ 還在用 0.6.0 或更早版本（`< 0.7.0`）？請務必立即升級並完成設定轉換：**
+- **為什麼 `< 0.7.0` 必須更新：** `0.7.0` 以前的版本在 HTTPS proxy 模式（`proxy enable`）下切到非 Claude 供應商時，第二輪起會遺失歷史對話與工具定義；同時存在瀏覽器網頁可偷連本機盜用 API 額度的安全漏洞。
+- **從 `0.7.0` 升級：** 執行 `claude plugin update model-relay@model-relay` 即可，外掛會在轉發站閒置時自動重啟背景程序。
+- **從 `0.6.0` 或更早版本升級（必做三步驟——只更新外掛不會生效）：**
+  1. 執行 `claude plugin update model-relay@model-relay`。
+  2. 將設定檔轉換為 `"format": 2`：在 Claude Code 輸入 `/provider setup upgrade my model-relay config`（或在外掛資料夾執行 `node tools/setup.mjs migrate --go`）。
+  3. 趁沒有視窗正在回覆時執行 `/provider restart`。*（完整說明見 [UPGRADING.zh-TW.md](https://github.com/cablate/model-relay/blob/main/UPGRADING.zh-TW.md)。）*
+
 ### 新增
-- 每個視窗會把轉發站狀態寫進設定目錄的 `model-relay-status/<session id>`，一行 `kind<TAB>label`（`claude`、`pinned`、`failover`、`limit`、`offline`、`direct`），讓 coralline 的 `relay` segment 這類 statusline 顯示這個視窗實際在用的模型。轉發站會清掉超過一週沒更新的檔案。
+
+- **每個視窗寫出獨立狀態檔，供自訂 statusline 直接讀取（`model-relay-status/<session id>`）：** Claude Code 內建傳給 `statusLine` 的資料永遠顯示轉發前原本的 Claude 模型名稱。現在每個視窗在路由改變（或執行 `/clear`）時，都會把真實轉發狀態寫進 `~/.claude/model-relay-status/<session id>`，格式為單行 `kind<TAB>label`（`claude`、`pinned`、`failover`、`limit`、`offline`、`direct`），讓 [coralline](https://github.com/Nanako0129/coralline) 等狀態列工具用一行 shell `read` 就能直接顯示。超過 7 天未更新的檔案會由背景轉發站自動清理。
 
 ### 變更
-- 外掛狀態列（輸入框上方那一行黃字）預設關閉。在 `model-relay.json` 設 `"statusBar": true` 可以恢復。升級與離線的提醒仍會以通知跳出。
+
+- **輸入框上方的外掛黃字狀態列改為預設關閉（`statusBar`）：** 為保持輸入區乾淨、避免與自訂 statusline 重複顯示，外掛狀態列（`$.ui.status`）改為選用開啟。需要時可隨時執行 `node tools/setup.mjs set statusBar on`（或在 `model-relay.json` 設定 `"statusBar": true`）恢復顯示；切換模型、升級提醒與轉發站離線仍會正常跳出通知。
 
 ## [0.7.0] - 2026-10-21
 
@@ -168,7 +182,8 @@
 
 - **舊版 `custom_agent` 子程序工具：** 移除已棄用的 `claude.exe -p` 子程序包裝程式碼，讓外掛專注於純粹、零額外負擔的 HTTP 模型轉發與對話路由。
 
-[unreleased]: https://github.com/cablate/model-relay/compare/v0.7.0...HEAD
+[unreleased]: https://github.com/cablate/model-relay/compare/v0.7.1...HEAD
+[0.7.1]: https://github.com/cablate/model-relay/compare/v0.7.0...v0.7.1
 [0.7.0]: https://github.com/cablate/model-relay/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/cablate/model-relay/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/cablate/model-relay/compare/v0.4.0...v0.5.0

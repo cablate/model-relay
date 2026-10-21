@@ -6,11 +6,25 @@ All notable changes to `model-relay` are documented in this file. Format follows
 
 ## [Unreleased]
 
+## [0.7.1] - 2026-10-22
+
+Lets custom statuslines (such as [coralline](https://github.com/Nanako0129/coralline)'s `relay` segment) display the actual model and routing state of each Claude Code window, and hides the plugin's own yellow status line above the prompt by default so the two do not duplicate each other.
+
+**⚠️ Still on 0.6.0 or earlier (`< 0.7.0`)? You must upgrade and migrate now:**
+- **Why `< 0.7.0` must be updated:** Versions before `0.7.0` suffer from mid-chat conversation history and tool loss on non-Claude providers in HTTPS proxy mode (`proxy enable`), as well as a localhost security flaw where open browser tabs can spend your provider quota.
+- **Upgrading from `0.7.0`:** Run `claude plugin update model-relay@model-relay`. The plugin restarts the background router automatically once no request is in flight.
+- **Upgrading from `0.6.0` or earlier (3 required steps—updating the plugin alone is not enough):**
+  1. Run `claude plugin update model-relay@model-relay`.
+  2. Migrate your config to `"format": 2`: run `/provider setup upgrade my model-relay config` in Claude Code (or `node tools/setup.mjs migrate --go` in the plugin folder).
+  3. Run `/provider restart` when no window has a reply in progress. *(Full details: [UPGRADING.md](https://github.com/cablate/model-relay/blob/main/UPGRADING.md).)*
+
 ### Added
-- Each window writes its relay state to `model-relay-status/<session id>` in the config directory, one line `kind<TAB>label` (`claude`, `pinned`, `failover`, `limit`, `offline`, `direct`), so a statusline such as coralline's `relay` segment can show which model this window really talks to. The router sweeps files untouched for a week.
+
+- **Per-window status file for custom statuslines (`model-relay-status/<session id>`):** Claude Code's built-in `statusLine` payload always reports the Claude model name before `model-relay` rewrites it. Each window now writes its real relay state to `~/.claude/model-relay-status/<session id>` as a single line `kind<TAB>label` (`claude`, `pinned`, `failover`, `limit`, `offline`, `direct`) whenever the route changes (and after `/clear`), so statusline tools like [coralline](https://github.com/Nanako0129/coralline) can read it directly with a single shell `read`. The background router automatically cleans up status files untouched for 7 days.
 
 ### Changed
-- The plugin status line (the yellow line above the input) is off by default. Set `"statusBar": true` in `model-relay.json` to bring it back. Upgrade and outage notices still appear as toasts.
+
+- **Plugin status line above the input is now off by default (`statusBar`):** To keep the prompt area clean and avoid duplicating your statusline, the yellow plugin status line (`$.ui.status`) is now opt-in. Turn it back on anytime with `node tools/setup.mjs set statusBar on` (or `"statusBar": true` in `model-relay.json`); switches, upgrade reminders, and outage alerts still appear as toast notices.
 
 ## [0.7.0] - 2026-10-21
 
@@ -168,7 +182,8 @@ Type `/provider` to open an interactive `AbovePrompt` control panel right above 
 
 - **Legacy child-process `custom_agent` tool:** Removed the deprecated `claude.exe -p` child-process wrapper so the plugin focuses purely on fast, zero-overhead HTTP relay and session routing.
 
-[unreleased]: https://github.com/cablate/model-relay/compare/v0.7.0...HEAD
+[unreleased]: https://github.com/cablate/model-relay/compare/v0.7.1...HEAD
+[0.7.1]: https://github.com/cablate/model-relay/compare/v0.7.0...v0.7.1
 [0.7.0]: https://github.com/cablate/model-relay/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/cablate/model-relay/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/cablate/model-relay/compare/v0.4.0...v0.5.0
