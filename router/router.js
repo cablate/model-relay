@@ -41,6 +41,7 @@ const CFG_FILE = path.join(dir, 'model-relay.json')
 const STATE_FILE = path.join(dir, 'model-relay-state.json')
 const LOG_FILE = path.join(dir, 'model-relay.log')
 const REQLOG = path.join(dir, 'model-relay-requests.log')
+const STATUS_DIR = path.join(dir, 'model-relay-status')
 
 // The file is re-read on every request so edits apply at once. A read that fails (an editor mid-save, a typo) keeps
 // the last good config instead of failing requests; "doctor" is what tells a person the file is broken.
@@ -114,6 +115,30 @@ const setState = (next, why) => {
   if (why) log(why)
 }
 setInterval(save, 600000).unref()
+
+// Each session's hook writes its status file and never deletes it (the plugin API has no delete); sweep ended ones
+const sweepStatus = () => {
+  let names = []
+  try {
+    names = fs.readdirSync(STATUS_DIR)
+  } catch {
+    return
+  }
+  const entries = []
+  for (const name of names) {
+    try {
+      const st = fs.lstatSync(path.join(STATUS_DIR, name))
+      entries.push({ name, isFile: st.isFile(), mtimeMs: st.mtimeMs })
+    } catch {}
+  }
+  for (const name of L.staleStatusFiles(entries, Date.now())) {
+    try {
+      fs.unlinkSync(path.join(STATUS_DIR, name))
+    } catch {}
+  }
+}
+sweepStatus()
+setInterval(sweepStatus, 3600000).unref()
 
 const short = (sid) => (sid ? sid.slice(0, 8) : '-')
 const stick = (sid, providerName, why) => {

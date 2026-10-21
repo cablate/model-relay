@@ -89,7 +89,7 @@ claude plugin install model-relay@model-relay
 
 **A key exported later is not seen:** `env:VAR` tokens are read from the router process's own environment, which it inherits from whichever Claude Code session (or setup command) started it. A variable exported after the router started is not seen until the router restarts: stop the router process (`doctor` prints its pid) and start a new Claude Code session. `doctor` reads your shell, so it can report the key as set while the router cannot see it.
 
-**Updating:** run `claude plugin update model-relay@model-relay`. The plugin then restarts the relay by itself once no request is in flight through it; a relay from 0.6 or earlier cannot report that, so the status line asks you to run `/provider restart` when no Claude Code window has a reply in progress.
+**Updating:** run `claude plugin update model-relay@model-relay`. The plugin then restarts the relay by itself once no request is in flight through it; a relay from 0.6 or earlier cannot report that, so a notice asks you to run `/provider restart` when no Claude Code window has a reply in progress.
 
 ## What's inside
 
@@ -99,7 +99,7 @@ claude plugin install model-relay@model-relay
 
 ### Interactive `AbovePrompt` control panel and provider test
 
-Type `/provider` to open a panel right above your prompt input box. It does one thing: pick which model this window uses, one button per row. Once a switch takes, the panel closes and the status line shows the model now in use. Click a button, or press `ctrl+x tab` and then the key shown on it (`1`–`9` to switch, `p` to test every provider, and `r` to try Claude again while a 429 cooldown runs). Switching a pinned window back to Claude takes a second press, so you never rebuild a long chat's prompt cache by accident. The switches every window shares stay folded under Settings [s]: press it to show 429 failover, retry and Remote Control (`f` / `t` / `x`) and the model aliases. They turn on or off without editing JSON: failover and retry apply from the next request, while Remote Control asks first because it rewrites `settings.json`, and it only reaches new sessions.
+Type `/provider` to open a panel right above your prompt input box. It does one thing: pick which model this window uses, one button per row. Once a switch takes, the panel closes and a notice names the model now in use. Click a button, or press `ctrl+x tab` and then the key shown on it (`1`–`9` to switch, `p` to test every provider, and `r` to try Claude again while a 429 cooldown runs). Switching a pinned window back to Claude takes a second press, so you never rebuild a long chat's prompt cache by accident. The switches every window shares stay folded under Settings [s]: press it to show 429 failover, retry and Remote Control (`f` / `t` / `x`) and the model aliases. They turn on or off without editing JSON: failover and retry apply from the next request, while Remote Control asks first because it rewrites `settings.json`, and it only reaches new sessions.
 
 Each provider row shows two things apart: the last real request (`last 200 · 45.0s`) and the last test (`test ok 640ms`). The test sends one 1-token request and stops at the first byte (15 seconds at most), so a long reply never reads as a slow provider, and a failure says what is wrong in words: the key was refused, the model name is wrong, the quota is used up, the local gateway is not running, or there was no answer in time. The router keeps the provider's key out of anything it shows. When the router skips a provider (its `env:` variable is unset for the router), the panel says so.
 
@@ -174,8 +174,9 @@ Configuration lives in `~/.claude/model-relay.json`. The directory defaults to `
 
 | Field | Default | Meaning |
 |---|---|---|
-| `format` | (none) | `2` for a config in the current format (`init`, `add` and `migrate --go` set it), the only format the router reads. A file without it, or one named `custom-agent.json`, is an older config: until `migrate --go` rewrites it, the plugin starts and replaces no router for it, so a 0.6 router still running keeps using it, and with none answering the session talks to Claude directly. The plugin says so in a notice, the status line and the panel; see [UPGRADING.md](UPGRADING.md) |
+| `format` | (none) | `2` for a config in the current format (`init`, `add` and `migrate --go` set it), the only format the router reads. A file without it, or one named `custom-agent.json`, is an older config: until `migrate --go` rewrites it, the plugin starts and replaces no router for it, so a 0.6 router still running keeps using it, and with none answering the session talks to Claude directly. The plugin says so in a notice, the panel and, with `statusBar` on, the status line; see [UPGRADING.md](UPGRADING.md) |
 | `port` | `8950` | Localhost port for the relay HTTP server (`1025`–`65535`). Change it with `node tools/setup.mjs set port <n>`, which also updates `settings.json`; the router already running keeps the old port until you stop it (the command prints its pid), and it refuses a port that already answers |
+| `statusBar` | `false` | Also show the relay state in Claude Code's plugin status line, the yellow line above the input. Off by default: each window's state is written to a status file for your own statusline instead (see below). Notices about upgrades and outages still appear as toasts |
 | `claudeUrl` | `"https://api.anthropic.com"` | Upstream Anthropic API base URL |
 | `proxy.enabled` | `false` | Accept HTTPS-proxy connections for Remote Control. Off by default. When on, a `CONNECT` to any host other than `api.anthropic.com` is a blind tunnel that any local process can use; `node tools/setup.mjs proxy enable --go` turns it on and `proxy disable --go` off |
 | `failover.enabled` | `true` | Automatically switch to the failover chain on Claude 429 usage limits |
@@ -199,6 +200,21 @@ Configuration lives in `~/.claude/model-relay.json`. The directory defaults to `
 | `providers.<name>.authHeader` | `"both"` | How to send credentials: `"bearer"`, `"x-api-key"`, or `"both"` |
 | `providers.<name>.launch` | `null` | `{ "command": "...", "args": [...] }` to auto-spawn if localhost port is closed |
 
+### Show the relay in your statusline
+
+Each window writes its relay state to `~/.claude/model-relay-status/<session id>` (the same config directory as above) whenever it changes, as one line `kind<TAB>label`. The session id is the `session_id` Claude Code passes to a `statusLine` command, so a statusline reads its own window's file directly. The router deletes files untouched for a week.
+
+| `kind` | `label` | Meaning |
+|---|---|---|
+| `claude` | `claude` | This window goes to Claude through the relay |
+| `pinned` | the provider's model | Pinned with `/provider`, or by a failover |
+| `failover` | the provider's model | Claude's limit is reached; the next request goes there |
+| `limit` | `claude` | Claude's limit is reached and the failover chain has nobody to hand over to |
+| `offline` | `offline` | No relay of this config directory answers (it is restarted when it can be; an older config is not, see `format`) |
+| `direct` | `claude` | No relay answers, so this window talks to Claude directly |
+
+[coralline](https://github.com/Nanako0129/coralline)'s `relay` segment reads this file.
+
 ## Commands
 
 | Command | Description |
@@ -209,7 +225,7 @@ Configuration lives in `~/.claude/model-relay.json`. The directory defaults to `
 | `/provider help` | Every command, grouped by what it reaches: this window, every window, setup and checks |
 | `/provider setup [goal]` | Let Claude walk you through setup with the setup tool; keys stay out of the chat |
 | `/provider init` · `/provider doctor [--ping]` | First-run setup and health check; work from any folder, with or without a config file |
-| `/provider restart` | Restart the relay so it runs the installed plugin's code. After `claude plugin update` the plugin does this by itself once the relay answers no request; a relay left by an older plugin cannot report that, so the status line asks you to run it when no window has a reply in progress |
+| `/provider restart` | Restart the relay so it runs the installed plugin's code. After `claude plugin update` the plugin does this by itself once the relay answers no request; a relay left by an older plugin cannot report that, so a notice asks you to run it when no window has a reply in progress |
 | `/provider ping` | Test every provider: does it answer, how soon does the answer start, and what is wrong if it does not |
 | `/provider probe` | Reset the 429 cooldown timer so the next new session tries Claude immediately |
 | `/provider alias [haiku\|sonnet\|opus] [<name>\|claude]` | Inspect or point a Claude model alias at a provider (updates both `settings.json` and `matchModels`) |
@@ -244,13 +260,13 @@ Start with `/provider doctor --ping`: it lists each problem with a `⚠` and the
 | Symptom | What to check |
 |---|---|
 | `/provider` says config is missing or invalid | Run `/provider doctor` (or `node tools/setup.mjs doctor` from the install directory) to verify JSON syntax and check if any `env:VAR` variables are unset in your shell |
-| Status bar shows `Relay offline: connected directly to Claude` | In `ANTHROPIC_BASE_URL` mode the plugin bypassed a stopped router so your chat keeps working. In proxy mode there is no such bypass: Claude Code cannot connect until the router is restarted. Run `/provider doctor` or check `~/.claude/model-relay.log` (a router that finds its port taken by another process or another config directory logs that there and exits) |
+| The status line (with `statusBar` on) shows `Relay offline: connected directly to Claude`, or the status file says `direct` | In `ANTHROPIC_BASE_URL` mode the plugin bypassed a stopped router so your chat keeps working. In proxy mode there is no such bypass: Claude Code cannot connect until the router is restarted. Run `/provider doctor` or check `~/.claude/model-relay.log` (a router that finds its port taken by another process or another config directory logs that there and exits) |
 | Remote Control says it is only available via `api.anthropic.com` | Claude Code still uses the relay as its API address; run `node tools/setup.mjs proxy enable --go` and start a new session |
 | `proxy enable` refuses because `NODE_EXTRA_CA_CERTS` is already set | Something you use (often a company network that inspects TLS) already relies on that certificate, and Claude Code accepts only one file there, so proxy mode would make it stop trusting yours. Remote Control through the relay cannot be combined with it yet; nothing was changed |
 | Claude Code cannot connect after enabling proxy mode | The router is probably down: run `node tools/setup.mjs proxy status`, start it with `node tools/setup.mjs rc`, or go back with `node tools/setup.mjs proxy disable --go` |
 | Tools are missing on a third-party provider | Set `"stripToolSearch": true` on that provider in `model-relay.json` so `ToolSearch` does not hide other tools |
 | A `model-relay:<name>` subagent runs on Claude instead of the provider | The plugin shows a notice when this happens. Usually an `availableModels` list does not include the provider's model, so Claude Code runs the subagent on `CLAUDE_CODE_SUBAGENT_MODEL` or the parent's model; add the model ID exactly as configured. `node tools/setup.mjs doctor` checks the list in `~/.claude/settings.json` only |
-| The status line says the config is from an older version, and `doctor` says it is outdated | The file is named `custom-agent.json` or has no `"format": 2`, so this version's router does not read it. `node tools/setup.mjs migrate` shows what it would write, and `migrate --go` writes it, with the router then routing as the older version did (it refuses if the result would route differently); then run `/provider restart` when no Claude Code window has a reply in progress. See [UPGRADING.md](UPGRADING.md) |
+| A notice says the config is from an older version, and `doctor` says it is outdated | The file is named `custom-agent.json` or has no `"format": 2`, so this version's router does not read it. `node tools/setup.mjs migrate` shows what it would write, and `migrate --go` writes it, with the router then routing as the older version did (it refuses if the result would route differently); then run `/provider restart` when no Claude Code window has a reply in progress. See [UPGRADING.md](UPGRADING.md) |
 
 ## Uninstall
 

@@ -96,6 +96,13 @@ test('a session that moved to GLM stays there after Claude recovers', () => {
 test('sticky sessions expire after a week', () => {
   const s = L.setSticky(L.setSticky(L.emptyState(), 'old', 'glm', 0), 'new', 'glm', 8 * 24 * 3600e3)
   assert.deepStrictEqual(Object.keys(L.pruneSticky(s, 8 * 24 * 3600e3).sticky), ['new'])
+  const week = 7 * 24 * 3600e3
+  const files = [
+    { name: 'ended', isFile: true, mtimeMs: 0 },
+    { name: 'live', isFile: true, mtimeMs: 1 },
+    { name: 'a-dir', isFile: false, mtimeMs: 0 },
+  ]
+  assert.deepStrictEqual(L.staleStatusFiles(files, week), ['ended'], 'status files: only a regular file untouched for a week')
 })
 
 test('only a usage-limit 429 triggers failover', () => {

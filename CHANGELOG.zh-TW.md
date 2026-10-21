@@ -6,6 +6,12 @@
 
 ## [未發布]
 
+### 新增
+- 每個視窗會把轉發站狀態寫進設定目錄的 `model-relay-status/<session id>`，一行 `kind<TAB>label`（`claude`、`pinned`、`failover`、`limit`、`offline`、`direct`），讓 coralline 的 `relay` segment 這類 statusline 顯示這個視窗實際在用的模型。轉發站會清掉超過一週沒更新的檔案。
+
+### 變更
+- 外掛狀態列（輸入框上方那一行黃字）預設關閉。在 `model-relay.json` 設 `"statusBar": true` 可以恢復。升級與離線的提醒仍會以通知跳出。
+
 ## [0.7.0] - 2026-10-21
 
 **⚠️ 強烈建議所有使用者立即升級（修復對話失憶與工具遺失 Bug ＋ 堵住本機額度盜用漏洞）：**

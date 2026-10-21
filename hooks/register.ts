@@ -35,6 +35,8 @@ import {
   staleStatusText,
   startArgv,
   startFailedText,
+  statusFields,
+  statusFile,
   statusText,
   switchedText,
   toggleArgv,
@@ -50,7 +52,11 @@ const panelUi = atom(
 const panelData = atom({ plugin: 'model-relay', key: 'panelData' } as const, null)
 
 let ticking = false
-let shownStatus = ''
+let shownStatus: string | undefined = ''
+let statusBar = false // the config's "statusBar", read each tick
+let writtenStatus = '' // path and line last written, so a new session id writes its own file at once
+let statusDir: string | undefined
+let writtenStatusAt = 0
 let lastStart = 0
 let direct = false // this session bypasses a dead router and talks to Anthropic itself
 let startFailed = false // the router was started and did not answer; said once until it answers again
@@ -139,10 +145,24 @@ async function health($: EngineInterface, cfg: LocalCfg): Promise<Health | null>
   }
 }
 
-async function showStatus($: EngineInterface, text: string): Promise<void> {
-  if (text === shownStatus) return
-  shownStatus = text
-  $.ui.status(text)
+// Writes this session's relay state for statusline tools (statusFields), when it changes and at least daily so the
+// router's sweep of week-old files never takes a live session's; then draws the plugin status line, only when the
+// config asks for it ("statusBar": true).
+async function showStatus($: EngineInterface, text: string, fields: [string, string]): Promise<void> {
+  // the session id is asked each time: /clear and an in-process resume go on under a new one without session.start
+  statusDir ??= await configDir($)
+  const file = statusFile(statusDir, await $.session.id(), fields)
+  if (file && (`${file.path}\n${file.line}` !== writtenStatus || Date.now() - writtenStatusAt > 86400000)) {
+    try {
+      await $.fs.write(file.path, file.line)
+      writtenStatus = `${file.path}\n${file.line}`
+      writtenStatusAt = Date.now()
+    } catch {}
+  }
+  const shown = statusBar ? text : undefined
+  if (shown === shownStatus) return
+  shownStatus = shown
+  $.ui.status(shown)
 }
 
 async function syncPanelData($: EngineInterface, cfg: LocalCfg, h: Health | null, lang: 'zh' | 'en'): Promise<void> {
@@ -181,6 +201,7 @@ async function tick($: EngineInterface): Promise<void> {
   try {
     const cfg = await readLocal($)
     if (!cfg) return
+    statusBar = cfg.statusBar
     const lang = await detectLang($)
     const seen = await health($, cfg)
     // Another config dir's router on our port is not ours: never route through it, same as a router that is down
@@ -191,7 +212,7 @@ async function tick($: EngineInterface): Promise<void> {
         await $.env.set('ANTHROPIC_BASE_URL', undefined)
         $.ui.toast(lang === 'en' ? `Port ${cfg.port} belongs to another relay (${other}); connected directly to Claude` : `連接埠 ${cfg.port} 屬於另一個轉發站（${other}），主線直連 Claude`)
       }
-      await showStatus($, foreignStatusText(other, lang))
+      await showStatus($, foreignStatusText(other, lang), statusFields(null, direct, true))
       return
     }
     const h = seen
@@ -224,7 +245,7 @@ async function tick($: EngineInterface): Promise<void> {
         $.ui.toast(lang === 'en' ? 'Relay recovered; routing through local relay' : '轉發站恢復，主線重新經由轉發站')
       }
       const note = cfg.outdated ? outdatedText(lang) : staleBusy ? staleStatusText(lang) : ''
-      await showStatus($, note ? `${statusText(h, false, lang)} · ${note}` : statusText(h, false, lang))
+      await showStatus($, note ? `${statusText(h, false, lang)} · ${note}` : statusText(h, false, lang), statusFields(h, false))
       await ours($, cfg, h, lang)
       return
     }
@@ -237,7 +258,7 @@ async function tick($: EngineInterface): Promise<void> {
       const up = await $.process.run(healthWaitArgv(cfg, await $.session.id(), win), { timeoutMs: 20000 }).catch(() => null)
       const h2 = up && up.exitCode === 0 ? parseHealth(up.stdout) : null
       if (h2) {
-        await showStatus($, statusText(h2, false, lang))
+        await showStatus($, statusText(h2, false, lang), statusFields(h2, false))
         await ours($, cfg, h2, lang)
         return
       }
@@ -250,7 +271,7 @@ async function tick($: EngineInterface): Promise<void> {
       direct = true
       await $.env.set('ANTHROPIC_BASE_URL', undefined)
     }
-    await showStatus($, cfg.outdated ? `${statusText(null, direct, lang)} · ${outdatedText(lang)}` : statusText(null, direct, lang))
+    await showStatus($, cfg.outdated ? `${statusText(null, direct, lang)} · ${outdatedText(lang)}` : statusText(null, direct, lang), statusFields(null, direct))
     await syncPanelData($, cfg, null, lang)
   } finally {
     ticking = false
@@ -275,7 +296,7 @@ function panelActions($: EngineInterface): PanelActions {
         if (cfg) {
           const lang = await detectLang($)
           const h = await health($, cfg)
-          if (h) await showStatus($, statusText(h, false, lang))
+          if (h) await showStatus($, statusText(h, false, lang), statusFields(h, false))
           await syncPanelData($, cfg, h, lang)
         }
         await setPanelNote($, note)
@@ -283,7 +304,7 @@ function panelActions($: EngineInterface): PanelActions {
   }
   const close = () => update($, panelUi, (u) => ({ ...u, open: false, confirmingClaude: false, confirmingProxy: false }))
   return {
-    // A switch that took is the panel's job done: it closes, and a toast and the status line say where this window goes now
+    // A switch that took is the panel's job done: it closes, and a toast (and the status line, when on) says where this window goes now
     switchTo: (target) =>
       run(async () => {
         const cfg = await readLocal($)
@@ -490,7 +511,7 @@ export const register: Register = (on) => {
       const out = ((r?.stdout || '') + (r?.stderr || '')).trim()
       const cfgNext = (await readLocal($)) ?? cfg
       const h = await health($, cfgNext)
-      if (h) await showStatus($, statusText(h, false, lang))
+      if (h) await showStatus($, statusText(h, false, lang), statusFields(h, false))
       await syncPanelData($, cfgNext, h, lang)
       return { text: out || (lang === 'en' ? 'Setup command did not respond.' : '設定指令沒有回應。') }
     }
@@ -503,7 +524,7 @@ export const register: Register = (on) => {
         return { text: lang === 'en' ? 'Relay did not respond; nothing changed.' : '轉發站沒有回應，沒有改變。' }
       }
       const h = await health($, cfg)
-      if (h) await showStatus($, statusText(h, false, lang))
+      if (h) await showStatus($, statusText(h, false, lang), statusFields(h, false))
       await syncPanelData($, cfg, h, lang)
       return { text: switchedText(arg, providers[arg] ?? arg, lang) }
     }

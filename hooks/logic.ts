@@ -4,10 +4,13 @@ import type { PanelData, PingStat, ProviderStat } from '../types'
 // failover chain come from the router's /__health only, so the plugin never second-guesses how the router reads a config.
 // outdated: the file is from an older version, which this version's router does not read (no "format": 2, or the older
 // file name); the hook then starts and replaces no router, so a router that still reads it keeps working until migrate
+// statusBar: also draw the relay state in Claude Code's plugin status line ("statusBar": true); off by default, since
+// the per-session status file (statusFields) lets a statusline tool show it instead
 export interface LocalCfg {
   port: number
   nodePath: string
   outdated: boolean
+  statusBar: boolean
 }
 
 export const CONFIG_NAME = 'model-relay.json'
@@ -20,7 +23,7 @@ export function parseLocal(raw: unknown, oldName = false): LocalCfg | null {
   const r = raw as Record<string, unknown>
   const port = typeof r.port === 'number' && Number.isInteger(r.port) && r.port > 1024 && r.port < 65536 ? r.port : 8950
   const nodePath = typeof r.nodePath === 'string' && r.nodePath.length > 0 ? r.nodePath : 'node'
-  return { port, nodePath, outdated: oldName || r.format !== 2 }
+  return { port, nodePath, outdated: oldName || r.format !== 2, statusBar: r.statusBar === true }
 }
 
 export function outdatedText(lang: 'zh' | 'en' = 'zh'): string {
@@ -319,6 +322,34 @@ export function statusText(h: Health | null, direct: boolean, lang: 'zh' | 'en' 
     return lang === 'en' ? 'Claude limit reached' : 'Claude 額度用完'
   }
   return lang === 'en' ? 'Main: Claude' : '主線：Claude'
+}
+
+// The relay state of this session for statusline tools (coralline's relay segment), written by the hook to
+// <config dir>/model-relay-status/<session id> as one line "kind<TAB>label":
+//   claude   <tab> claude     this session goes to Claude through the relay
+//   pinned   <tab> <model>    pinned to a provider (/provider, or a failover that pinned it)
+//   failover <tab> <model>    Claude's limit is reached; the next request goes to that model
+//   limit    <tab> claude     Claude's limit is reached and the failover chain has nobody to hand over to
+//   offline  <tab> offline    no router of ours answers for this window
+//   direct   <tab> claude     no router of ours answers, so this window talks to Claude directly
+// foreign: the port answers for another config dir's router, which this window never counts as its own
+export function statusFields(h: Health | null, direct: boolean, foreign = false): [string, string] {
+  if (foreign || !h) return direct ? ['direct', 'claude'] : ['offline', 'offline']
+  const pinned = h.session !== 'claude' && has(h.providers, h.session) ? h.providers[h.session] : undefined
+  if (pinned) return ['pinned', pinned]
+  if (h.failoverSince) {
+    const to = h.failoverProvider ? h.providers[h.failoverProvider] ?? h.failoverProvider : ''
+    return to ? ['failover', to] : ['limit', 'claude']
+  }
+  return ['claude', 'claude']
+}
+
+// The status file's path and line; null for a session id that is not a plain file name. Tabs and line breaks in a
+// model id would split the line, so they become spaces.
+export function statusFile(configDir: string, sid: string, fields: [string, string]): { path: string; line: string } | null {
+  if (!/^[A-Za-z0-9._-]+$/.test(sid) || sid === '.' || sid === '..') return null
+  const clean = (s: string) => s.replace(/[\t\r\n]+/g, ' ')
+  return { path: `${configDir}/model-relay-status/${sid}`, line: `${clean(fields[0])}\t${clean(fields[1])}\n` }
 }
 
 export function fmtLatency(ms: number): string {

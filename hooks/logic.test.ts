@@ -29,6 +29,8 @@ import {
   setupScript,
   spawnedElsewhere,
   startArgv,
+  statusFields,
+  statusFile,
   statusText,
   switchedText,
   toggleArgv,
@@ -41,13 +43,14 @@ function assert(cond: boolean, msg: string): void {
 
 const health = (j: object) => parseHealth(JSON.stringify({ ok: true, ...j }))!
 
-test('the hook reads only the port and the node path from the config file', () => {
+test('the hook reads only the port, the node path and the status bar switch from the config file', () => {
   assert(parseLocal(null) === null && parseLocal([]) === null, 'not an object')
   const d = parseLocal({ providers: { x: { token: 't' } } })!
   assert(d.port === 8950 && d.nodePath === 'node', 'defaults')
   assert(parseLocal({ port: 80 })!.port === 8950, 'privileged port refused')
   assert(parseLocal({ port: 9001, nodePath: 'C:/n/node.exe' })!.nodePath === 'C:/n/node.exe', 'node path kept')
-  assert(Object.keys(parseLocal({ port: 9001 })!).sort().join() === 'nodePath,outdated,port', 'nothing about providers')
+  assert(parseLocal({})!.statusBar === false && parseLocal({ statusBar: true })!.statusBar === true && parseLocal({ statusBar: 'yes' })!.statusBar === false, 'status bar is opt-in, true only')
+  assert(Object.keys(parseLocal({ port: 9001 })!).sort().join() === 'nodePath,outdated,port,statusBar', 'nothing about providers')
   assert(parseLocal({ format: 2 })!.outdated === false, 'format 2 is read')
   assert(parseLocal({ providers: {} })!.outdated && parseLocal({ format: '2' })!.outdated, 'no "format": 2 is an older config')
   assert(parseLocal({ format: 2, port: 9001 }, true)!.outdated && parseLocal({ format: 2, port: 9001 }, true)!.port === 9001, 'the older file name: its port only')
@@ -92,6 +95,17 @@ test('health, panel data, and status texts (zh and en) come from the router alon
   assert(statusText({ ...h, session: 'aaa', failoverSince: 0 }, false, 'en').includes('pinned'), 'sticky session en')
   assert(parseHealth('{"ok":true,"mode":"glm"}')!.session === 'claude', 'old router answer reads as claude')
   assert(statusText(null, true).includes('直連') && !/GLM/i.test(statusText(null, true)), 'router down, direct, no provider named')
+  const fc = (x: [string, string]) => x.join(' ')
+  assert(fc(statusFields({ ...h, failoverSince: 0 }, false)) === 'claude claude', 'fields: claude')
+  assert(fc(statusFields({ ...h, session: 'aaa', failoverSince: 0 }, false)) === 'pinned aaa-9', 'fields: pinned to the model')
+  assert(fc(statusFields(h, false)) === 'failover aaa-9', 'fields: failover names the model')
+  assert(fc(statusFields({ ...h, failoverProvider: undefined }, false)) === 'limit claude', 'fields: limit reached with nobody to hand over to')
+  assert(fc(statusFields({ ...h, session: 'gone', failoverSince: 0 }, false)) === 'claude claude', 'fields: a pin the router no longer lists')
+  assert(fc(statusFields(null, false)) === 'offline offline' && fc(statusFields(null, true)) === 'direct claude', 'fields: router down')
+  assert(fc(statusFields(h, true, true)) === 'direct claude' && fc(statusFields(h, false, true)) === 'offline offline', 'fields: another relay on the port is not ours; direct only once this window bypasses it')
+  const sf = statusFile('/c', 'ab-12', ['pinned', 'm\tx\ny'])!
+  assert(sf.path === '/c/model-relay-status/ab-12' && sf.line === 'pinned\tm x y\n', 'status file path and a line that cannot split')
+  assert(statusFile('/c', '../x', ['claude', 'claude']) === null && statusFile('/c', '..', ['claude', 'claude']) === null && statusFile('/c', '', ['claude', 'claude']) === null, 'no path out of the status dir')
   const rep = providerReport(h, 5)
   assert(rep.includes('10 分鐘後') && rep.includes('● /provider claude') && rep.includes('○ /provider aaa') && rep.includes('上次 200 · 1.2s') && rep.includes('haiku → aaa'), 'structured provider report with latency and alias')
   const pd = buildPanelData(h, 8950, false, 'zh', 5)

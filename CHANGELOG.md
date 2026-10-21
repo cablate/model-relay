@@ -6,6 +6,12 @@ All notable changes to `model-relay` are documented in this file. Format follows
 
 ## [Unreleased]
 
+### Added
+- Each window writes its relay state to `model-relay-status/<session id>` in the config directory, one line `kind<TAB>label` (`claude`, `pinned`, `failover`, `limit`, `offline`, `direct`), so a statusline such as coralline's `relay` segment can show which model this window really talks to. The router sweeps files untouched for a week.
+
+### Changed
+- The plugin status line (the yellow line above the input) is off by default. Set `"statusBar": true` in `model-relay.json` to bring it back. Upgrade and outage notices still appear as toasts.
+
 ## [0.7.0] - 2026-10-21
 
 **⚠️ Recommended upgrade for all users (fixes conversation & tool loss + local security flaw):**

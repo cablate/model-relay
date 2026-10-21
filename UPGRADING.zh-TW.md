@@ -4,7 +4,7 @@
 
 ## 從 0.6 或更早的版本升級
 
-更新外掛不會改你的檔案，但這一版不再讀取舊設定：檔名為 `custom-agent.json` 的檔案，或沒有 `"format": 2` 的 `model-relay.json`。在你執行 `migrate --go` 之前，外掛不會為它啟動或替換轉發站。還在執行的 0.6 轉發站會照舊用舊檔案路由；沒有轉發站回應時，這個對話直接連 Claude。外掛會用提示、狀態列和面板告訴你這件事，`doctor` 會列出一項 `outdated`。舊檔名（`custom-agent-state.json`、`custom-agent-router.log`、`custom-agent-requests.log`）同樣不會被讀取。
+更新外掛不會改你的檔案，但這一版不再讀取舊設定：檔名為 `custom-agent.json` 的檔案，或沒有 `"format": 2` 的 `model-relay.json`。在你執行 `migrate --go` 之前，外掛不會為它啟動或替換轉發站。還在執行的 0.6 轉發站會照舊用舊檔案路由；沒有轉發站回應時，這個對話直接連 Claude。外掛會用提示、面板，以及開啟 `statusBar` 時的狀態列告訴你這件事，`doctor` 會列出一項 `outdated`。舊檔名（`custom-agent-state.json`、`custom-agent-router.log`、`custom-agent-requests.log`）同樣不會被讀取。
 
 `migrate --go` 會把設定檔寫成格式 2，並把舊版本當初替你補上的每一個值都寫進去，所以之後轉發站的路由跟原本完全一樣，還在執行的 0.6 轉發站讀到新檔案也一樣（會讓路由改變的寫入，它一律拒絕）。`migrate` 是唯一看得懂舊格式的指令：`set`、`add`、`remove`、`alias`、`providers`、`init`、`restart`、`rc` 與 `proxy enable` 遇到舊設定都會拒絕，並請你先執行 `migrate`。
 

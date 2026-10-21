@@ -349,6 +349,12 @@ function parseState(raw) {
 
 const STICKY_TTL_MS = 7 * 24 * 3600e3
 
+// The hook rewrites its session's status file (model-relay-status/<session id>) at least daily, so a regular file
+// untouched for a week belongs to a session that ended; anything else in the directory is left alone
+function staleStatusFiles(entries, now) {
+  return entries.filter((e) => e.isFile && now - e.mtimeMs >= STICKY_TTL_MS).map((e) => e.name)
+}
+
 function pruneSticky(state, now) {
   const base = parseState(state)
   const sticky = Object.create(null)
@@ -488,6 +494,7 @@ module.exports = {
   emptyState,
   parseState,
   pruneSticky,
+  staleStatusFiles,
   decide,
   parseRoute,
   onLimited,
