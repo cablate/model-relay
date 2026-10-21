@@ -1,12 +1,12 @@
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="docs/assets/banner-dark.zh-TW.svg">
-    <img src="docs/assets/banner-light.zh-TW.svg" width="900" alt="model-relay：Claude Code 多供應商模型路由與保護快取的 429 自動備援轉發站">
+    <img src="docs/assets/banner-light.zh-TW.svg" width="900" alt="model-relay：Claude Code 單視窗模型切換、子代理分流與 429 自動備援轉發站">
   </picture>
 </p>
 
 <p align="center">
-  <b>遇到 Claude 5 小時額度上限時當場無縫接手、把子代理分流給快速模型，<br>還能從輸入框上方的互動面板一鍵切換單一視窗——不必把長對話的整段快取重送一次。</b>
+  <b>從輸入框上方的互動面板一鍵切換單一 Claude Code 視窗的模型、把子代理分流給指定供應商，<br>並在 Claude 額度用完時當場自動接手——全在本機完成，同時保留 Remote Control 與自訂狀態列。</b>
 </p>
 
 <p align="center">
@@ -21,21 +21,20 @@
 </p>
 
 <p align="center">
-  <img src="docs/assets/relay-flow.zh-TW.svg" width="900" alt="動畫：620k token 的長對話撞上 429 額度上限；model-relay 當場無縫切換至備援供應商並固定該對話。10 分鐘後 Claude 恢復時，只有新開的視窗回到 Claude，長對話固定留在備援供應商，免重建 620k 快取">
+  <img src="docs/assets/panel.zh-TW.svg" width="900" alt="動畫：左邊展示主線跑 Claude、子代理分流給指定供應商、本地 Gateway 自動拉起；右邊展示輸入框上方的 model-relay 互動控制面板，可一鍵測試供應商與切換單一視窗的模型">
 </p>
 
 ## 為什麼需要
 
-長時間使用 Claude Code 常撞上六個既中斷心流又浪費額度的路由問題。`model-relay` 在本機端（`127.0.0.1:8950`）直接解決它們，不需要依賴外部雲端代理。
+Claude Code 預設把模型設定綁在全域，一改就會影響所有開著的終端機視窗。`model-relay` 在本機端（`127.0.0.1:8950`）提供輕巧的轉發中樞，讓每個視窗與子代理都能獨立選用你要的模型，完全不需經過外部雲端代理。
 
 | 當… | 沒裝 `model-relay` | 裝了 `model-relay` |
 |---|---|---|
-| 寫到一半遇到 Claude 5 小時額度上限（HTTP 429） | 這一輪直接報錯中斷，只能等額度重置或關視窗改環境變數 | 同一個請求當場自動轉給備援供應商完成回覆，工作完全不中斷 |
-| 10 分鐘後 Claude 額度恢復了 | 把 620k token 的長對話切回 Claude 會全價重送 620k 快取，瞬間燒光額度 | 已切走的長對話固定留在備援供應商（7 天有效）；只有新開的對話回到 Claude |
-| 只想把眼前這一個視窗切去別的供應商 | 改 `settings.json` 會把所有開著的終端機視窗一起換掉 | 輸入 `/provider` 從輸入框上方面板只固定當前視窗（並把狀態寫進 `model-relay-status/<session id>` 供你的 statusline 顯示） |
-| 想把 `haiku` 或特定子代理交給別的模型 | 改全域環境變數會連主線的 Opus/Sonnet 一起換掉 | 用 `/provider alias haiku <name>` 全域分流 `haiku`，或直接派 `model-relay:<name>` 一次性子代理（保留完整工具） |
-| 想邊用手機／網頁 Remote Control（`claude.ai/code`）邊轉發，或在代理模式切換模型 | 自訂 `ANTHROPIC_BASE_URL` 會讓 Remote Control 無法連線；而 Anthropic 的 `message-threads` 差量格式會讓非 Claude 供應商失去歷史對話與工具 | 本機 HTTPS 代理模式（`/provider rc on`）支援 Remote Control，並自動讓第三方供應商收到完整歷史對話與工具定義 |
-| 第三方轉發站遇到 `ToolSearch` 或 `cache_control` 報錯 | 工具整批消失或請求直接回 HTTP 400 | 每個供應商可獨立設定 `stripToolSearch` 與 `stripCacheControl` 自動清洗請求 |
+| 只想把眼前這一個視窗切去別的模型 | 改 `settings.json` 會把所有開著的終端機視窗一起換掉 | 輸入 `/provider` 從輸入框上方面板只切換當前視窗（並把實際模型寫進 `model-relay-status/<session id>` 供你的 statusline 顯示） |
+| 想把 `haiku` 或特定子代理交給別的模型 | 改全域環境變數會連主線的 Opus/Sonnet 對話一起換掉 | 用 `/provider alias haiku <name>` 全域分流 `haiku`，或直接派 `model-relay:<name>` 一次性子代理（保留完整工具） |
+| 遇到 Claude 5 小時額度上限（HTTP 429）或上游偶發失敗 | 這一輪直接報錯中斷，只能等額度重置 | 自動重試與 `failover.chain` 當場轉給備援供應商完成回覆，並只固定該視窗；冷卻結束後新開的視窗自動回到 Claude |
+| 想用手機或瀏覽器連 Remote Control（`claude.ai/code`） | 自訂 `ANTHROPIC_BASE_URL` 會讓 Remote Control 無法連線 | 本機 HTTPS 代理模式（`/provider rc on`）支援 Remote Control，同時維持各視窗獨立路由 |
+| 第三方供應商聊到一半失憶、掉工具，或對 `ToolSearch`／`cache_control` 報錯 | `message-threads` 差量格式會讓非 Claude 模型失去歷史對話與工具，`ToolSearch` 則會讓工具消失或回 HTTP 400 | 自動讓第三方供應商收到完整歷史對話與工具，並依供應商設定自動剝除 `ToolSearch` 與 `cache_control` |
 
 ## 適合誰用
 
@@ -94,19 +93,19 @@ claude plugin install model-relay@model-relay
 
 ## 功能
 
-<p align="center">
-  <img src="docs/assets/panel.zh-TW.svg" width="900" alt="動畫：左邊展示主線跑 Claude、haiku 子代理分流給備援供應商、本地 Gateway 自動拉起；右邊展示輸入框上方的 model-relay 互動控制面板，可一鍵測試供應商與切換模型">
-</p>
-
 ### 輸入框上方的 `AbovePrompt` 互動面板與供應商測試
 
-輸入 `/provider` 會在輸入框上方開啟面板。它只做一件事：選這個視窗用哪個模型，每列一個按鈕。切換成功後面板自動收起，並跳出通知告訴你現在用的模型。可以直接點按鈕，或先按 `ctrl+x tab`，再按按鈕上標的鍵（`1`–`9` 切換、`p` 測試每個供應商；429 冷卻中多一個 `r`，重新試 Claude）。把已固定的視窗切回 Claude 要再按一次確認，避免誤觸而重建長對話的整段快取。所有視窗共用的開關收在「設定 [s]」裡：按下才展開 429 備援、重試、Remote Control（`f` / `t` / `x`）和別名分流。不必改 JSON 就能開關：備援與重試從下一個請求起生效；Remote Control 會改寫 `settings.json`，所以先確認再執行，而且只有新對話會生效。
+輸入 `/provider` 會在輸入框上方開啟面板。它只做一件事：選這個視窗用哪個模型，每列一個按鈕。切換成功後面板自動收起，並跳出通知告訴你現在用的模型。可以直接點按鈕，或先按 `ctrl+x tab`，再按按鈕上標的鍵（`1`–`9` 切換、`p` 測試每個供應商；429 冷卻中多一個 `r`，重新試 Claude）。把已固定的視窗切回 Claude 要再按一次確認。所有視窗共用的開關收在「設定 [s]」裡：按下才展開 429 備援、重試、Remote Control（`f` / `t` / `x`）和別名分流。不必改 JSON 就能開關：備援與重試從下一個請求起生效；Remote Control 會改寫 `settings.json`，所以先確認再執行，而且只有新對話會生效。
 
 每個供應商那一列把兩件事分開顯示：上一個真實請求（`last 200 · 45.0s`）與上一次測試（`test ok 640ms`）。測試只送一個 1 token 的請求，收到第一個位元組就停（最多 15 秒），所以很長的回覆不會被看成供應商很慢；失敗時直接用白話說出問題：金鑰被拒、模型名稱不對、額度用完、本機 Gateway 沒開，或時間內沒有回應。轉發站顯示的任何內容都不會帶出供應商的金鑰。轉發站略過某個供應商（轉發站看不到它的 `env:` 變數）時，面板也會提醒。
 
-### 保護快取的 429 自動備援與對話黏著
+### 429 自動備援與單一視窗固定
 
-當 Anthropic 回傳 429 額度上限時，轉發站會當場把請求改送往 `failover.chain` 的第一個供應商並將該對話 ID 標記固定 7 天。經過 `failover.cooldownMs`（預設 10 分鐘）後，新對話會重新嘗試使用 Claude，而已經切走的長對話會固定留在備援供應商。`failover.enabled` 可整個關閉。
+<p align="center">
+  <img src="docs/assets/relay-flow.zh-TW.svg" width="900" alt="動畫：Claude Code 對話撞上 429 額度上限時，model-relay 當場無縫切換至備援供應商並固定該視窗；冷卻結束後新開的視窗自動回到 Claude">
+</p>
+
+當 Anthropic 回傳 429 額度上限時，轉發站會當場把請求改送往 `failover.chain` 的第一個供應商並將該對話 ID 標記固定 7 天。經過 `failover.cooldownMs`（預設 10 分鐘）後，新對話會重新嘗試使用 Claude，而已經切走的視窗則維持在備援供應商。`failover.enabled` 可整個關閉。
 
 ### 供應商透明自動重試
 

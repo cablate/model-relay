@@ -1,12 +1,12 @@
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="docs/assets/banner-dark.svg">
-    <img src="docs/assets/banner-light.svg" width="900" alt="model-relay: multi-provider router and cache-safe 429 failover for Claude Code">
+    <img src="docs/assets/banner-light.svg" width="900" alt="model-relay: per-window model switcher, subagent router, and 429 failover for Claude Code">
   </picture>
 </p>
 
 <p align="center">
-  <b>Keep working when Claude hits a 5-hour usage limit, offload subagents,<br>and switch any window from an interactive panel—without resending a long chat's whole prompt cache.</b>
+  <b>Switch any Claude Code window to another model from an interactive panel, route subagents to any provider,<br>and automatically fail over when Claude hits a usage limit—all on localhost, with Remote Control and statuslines intact.</b>
 </p>
 
 <p align="center">
@@ -21,21 +21,20 @@
 </p>
 
 <p align="center">
-  <img src="docs/assets/relay-flow.svg" width="900" alt="Animation: a 620k-token Claude Code session hits a 429 usage limit; model-relay seamlessly fails over to a backup provider and pins the session so when Claude recovers 10 minutes later, only new chats return to Claude without rebuilding the 620k cache">
+  <img src="docs/assets/panel.svg" width="900" alt="Animation: on the left, main chat uses Claude while subagents route to any provider and local gateways auto-launch; on the right, the interactive AbovePrompt panel lets you test providers and switch only the current window with one click">
 </p>
 
 ## Why
 
-Long Claude Code sessions run into six everyday routing problems. `model-relay` solves them on localhost (`127.0.0.1:8950`) with zero external proxies.
+Claude Code binds model settings globally across every terminal window. `model-relay` runs a lightweight router on localhost (`127.0.0.1:8950`) so each window and subagent can use the model you want—with zero external cloud proxies.
 
 | When… | Without `model-relay` | With `model-relay` |
 |---|---|---|
-| Claude hits a 5-hour usage limit (HTTP 429) mid-turn | Your turn fails and the conversation stops until quota resets | The same request automatically fails over to your backup provider and completes |
-| Claude quota recovers 10 minutes later | Switching a 620k-token chat back to Claude resends all 620k tokens and burns fresh quota | Sticky sessions stay on the backup provider for 7 days; only new chats return to Claude |
-| You want to switch just one window to another provider | Editing `settings.json` switches every open terminal at once | Type `/provider` to pin only the current window from the panel above the prompt (and write its state to `model-relay-status/<session id>` for your statusline) |
-| You want `haiku` or a specific subagent on another model | Changing global env vars forces your main Opus/Sonnet thread onto that endpoint too | `/provider alias haiku <name>` offloads `haiku` globally, or `model-relay:<name>` spawns a one-off subagent on that provider with all tools intact |
-| You use Remote Control (`claude.ai/code`) or switch providers in proxy mode | Custom `ANTHROPIC_BASE_URL` blocks Remote Control, and Anthropic's `message-threads` delta format makes non-Claude providers lose conversation history and tools | Local HTTPS proxy mode (`/provider rc on`) keeps Remote Control working and automatically sends the full conversation and tools to third-party providers |
-| Third-party gateways choke on `ToolSearch` or `cache_control` | All tools vanish or requests fail with HTTP 400 | Per-provider `stripToolSearch` and `stripCacheControl` clean requests on the fly |
+| You want to switch just one window to another model | Editing `settings.json` switches every open terminal at once | Type `/provider` to switch only the current window from the panel above your prompt (and write its active model to `model-relay-status/<session id>` for your statusline) |
+| You want `haiku` or a specific subagent on another model | Changing global env vars forces your main Opus/Sonnet chat onto that endpoint too | `/provider alias haiku <name>` offloads `haiku` globally, or `model-relay:<name>` spawns a one-off subagent on that provider with all tools intact |
+| Claude hits a 5-hour usage limit (HTTP 429) or a provider hiccups | Your turn fails mid-task until quota resets | Automatic retries and `failover.chain` hand the request to your backup provider and pin only that window while new windows return to Claude after cooldown |
+| You use Remote Control (`claude.ai/code`) from your phone or browser | Custom `ANTHROPIC_BASE_URL` blocks Remote Control from connecting | Local HTTPS proxy mode (`/provider rc on`) keeps Remote Control working while routing each window independently |
+| Third-party gateways lose history/tools or reject `ToolSearch` / `cache_control` | `message-threads` deltas cause mid-chat amnesia, and `ToolSearch` hides tools or triggers HTTP 400 | Automatically sends full conversations and cleans `ToolSearch` / `cache_control` per provider on the fly |
 
 ## Who this is for
 
@@ -94,19 +93,19 @@ claude plugin install model-relay@model-relay
 
 ## What's inside
 
-<p align="center">
-  <img src="docs/assets/panel.svg" width="900" alt="Animation: on the left, main chat uses Claude while haiku subagents route to a backup provider and a local gateway auto-launches; on the right, the interactive AbovePrompt panel lets you test providers and switch with one click">
-</p>
-
 ### Interactive `AbovePrompt` control panel and provider test
 
-Type `/provider` to open a panel right above your prompt input box. It does one thing: pick which model this window uses, one button per row. Once a switch takes, the panel closes and a notice names the model now in use. Click a button, or press `ctrl+x tab` and then the key shown on it (`1`–`9` to switch, `p` to test every provider, and `r` to try Claude again while a 429 cooldown runs). Switching a pinned window back to Claude takes a second press, so you never rebuild a long chat's prompt cache by accident. The switches every window shares stay folded under Settings [s]: press it to show 429 failover, retry and Remote Control (`f` / `t` / `x`) and the model aliases. They turn on or off without editing JSON: failover and retry apply from the next request, while Remote Control asks first because it rewrites `settings.json`, and it only reaches new sessions.
+Type `/provider` to open a panel right above your prompt input box. It does one thing: pick which model this window uses, one button per row. Once a switch takes, the panel closes and a notice names the model now in use. Click a button, or press `ctrl+x tab` and then the key shown on it (`1`–`9` to switch, `p` to test every provider, and `r` to try Claude again while a 429 cooldown runs). Switching a pinned window back to Claude takes a second press to confirm. The switches every window shares stay folded under Settings [s]: press it to show 429 failover, retry and Remote Control (`f` / `t` / `x`) and the model aliases. They turn on or off without editing JSON: failover and retry apply from the next request, while Remote Control asks first because it rewrites `settings.json`, and it only reaches new sessions.
 
 Each provider row shows two things apart: the last real request (`last 200 · 45.0s`) and the last test (`test ok 640ms`). The test sends one 1-token request and stops at the first byte (15 seconds at most), so a long reply never reads as a slow provider, and a failure says what is wrong in words: the key was refused, the model name is wrong, the quota is used up, the local gateway is not running, or there was no answer in time. The router keeps the provider's key out of anything it shows. When the router skips a provider (its `env:` variable is unset for the router), the panel says so.
 
-### Cache-safe sticky 429 failover
+### Automatic 429 failover and per-window session pinning
 
-When Anthropic returns a 429 usage-limit response, the router immediately forwards the request to the first provider in `failover.chain` and pins that session ID for 7 days. After `failover.cooldownMs` (default 10 minutes), new sessions probe Claude again while existing sticky sessions stay on their backup provider. `failover.enabled` switches the whole thing off.
+<p align="center">
+  <img src="docs/assets/relay-flow.svg" width="900" alt="Animation: a Claude Code session hits a 429 usage limit; model-relay seamlessly fails over to a backup provider and pins that window while new windows return to Claude after cooldown">
+</p>
+
+When Anthropic returns a 429 usage-limit response, the router immediately forwards the request to the first provider in `failover.chain` and pins that session ID for 7 days. After `failover.cooldownMs` (default 10 minutes), new sessions probe Claude again while existing pinned sessions stay on their backup provider. `failover.enabled` switches the whole thing off.
 
 ### Transparent provider retries
 

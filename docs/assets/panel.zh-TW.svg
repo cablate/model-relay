@@ -34,8 +34,8 @@
     <text x="18" y="66" class="mono m">model: claude-opus-5-5 → https://api.anthropic.com</text>
 
     <rect y="94" width="420" height="86" rx="10" fill="#161b22" stroke="#a78bfa" stroke-width="1.5"/>
-    <text x="18" y="120" class="sans" font-size="13.5" font-weight="700" fill="#c4b5fd">2. 子代理（haiku）→ 自動分流 備援 / 本地供應商</text>
-    <text x="18" y="142" class="sans m">透過 matchModels: ["^backup", "haiku"] 自動導向快速模型</text>
+    <text x="18" y="120" class="sans" font-size="13.5" font-weight="700" fill="#c4b5fd">2. 子代理（haiku / model-relay:*）→ 指定供應商</text>
+    <text x="18" y="142" class="sans m">透過 /provider alias 或 subagent_type: "model-relay:backup" 分流</text>
     <text x="18" y="162" class="mono m">自動剝除 ToolSearch 與延後載入佔位工具，工具不消失</text>
 
     <rect y="192" width="420" height="82" rx="10" fill="#161b22" stroke="#34d399" stroke-width="1.5"/>
@@ -83,7 +83,7 @@
    <g class="toastIn" transform="translate(0 84)">
     <rect width="444" height="84" rx="12" fill="#161b22" stroke="#4ade80" stroke-width="1.5"/>
     <text x="18" y="28" class="sans" font-size="14" font-weight="700" fill="#4ade80">✓ 這個視窗改用 fast（fast-model）</text>
-    <text x="18" y="50" class="mono m">狀態列：主線：fast-model（這個視窗固定用它）</text>
+    <text x="18" y="50" class="mono m">狀態檔：pinned  fast-model（供你的 statusline 讀取）</text>
     <text x="18" y="70" class="sans m">面板已自動收起；/provider 再打開</text>
    </g>
   </g>
