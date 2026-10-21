@@ -184,6 +184,13 @@ async function pingOne(provider) {
 
 // tried: providers this request already gave up on, so a fallback never loops back to one of them
 function toProvider(provider, req, res, body, rewrite, sid, attempt = 0, tried = []) {
+  const threadRefusal = L.threadBetaRefusal(req.headers)
+  if (threadRefusal) {
+    logReq({ to: `${provider.name}-thread-refused`, sid: short(sid) })
+    if (res.headersSent) return res.end()
+    res.writeHead(400, { 'content-type': 'application/json' })
+    return res.end(JSON.stringify({ type: 'error', error: { type: 'invalid_request_error', message: threadRefusal } }))
+  }
   const t0 = Date.now()
   let out = body
   if (body.length) {

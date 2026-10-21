@@ -40,6 +40,7 @@ All notable changes to `model-relay` are documented in this file. Format follows
 
 ### Fixed
 
+- **A provider saw only the latest message in proxy mode:** In HTTPS proxy mode Claude Code believes it talks to Anthropic, so it turns on Message Threads: the conversation is kept on Anthropic's server and each later turn sends only the new messages, without the system prompt or tools. The router passed those requests on to providers, which keep no such thread, so the model answered the last message alone, with no history and no tools, until Claude Code happened to resend the whole conversation. The router now refuses the `message-threads` beta for a provider the way Anthropic refuses a beta it does not know, and Claude Code resends the full conversation. The requests log shows each refusal as `<provider>-thread-refused`. `ANTHROPIC_BASE_URL` mode was not affected.
 - **With no usable provider the router sends everything to Claude:** It answered 500 "config missing" instead, so a new install whose key was not set yet could not use Claude at all.
 - **A provider named `zai` was never used:** The router wrote `zai` for a provider named `glm` in its routes and read every `zai` back as `glm`. Routes now carry the provider's own name, so the requests log says `glm`, not `zai`.
 - **A provider test no longer stops the router** when a key holds a character a header cannot carry, such as a line break; it is reported as an error, without quoting the key.

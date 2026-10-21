@@ -443,6 +443,18 @@ function rewriteBody(bodyBuf, opts = {}) {
   return Buffer.from(JSON.stringify(j), 'utf8')
 }
 
+// Message Threads (anthropic-beta "message-threads-*"): Claude Code keeps the conversation on Anthropic's server and
+// sends each later turn as only the new messages, without system prompt or tools. No provider holds that thread, so a
+// provider would answer the last message alone. Refusing the beta the way Anthropic refuses an unknown one makes
+// Claude Code drop threading for the session and resend the whole conversation.
+function threadBetaRefusal(headers) {
+  const raw = headers && headers['anthropic-beta']
+  const betas = (Array.isArray(raw) ? raw.join(',') : String(raw || '')).split(',').map((b) => b.trim())
+  const threads = betas.filter((b) => b.startsWith('message-threads'))
+  if (!threads.length) return null
+  return `Unexpected value(s) ${threads.map((b) => `\`${b}\``).join(', ')} for the \`anthropic-beta\` header: this provider keeps no message threads, send the full conversation`
+}
+
 function upstreamPath(base, reqUrl) {
   return new URL(base).pathname.replace(/\/$/, '') + reqUrl
 }
@@ -481,6 +493,7 @@ module.exports = {
   onLimited,
   onClaudeOk,
   rewriteBody,
+  threadBetaRefusal,
   upstreamPath,
   PROXY_MITM_HOST,
   parseProxyCfg,

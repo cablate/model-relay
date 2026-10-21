@@ -363,3 +363,13 @@ test('the example config in the repository is format 2 and names no model of its
   assert.deepStrictEqual(c.failoverChain, ['backup'])
   assert.strictEqual(L.decide(L.emptyState(), c, 'claude-haiku-5-5', 's', 0), 'claude', 'haiku stays on Claude unless an alias says otherwise')
 })
+
+test('a request on Message Threads is refused for a provider, in the wording Claude Code reads as "beta not supported"', () => {
+  assert.strictEqual(L.threadBetaRefusal({}), null)
+  assert.strictEqual(L.threadBetaRefusal({ 'anthropic-beta': 'claude-code-20250219,oauth-2025-04-20' }), null)
+  const msg = L.threadBetaRefusal({ 'anthropic-beta': 'claude-code-20250219, message-threads-2026-08-12,effort-2025-11-24' })
+  // Claude Code drops the beta when the message names it and mentions anthropic-beta
+  assert.ok(msg.includes('message-threads-2026-08-12'))
+  assert.match(msg, /anthropic[-_]beta/)
+  assert.ok(L.threadBetaRefusal({ 'anthropic-beta': ['x', 'message-threads-2027-01-01'] }).includes('message-threads-2027-01-01'))
+})
