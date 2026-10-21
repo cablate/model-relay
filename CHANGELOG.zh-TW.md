@@ -6,9 +6,15 @@
 
 ## [未發布]
 
+## [0.7.0] - 2026-10-21
+
+如果你開了 HTTPS proxy 模式（為了手機遙控而執行 `proxy enable`），切到非 Claude 供應商的 Claude Code 視窗現在會保有整段對話。以前供應商常常只收到你最新的一則訊息，沒有前文也沒有工具，回答得像剛開新對話。用 `/provider` 切換現在只回一行，`/provider ping` 會說出供應商為什麼不通（金鑰被拒、模型不存在、額度、本機服務沒開），瀏覽器裡開著的網頁也不能再透過轉發站送請求、花掉你的供應商額度。
+
+**升級：** 從 0.6 或更早升上來時，這一版只讀設定格式 2。執行 `claude plugin update model-relay@model-relay` 之後，在 Claude Code 輸入 `/provider setup upgrade my model-relay config`（或在外掛資料夾裡執行 `node tools/setup.mjs migrate --go`），再趁沒有回覆進行中時執行 `/provider restart`，因為 0.6 的轉發站無法替你自動重啟。遷移之前，仍在執行的 0.6 轉發站會繼續用舊設定檔；如果沒有 0.6 轉發站在跑，所有請求都交給 Claude。詳見 [UPGRADING.zh-TW.md](https://github.com/cablate/model-relay/blob/main/UPGRADING.zh-TW.md)。
+
 ### 新增
 
-- **設定格式 2（`"format": 2`）：** `init`、`add` 與 `migrate --go` 會寫入它。舊設定（檔名為 `custom-agent.json` 的檔案，或沒有這個欄位的 `model-relay.json`）這一版的轉發站不讀，所以在 `migrate --go` 重寫之前，外掛不會為它啟動或替換轉發站：還在執行的 0.6 轉發站照舊用舊檔案路由，沒有轉發站回應時，對話直接連 Claude。外掛會用提示、狀態列和面板告訴你，[UPGRADING.zh-TW.md](UPGRADING.zh-TW.md) 說明怎麼升級，並附一段給 `/provider setup` 的提示詞。
+- **設定格式 2（`"format": 2`）：** `init`、`add` 與 `migrate --go` 會寫入它。舊設定（檔名為 `custom-agent.json` 的檔案，或沒有這個欄位的 `model-relay.json`）這一版的轉發站不讀，所以在 `migrate --go` 重寫之前，外掛不會為它啟動或替換轉發站：還在執行的 0.6 轉發站照舊用舊檔案路由，沒有轉發站回應時，對話直接連 Claude。外掛會用提示、狀態列和面板告訴你，[UPGRADING.zh-TW.md](https://github.com/cablate/model-relay/blob/main/UPGRADING.zh-TW.md) 說明怎麼升級，並附一段給 `/provider setup` 的提示詞。
 - **`doctor --json`：** 和文字輸出相同的檢查結果，每一項都有 `id`、`fix`（執行 `setup.mjs` 時要帶的參數），以及在那個指令會改到需要你先同意的東西時標上 `needsConsent`。供應商因金鑰變數沒設而被略過時，會有一項 `missing-key`，寫出變數名稱，絕不寫出值。舊設定是一項 `outdated`，修正方式是 `migrate --go`，並標上 `needsConsent`。
 - **`doctor` 會警告比外掛舊的轉發站。**
 - **會說出哪裡壞掉的供應商測試：** `/provider ping`、面板的 `p` 與 `doctor --ping` 共用同一個測試：送一個 1 token 的串流請求，量到第一個位元組為止，最多 15 秒，結果分成可用／金鑰被拒／模型名稱不對／額度用完或被限流／本機服務沒開／連不到／逾時。面板與 `/provider` 把它和上一個真實請求分開顯示，很長的回覆不會被看成供應商很慢；上游錯誤訊息裡的供應商金鑰會被遮掉。
@@ -23,7 +29,7 @@
 ### 變更
 
 - **`/provider` 說得更少：** `/provider <name>` 與 `/provider claude` 只回一行；不帶參數的 `/provider` 只開面板、回一行，不再同時附上一整份報告。面板只負責選這個視窗用哪個模型：切換成功就自動收起，只有轉發站離線或 429 冷卻中才多一行提示，所有視窗共用的開關（429 備援、重試、Remote Control）和別名收進「設定 [s]」。文字版狀態改用 `/provider status`，指令說明移到 `/provider help`，依每個指令影響的範圍分組。
-- **不相容變更，影響 0.6 或更早的使用者：舊設定不再被讀取。** 這一版的轉發站不讀檔名為 `custom-agent.json` 的檔案，也不讀沒有 `"format": 2` 的 `model-relay.json`，所以在你執行 `node tools/setup.mjs migrate --go` 之前，外掛不會為它啟動或替換轉發站：還在執行的 0.6 轉發站照常運作，沒有的話所有請求都走 Claude。`doctor` 會列出一項 `outdated`。`migrate --go` 會寫出格式 2，並把舊版本當初補上的每一個值都寫進去（preset 的模型、舊 `zai`／`glm` preset 攔下的 `haiku`、舊 `gemini`／`magpie` 的 Gateway 值、依供應商名稱猜出的設定、隱含的備援名單），所以轉發站的路由不變，還在執行的 0.6 轉發站讀到新檔案也一樣；寫入結果會讓路由改變時，它會拒絕。見 [UPGRADING.zh-TW.md](UPGRADING.zh-TW.md)。
+- **不相容變更，影響 0.6 或更早的使用者：舊設定不再被讀取。** 這一版的轉發站不讀檔名為 `custom-agent.json` 的檔案，也不讀沒有 `"format": 2` 的 `model-relay.json`，所以在你執行 `node tools/setup.mjs migrate --go` 之前，外掛不會為它啟動或替換轉發站：還在執行的 0.6 轉發站照常運作，沒有的話所有請求都走 Claude。`doctor` 會列出一項 `outdated`。`migrate --go` 會寫出格式 2，並把舊版本當初補上的每一個值都寫進去（preset 的模型、舊 `zai`／`glm` preset 攔下的 `haiku`、舊 `gemini`／`magpie` 的 Gateway 值、依供應商名稱猜出的設定、隱含的備援名單），所以轉發站的路由不變，還在執行的 0.6 轉發站讀到新檔案也一樣；寫入結果會讓路由改變時，它會拒絕。見 [UPGRADING.zh-TW.md](https://github.com/cablate/model-relay/blob/main/UPGRADING.zh-TW.md)。
 - **`migrate` 是唯一看得懂舊格式的指令：** `set`、`add`、`remove`、`alias`、`providers`、`init`、`restart`、`rc` 與 `proxy enable` 遇到舊設定都會拒絕，並請你先執行 `migrate`。`set` 以前會順便把舊版面換成新版面，現在不會了。
 - **沒有設定檔明講，就不會送給供應商（格式 2）：** 內建 preset（`zai`、`deepseek`、`kimi`、`minimax`、`openrouter`）只帶網址與相容參數，`model` 由你決定；`glm`、`gemini`、`magpie` preset 已移除；沒有 preset 會攔 `haiku`；沒設 `failover.chain` 時 429 原樣回傳；不再從供應商名稱猜任何設定。
 - **`setup.mjs add <name> --model <model id> --token <token|env:VAR> (--preset <preset> | --url <address>)` 一定要給模型和網址：** 原本缺少時會自己編一個模型（`<name>-default`）和網址（`api.example.com`）、把供應商名稱當成 preset、整筆取代既有的供應商，還會覆蓋讀不懂的設定檔。現在缺少就拒絕；更新既有供應商時只換網址、金鑰與模型；會留 `.model-relay-backup` 備份；讀不懂的檔案不去動它。新設定檔的第一個供應商會成為 429 時的接手者。
@@ -148,7 +154,8 @@
 
 - **舊版 `custom_agent` 子程序工具：** 移除已棄用的 `claude.exe -p` 子程序包裝程式碼，讓外掛專注於純粹、零額外負擔的 HTTP 模型轉發與對話路由。
 
-[unreleased]: https://github.com/cablate/model-relay/compare/v0.6.0...HEAD
+[unreleased]: https://github.com/cablate/model-relay/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/cablate/model-relay/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/cablate/model-relay/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/cablate/model-relay/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/cablate/model-relay/compare/v0.3.0...v0.4.0
