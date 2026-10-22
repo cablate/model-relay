@@ -162,7 +162,7 @@ Claude Code can still run such a subagent on another model without saying so (a 
 
 ### Edit the config from the command line
 
-`add`, `set`, `providers`, `remove` and `migrate` change the file without hand-editing JSON. Every edit keeps a `.model-relay-backup` copy next to the file, tokens are never printed, and the running router picks the change up on its next request. On an older config (see `format` under Configuration), `add`, `set`, `providers`, `remove`, `alias`, `init`, `restart`, `rc` and `proxy enable` refuse and tell you to run `migrate` first; `migrate` is the only command that understands it. `doctor` also warns about an older config, a failover name that matches no provider, a model name another provider claims first, an `availableModels` list in `~/.claude/settings.json` that leaves a provider's model out, and a running router older than the plugin.
+`add`, `set`, `providers`, `remove` and `migrate` change the file without hand-editing JSON. Every edit keeps a `.model-relay-backup` copy next to the file, tokens are never printed, and the running router picks the change up on its next request. On an older config (see `format` under Configuration), `add`, `set`, `providers`, `remove`, `alias`, `init`, `restart`, `rc` and `proxy enable` refuse and tell you to run `migrate` first; `migrate` is the only command that understands it. `doctor` also warns about an older config, a failover name that matches no provider, two providers that name the same model (the first one in the file gets it), an `availableModels` list in `~/.claude/settings.json` that leaves a provider's model out, and a running router older than the plugin.
 
 ```bash
 node tools/setup.mjs providers
@@ -199,6 +199,7 @@ Configuration lives in `~/.claude/model-relay.json`. The directory defaults to `
 | `port` | `8950` | Localhost port for the relay HTTP server (`1025`–`65535`). Change it with `node tools/setup.mjs set port <n>`, which also updates `settings.json`; the router already running keeps the old port until you stop it (the command prints its pid), and it refuses a port that already answers |
 | `statusBar` | `false` | Also show the relay state in Claude Code's plugin status line, the yellow line above the input. Off by default: each window's state is written to a status file for your own statusline instead (see below). Notices about upgrades and outages still appear as toasts |
 | `claudeUrl` | `"https://api.anthropic.com"` | Upstream Anthropic API base URL |
+| `idleTimeoutMs` | `300000` | How long an upstream may send nothing before the request counts as failed and follows the retry and failover rules (`1000`–`3600000`); a streaming answer that keeps sending data is never cut |
 | `proxy.enabled` | `false` | Accept HTTPS-proxy connections for Remote Control. Off by default. When on, a `CONNECT` to any host other than `api.anthropic.com` is a blind tunnel that any local process can use; `node tools/setup.mjs proxy enable --go` turns it on and `proxy disable --go` off |
 | `failover.enabled` | `true` | Automatically switch to the failover chain on Claude 429 usage limits |
 | `failover.chain` | `[]` | Ordered providers that take over when Claude is out of quota or a provider keeps failing; unknown names are skipped. Empty means a 429 from Claude is passed back as it is (`add` puts the first provider of a new config here) |

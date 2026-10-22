@@ -6,6 +6,25 @@ All notable changes to `model-relay` are documented in this file. Format follows
 
 ## [Unreleased]
 
+The router stays up and answers when a config value is wrong or a provider stalls, and `/provider doctor` no longer changes anything unless you ask it to.
+
+### Fixed
+
+- **Each provider gets its own model:** A request for a provider's own `model` now reaches that provider even when another provider's `matchModels` pattern would also match it, so two providers on one gateway (for example `codex/gpt-6-luna` and `codex/gpt-6.1-sol`) no longer catch each other's requests.
+- **The router no longer stops on a bad value:** A provider address or `claudeUrl` that is not a valid URL, or a malformed session switch, used to take the router down for every open window. Such a provider is now skipped, `claudeUrl` falls back to Anthropic, and any unexpected error is logged while the router keeps running.
+- **No more endless waits:** A provider that stops sending data for `idleTimeoutMs` (5 minutes by default), or drops the connection in the middle of an error, now gets an error back to Claude Code instead of leaving it waiting.
+- **Gateways shared by several providers start once:** Providers that use the same `launch` gateway start it once, and a gateway that does not come up is retried after 1, 2, 4… up to 10 minutes instead of every 30 seconds.
+- **Your own local gateway is left alone:** `doctor --fix` and `init` no longer re-point an `ANTHROPIC_BASE_URL` on another localhost port (such as LiteLLM on `:4000`) at the relay.
+- **`alias` keeps a broken settings file:** If `~/.claude/settings.json` is not valid JSON, `alias` now stops with the parse error instead of rewriting the file from scratch.
+
+### Changed
+
+- **`/provider doctor` only reports:** It changes nothing unless you add `--fix`, and it ends with a hint when a fix is available.
+
+### Added
+
+- **`idleTimeoutMs`:** How long a provider may stay silent before the request counts as failed and follows the usual retry and failover rules.
+
 ## [0.7.3] - 2026-10-22
 
 Subagents on another provider (GLM, DeepSeek, Gemini, GPT…) can use `WebFetch` and your MCP tools reliably again; in some setups these tools could go missing.

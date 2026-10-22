@@ -162,7 +162,7 @@ Claude Code 仍可能不聲不響地讓這種子代理跑在別的模型上（�
 
 ### 用指令改設定，不必手改 JSON
 
-`add`、`set`、`providers`、`remove` 與 `migrate` 可以不手改 JSON 就修改設定檔。每次修改都會在檔案旁留一份 `.model-relay-backup` 備份，token 一律不會印出，執行中的轉發站在下一個請求就會讀到新設定。遇到舊設定（見「設定」一節的 `format`），`add`、`set`、`providers`、`remove`、`alias`、`init`、`restart`、`rc` 與 `proxy enable` 會拒絕並請你先執行 `migrate`；`migrate` 是唯一看得懂舊設定的指令。`doctor` 也會提醒：舊設定、備援名單裡不存在的供應商、被別的供應商先攔走的模型名稱、`~/.claude/settings.json` 裡漏列供應商模型的 `availableModels`，以及比外掛舊的轉發站。
+`add`、`set`、`providers`、`remove` 與 `migrate` 可以不手改 JSON 就修改設定檔。每次修改都會在檔案旁留一份 `.model-relay-backup` 備份，token 一律不會印出，執行中的轉發站在下一個請求就會讀到新設定。遇到舊設定（見「設定」一節的 `format`），`add`、`set`、`providers`、`remove`、`alias`、`init`、`restart`、`rc` 與 `proxy enable` 會拒絕並請你先執行 `migrate`；`migrate` 是唯一看得懂舊設定的指令。`doctor` 也會提醒：舊設定、備援名單裡不存在的供應商、兩個供應商設了同一個模型（設定檔裡排前面的那個會拿到）、`~/.claude/settings.json` 裡漏列供應商模型的 `availableModels`，以及比外掛舊的轉發站。
 
 ```bash
 node tools/setup.mjs providers
@@ -199,6 +199,7 @@ node tools/setup.mjs rc
 | `port` | `8950` | 本機轉發站監聽的連接埠（`1025`–`65535`）。用 `node tools/setup.mjs set port <n>` 修改，會一併更新 `settings.json`；已在執行的轉發站會一直用舊埠直到你把它停掉（指令會印出它的 pid），且會拒絕已有程式在回應的埠 |
 | `statusBar` | `false` | 同時在 Claude Code 的外掛狀態列（輸入框上方那一行黃字）顯示轉發站狀態。預設關閉：每個視窗的狀態改寫進狀態檔，交給你自己的 statusline 顯示（見下方）。升級與離線的提醒仍會以通知跳出 |
 | `claudeUrl` | `"https://api.anthropic.com"` | 上游 Anthropic API 網址 |
+| `idleTimeoutMs` | `300000` | 上游多久沒有任何資料就當作失敗，接著照重試與備援規則處理（`1000`–`3600000`）；持續有資料的串流回應不會被切斷 |
 | `proxy.enabled` | `false` | 接受為 Remote Control 而來的 HTTPS 代理連線。預設關閉。開啟後，對 `api.anthropic.com` 以外任何主機的 `CONNECT` 都是盲轉送（blind tunnel），本機任何程序都能使用；`node tools/setup.mjs proxy enable --go` 開啟、`proxy disable --go` 關閉 |
 | `failover.enabled` | `true` | 遇到 Claude 429 額度用完時是否自動切換至備援名單 |
 | `failover.chain` | `[]` | 依序接手的供應商：Claude 額度用完，或某個供應商持續失敗時使用；不存在的名稱會被略過。空的代表 Claude 的 429 原樣回傳（新設定檔的第一個供應商會由 `add` 放進來） |
