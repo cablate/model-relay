@@ -3,6 +3,8 @@
 
 const fs = require('fs')
 const path = require('path')
+const { Transform } = require('stream')
+const { StringDecoder } = require('string_decoder')
 
 const isPort = (n) => Number.isInteger(n) && n > 1024 && n < 65536
 
@@ -61,11 +63,11 @@ function defaultPrefixRegex(name, model) {
 // Built-in providers: each service's address and the switches it needs. The model is always the person's to name,
 // because model ids go out of date.
 const PRESETS = {
-  zai: { baseUrl: 'https://api.z.ai/api/anthropic', matchModels: ['^glm'], stripToolSearch: true, stripCacheControl: false, authHeader: 'both' },
-  deepseek: { baseUrl: 'https://api.deepseek.com/anthropic', matchModels: ['^deepseek'], stripToolSearch: true, stripCacheControl: false, authHeader: 'bearer' },
-  kimi: { baseUrl: 'https://api.moonshot.ai/anthropic', matchModels: ['^kimi', '^moonshot'], stripToolSearch: true, stripCacheControl: false, authHeader: 'bearer' },
-  minimax: { baseUrl: 'https://api.minimax.io/anthropic', matchModels: ['^minimax'], stripToolSearch: true, stripCacheControl: false, authHeader: 'bearer' },
-  openrouter: { baseUrl: 'https://openrouter.ai/api', matchModels: ['^openrouter/'], stripToolSearch: true, stripCacheControl: false, authHeader: 'bearer' },
+  zai: { baseUrl: 'https://api.z.ai/api/anthropic', matchModels: ['^glm'], stripCacheControl: false, authHeader: 'both' },
+  deepseek: { baseUrl: 'https://api.deepseek.com/anthropic', matchModels: ['^deepseek'], stripCacheControl: false, authHeader: 'bearer' },
+  kimi: { baseUrl: 'https://api.moonshot.ai/anthropic', matchModels: ['^kimi', '^moonshot'], stripCacheControl: false, authHeader: 'bearer' },
+  minimax: { baseUrl: 'https://api.minimax.io/anthropic', matchModels: ['^minimax'], stripCacheControl: false, authHeader: 'bearer' },
+  openrouter: { baseUrl: 'https://openrouter.ai/api', matchModels: ['^openrouter/'], stripCacheControl: false, authHeader: 'bearer' },
 }
 
 // Format 2 is the only layout the router reads; "setup.mjs migrate" turns an older file into it
@@ -81,9 +83,6 @@ function parseProvider(name, raw, env = process.env, baseRetry = parseRetryCfg(u
   const model = str(raw.model || preset?.model)
   if (!url || !/^https?:\/\//.test(url) || !token || !model) return null
 
-  const stripToolSearch = raw.stripToolSearch !== undefined
-    ? Boolean(raw.stripToolSearch)
-    : (preset ? preset.stripToolSearch : true)
   const stripCacheControl = raw.stripCacheControl !== undefined
     ? Boolean(raw.stripCacheControl)
     : Boolean(preset?.stripCacheControl)
@@ -115,7 +114,6 @@ function parseProvider(name, raw, env = process.env, baseRetry = parseRetryCfg(u
     url,
     token,
     model,
-    stripToolSearch,
     stripCacheControl,
     authHeader,
     matchSources: rawMatchers,
@@ -420,8 +418,53 @@ function onClaudeOk(state) {
 // Claude Code strips its own suffixes such as [1m] before sending; a rewrite must too.
 const wireModel = (model) => String(model || '').replace(/\[[^\]]*\]$/, '')
 
-// z.ai and several gateways hide every other tool when one is named ToolSearch, so drop it and deferred placeholders.
-const hiddenOnCustom = (t) => t && (t.name === 'ToolSearch' || t.defer_loading === true)
+// Claude Code's tool search on a provider other than Anthropic. Anthropic turns a `tool_reference` in a ToolSearch
+// result into the deferred tool it names; no other provider does, and z.ai swaps a tool named ToolSearch for its own
+// search and hides every other tool. So the provider gets the search under another name, every loaded tool as an
+// ordinary one and each reference as text, and its calls to that name go back to Claude Code as ToolSearch.
+const TOOL_SEARCH = 'ToolSearch'
+const SEARCH_ALIAS = 'load_deferred_tools'
+const PLACEHOLDER = 'DeferredToolPlaceholder'
+const ALIAS_CALL = new RegExp(`("name"\\s*:\\s*)"${SEARCH_ALIAS}"`, 'g')
+
+const loadedText = (c) => ({ type: 'text', text: `Tool ${c.tool_name} is loaded and can be called now.` })
+
+// Rewrites j in place when it carries tool search: null when it does not, else whether it offers the search by alias
+function adaptToolSearch(j) {
+  if (!Array.isArray(j.tools) || !j.tools.some((t) => t && (t.name === TOOL_SEARCH || t.defer_loading === true))) return null
+  j.tools = j.tools.filter((t) => !(t && t.name === PLACEHOLDER)).map((t) => {
+    if (!isObj(t)) return t
+    const { defer_loading: _deferred, ...tool } = t
+    return tool.name === TOOL_SEARCH ? { ...tool, name: SEARCH_ALIAS } : tool
+  })
+  if (isObj(j.tool_choice) && j.tool_choice.name === TOOL_SEARCH) j.tool_choice = { ...j.tool_choice, name: SEARCH_ALIAS }
+  for (const m of Array.isArray(j.messages) ? j.messages : []) {
+    for (const b of Array.isArray(m && m.content) ? m.content : []) {
+      if (b && b.type === 'tool_use' && b.name === TOOL_SEARCH) b.name = SEARCH_ALIAS
+      if (b && b.type === 'tool_result' && Array.isArray(b.content)) b.content = b.content.map((c) => (c && c.type === 'tool_reference' ? loadedText(c) : c))
+    }
+  }
+  return { aliased: j.tools.some((t) => t && t.name === SEARCH_ALIAS) }
+}
+
+// A provider's answer with its calls to the alias named ToolSearch again; works line by line, so a name cut across two
+// chunks is still found, and decodes UTF-8 as a stream so a character cut across two chunks stays whole
+function toolSearchRestorer() {
+  const decoder = new StringDecoder('utf8')
+  const restore = (text) => text.replace(ALIAS_CALL, `$1"${TOOL_SEARCH}"`)
+  let carry = ''
+  return new Transform({
+    transform(chunk, _enc, done) {
+      const text = carry + decoder.write(chunk)
+      const cut = text.lastIndexOf('\n') + 1
+      carry = text.slice(cut)
+      done(null, restore(text.slice(0, cut)))
+    },
+    flush(done) {
+      done(null, restore(carry + decoder.end()))
+    },
+  })
+}
 
 function stripCache(v) {
   if (Array.isArray(v)) v.forEach(stripCache)
@@ -435,18 +478,16 @@ function rewriteBody(bodyBuf, opts = {}) {
   const model = opts.model || null
   const defaultModel = opts.defaultModel || null
   const noCache = Boolean(opts.stripCacheControl)
-  const dropToolSearch = opts.stripToolSearch !== false
   const j = JSON.parse(bodyBuf.toString('utf8'))
   if (noCache) stripCache(j)
-  const tools = dropToolSearch && Array.isArray(j.tools) ? j.tools.filter((t) => !hiddenOnCustom(t)) : null
-  const dropTools = tools !== null && tools.length !== j.tools.length
+  const search = adaptToolSearch(j)
+  const restoreToolSearch = Boolean(search && search.aliased)
   const targetModel = model || (defaultModel && isClaudeModel(j.model) ? defaultModel : null)
   const strippedSame = !targetModel && typeof j.model === 'string' && wireModel(j.model) !== j.model ? wireModel(j.model) : null
-  if (!targetModel && !strippedSame && !dropTools && !noCache) return bodyBuf
+  if (!targetModel && !strippedSame && !search && !noCache) return { body: bodyBuf, restoreToolSearch }
   if (targetModel) j.model = wireModel(targetModel)
   else if (strippedSame) j.model = strippedSame
-  if (dropTools) j.tools = tools
-  return Buffer.from(JSON.stringify(j), 'utf8')
+  return { body: Buffer.from(JSON.stringify(j), 'utf8'), restoreToolSearch }
 }
 
 // Message Threads (anthropic-beta "message-threads-*"): Claude Code keeps the conversation on Anthropic's server and
@@ -500,6 +541,7 @@ module.exports = {
   onLimited,
   onClaudeOk,
   rewriteBody,
+  toolSearchRestorer,
   threadBetaRefusal,
   upstreamPath,
   PROXY_MITM_HOST,

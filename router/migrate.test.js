@@ -221,7 +221,7 @@ test('the original single-provider layout migrates into providers.glm', () => {
   const { config, notes } = M.toFormat2(SINGLE)
   assert.ok(M.sameRouting(SINGLE, config))
   assert.ok(!('baseUrl' in config) && !('token' in config) && !('model' in config) && !('gemini' in config), JSON.stringify(config))
-  assert.deepStrictEqual(config.providers.glm, { baseUrl: SINGLE.baseUrl, token: 't', model: 'glm-5.3[1m]', matchModels: ['^glm'], stripToolSearch: true, stripCacheControl: false, authHeader: 'bearer' })
+  assert.deepStrictEqual(config.providers.glm, { baseUrl: SINGLE.baseUrl, token: 't', model: 'glm-5.3[1m]', matchModels: ['^glm'], stripCacheControl: false, authHeader: 'bearer' })
   assert.strictEqual(config.providers.gemini.token, 'g')
   assert.ok(notes.includes('top-level baseUrl/token/model -> providers.glm'), notes.join(' | '))
   assert.ok(notes.includes('top-level gemini -> providers.gemini'), notes.join(' | '))

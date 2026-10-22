@@ -113,28 +113,28 @@ test('only a usage-limit 429 triggers failover', () => {
 })
 
 test('model rewrite and upstream path', () => {
-  const out = JSON.parse(L.rewriteBody(Buffer.from('{"model":"claude-opus-5-5","x":1}'), { model: 'glm-5.3[1m]' }).toString())
+  const out = JSON.parse(L.rewriteBody(Buffer.from('{"model":"claude-opus-5-5","x":1}'), { model: 'glm-5.3[1m]' }).body.toString())
   assert.deepStrictEqual(out, { model: 'glm-5.3', x: 1 })
   const plain = Buffer.from('{"model":"glm-5.3","tools":[{"name":"Read"}]}')
-  assert.strictEqual(L.rewriteBody(plain, {}), plain)
+  assert.strictEqual(L.rewriteBody(plain, {}).body, plain)
   // When a Claude tier/model name is routed via matchModels (e.g. "haiku" -> deepseek), defaultModel rewrites it
-  const aliased = JSON.parse(L.rewriteBody(Buffer.from('{"model":"claude-haiku-4-5-20251001"}'), { defaultModel: 'deepseek-chat', stripToolSearch: false }).toString())
+  const aliased = JSON.parse(L.rewriteBody(Buffer.from('{"model":"claude-haiku-4-5-20251001"}'), { defaultModel: 'deepseek-chat' }).body.toString())
   assert.strictEqual(aliased.model, 'deepseek-chat')
   // A provider's own sub-model (e.g. deepseek-reasoner) is preserved when only defaultModel is set
-  const native = JSON.parse(L.rewriteBody(Buffer.from('{"model":"deepseek-reasoner"}'), { defaultModel: 'deepseek-chat', stripToolSearch: false }).toString())
+  const native = JSON.parse(L.rewriteBody(Buffer.from('{"model":"deepseek-reasoner"}'), { defaultModel: 'deepseek-chat' }).body.toString())
   assert.strictEqual(native.model, 'deepseek-reasoner')
   assert.deepStrictEqual(L.detectAliases(L.parseCfg({ format: 2, providers: { glm: { preset: 'zai', token: 't', model: 'glm-5.3[1m]', matchModels: ['^glm', 'haiku'] } } })), { haiku: 'glm' })
   assert.strictEqual(L.upstreamPath('https://api.z.ai/api/anthropic', '/v1/messages?beta=true'), '/api/anthropic/v1/messages?beta=true')
   assert.strictEqual(L.upstreamPath('https://api.anthropic.com', '/v1/messages'), '/v1/messages')
 })
 
-test('z.ai requests lose ToolSearch and deferred placeholders', () => {
+test('a provider never sees a tool named ToolSearch or the deferred placeholder', () => {
   const tools = [{ name: 'Read' }, { name: 'ToolSearch' }, { name: 'DeferredToolPlaceholder', defer_loading: true }, { name: 'Bash' }]
   const body = Buffer.from(JSON.stringify({ model: 'glm-5.3', tools }))
-  assert.deepStrictEqual(JSON.parse(L.rewriteBody(body, {}).toString()).tools, [{ name: 'Read' }, { name: 'Bash' }])
-  const rw = JSON.parse(L.rewriteBody(body, { model: 'glm-5.3[1m]' }).toString())
+  assert.deepStrictEqual(JSON.parse(L.rewriteBody(body, {}).body.toString()).tools, [{ name: 'Read' }, { name: 'load_deferred_tools' }, { name: 'Bash' }])
+  const rw = JSON.parse(L.rewriteBody(body, { model: 'glm-5.3[1m]' }).body.toString())
   assert.strictEqual(rw.model, 'glm-5.3')
-  assert.deepStrictEqual(rw.tools.map((t) => t.name), ['Read', 'Bash'])
+  assert.deepStrictEqual(rw.tools.map((t) => t.name), ['Read', 'load_deferred_tools', 'Bash'])
 })
 
 test('provider retry waits: statuses, backoff, Retry-After, exhaustion', () => {
@@ -209,8 +209,8 @@ test('gemini route: model name or sticky session, off without config', () => {
 
 test('gemini requests lose cache_control everywhere', () => {
   const b = Buffer.from(JSON.stringify({ model: 'm', system: [{ type: 'text', text: 'x', cache_control: { type: 'ephemeral' } }], messages: [{ role: 'user', content: [{ type: 'text', text: 'y', cache_control: { type: 'ephemeral' } }] }] }))
-  assert.ok(!L.rewriteBody(b, { stripCacheControl: true }).toString().includes('cache_control'))
-  assert.ok(L.rewriteBody(b, { stripCacheControl: false }).toString().includes('cache_control'))
+  assert.ok(!L.rewriteBody(b, { stripCacheControl: true }).body.toString().includes('cache_control'))
+  assert.ok(L.rewriteBody(b, { stripCacheControl: false }).body.toString().includes('cache_control'))
 })
 
 test('proxy config: off unless explicitly enabled', () => {
@@ -423,6 +423,7 @@ test("the provider's calls to the renamed search reach Claude Code as ToolSearch
   t.end()
   await done
   const text = Buffer.concat(out).toString('utf8')
-  assert.ok(text.includes('"name":"ToolSearch"') && !text.includes('"name": "load_deferred_tools"'), 'the tool name is restored')
+  assert.match(text, /"name"\s*:\s*"ToolSearch"/, 'the tool name is restored')
+  assert.doesNotMatch(text, /"name"\s*:\s*"load_deferred_tools"/)
   assert.ok(text.includes('"text":"說明 load_deferred_tools"'), 'text that only mentions the alias is left alone, and no character is broken')
 })

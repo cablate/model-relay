@@ -218,19 +218,21 @@ function toProvider(provider, req, res, body, rewrite, sid, attempt = 0, tried =
   }
   const t0 = Date.now()
   let out = body
+  let restoreToolSearch = false
   if (body.length) {
     try {
-      out = L.rewriteBody(body, {
+      ;({ body: out, restoreToolSearch } = L.rewriteBody(body, {
         model: rewrite ? provider.model : null,
         defaultModel: provider.model,
         stripCacheControl: provider.stripCacheControl,
-        stripToolSearch: provider.stripToolSearch,
-      })
+      }))
     } catch {
       if (rewrite) return apiError(res, 400, `could not rewrite request for provider "${provider.name}"`)
     }
   }
   const headers = P.authHeaders(provider, req.headers)
+  // The answer is read to rename the search back, so it has to come uncompressed
+  if (restoreToolSearch) headers['accept-encoding'] = 'identity'
   // Per-provider switch: retryCfg === null means this provider never retries
   const retryCfg = provider.retryCfg !== undefined ? provider.retryCfg : null
 
@@ -263,7 +265,10 @@ function toProvider(provider, req, res, body, rewrite, sid, attempt = 0, tried =
   send(provider.url, req, res, out, headers, (ur) => {
     const status = ur.statusCode || 0
     if (status >= 200 && status < 300) {
-      res.writeHead(ur.statusCode, ur.headers)
+      const encoded = ur.headers['content-encoding'] && ur.headers['content-encoding'] !== 'identity'
+      const restore = restoreToolSearch && !encoded
+      const { 'content-length': _length, ...renamedHeaders } = ur.headers
+      res.writeHead(ur.statusCode, restore ? renamedHeaders : ur.headers)
       let tail = ''
       ur.on('data', (c) => {
         tail = (tail + c.toString('utf8')).slice(-4000)
@@ -274,7 +279,7 @@ function toProvider(provider, req, res, body, rewrite, sid, attempt = 0, tried =
         const last = all.length ? Number(all[all.length - 1][1]) : null
         logReq({ to: `${provider.name}-reply`, sid: short(sid), rewrite, status, bytes: out.length, inputTokens: last, attempt })
       })
-      return relay(ur, res)
+      return restore ? pipeline(ur, L.toolSearchRestorer(), res, () => {}) : relay(ur, res)
     }
     // Failure: buffer the whole answer, then retry, fail over, or pass it through untouched
     const chunks = []

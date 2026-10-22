@@ -15,7 +15,7 @@ const OLD_FILES = [
 
 // What the older version filled in: every preset came with a model, zai (and glm, its other name) also caught haiku,
 // and gemini and magpie pointed at a local gateway. Without a chain, glm or else the first provider took over a 429.
-const GATEWAY = { baseUrl: 'http://127.0.0.1:3425', model: 'gemini-4-argon', matchModels: ['^gemini'], stripToolSearch: true, stripCacheControl: true, authHeader: 'both' }
+const GATEWAY = { baseUrl: 'http://127.0.0.1:3425', model: 'gemini-4-argon', matchModels: ['^gemini'], stripCacheControl: true, authHeader: 'both' }
 const OLD_PRESETS = {
   zai: { ...L.PRESETS.zai, model: 'glm-5.3[1m]', matchModels: ['^glm', 'haiku'] },
   glm: { ...L.PRESETS.zai, model: 'glm-5.3[1m]', matchModels: ['^glm', 'haiku'] },
@@ -44,7 +44,6 @@ function moveLayout(raw) {
       token: raw.token,
       model: raw.model,
       matchModels: ['^glm'],
-      stripToolSearch: true,
       stripCacheControl: false,
       authHeader: 'bearer',
       ...(raw.launch ? { launch: raw.launch } : {}),
@@ -132,7 +131,6 @@ const FIELDS = {
   url: ['baseUrl', (v) => `address ${v} (from an older preset)`],
   model: ['model', (v) => `model ${v} (from an older preset; presets no longer pick a model)`],
   matchSources: ['matchModels', (v) => `routes ${JSON.stringify(v)}${v.includes('haiku') ? ', which send every haiku request to it' : ''}`],
-  stripToolSearch: ['stripToolSearch', (v) => `stripToolSearch ${v}`],
   stripCacheControl: ['stripCacheControl', (v) => `stripCacheControl ${v}`],
   authHeader: ['authHeader', (v) => `authHeader "${v}"`],
 }

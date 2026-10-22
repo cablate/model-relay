@@ -6,6 +6,14 @@
 
 ## [未發布]
 
+### 修正
+
+- **第三方供應商上的工具搜尋：** 在第三方供應商上的 `model-relay:<name>` 子代理與主對話又能用 `ToolSearch`，按需載入的工具（`WebFetch`、MCP 工具等）載入後就能呼叫。過去 router 會拿掉 `ToolSearch` 與所有經它載入的工具，自 0.6.0 起子代理因此默默少了這些工具。現在 router 送給供應商前會替 `ToolSearch` 換個名字（例如 z.ai 看到名為 `ToolSearch` 的工具會換成自己的版本並藏起其他工具），回應時再換回來。
+
+### 移除
+
+- **`providers.<name>.stripToolSearch`：** 已不需要；`model-relay.json` 裡留著也會被忽略。
+
 ## [0.7.2] - 2026-10-22
 
 每個供應商的 `model-relay:<name>` 子代理現在可以在 `~/.claude/model-relay.json` 調整：寫清楚 Claude 什麼時候該派它，並給它自己的提示詞、工具與 effort。
