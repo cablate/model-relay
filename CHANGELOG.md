@@ -6,6 +6,8 @@ All notable changes to `model-relay` are documented in this file. Format follows
 
 ## [Unreleased]
 
+## [0.7.4] - 2026-10-22
+
 The router stays up and answers when a config value is wrong or a provider stalls, and `/provider doctor` no longer changes anything unless you ask it to.
 
 ### Fixed
