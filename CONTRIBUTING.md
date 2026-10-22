@@ -14,6 +14,8 @@ claude plugin validate .
 claude plugin test .
 ```
 
+3. The plugin hot-reloads in every open session the moment files in the main folder change, so make changes in a staging worktree: `node tools/wt.mjs new <branch>`, commit there, then `node tools/wt.mjs land <branch>` (runs `tools/check.mjs` in the worktree and fast-forwards the main folder only when it passes); `node tools/wt.mjs drop <branch>` discards a worktree and its branch without merging.
+
 ## Writing docs
 
 Public documentation (`README.md` / `README.zh-TW.md` and `CHANGELOG.md` / `CHANGELOG.zh-TW.md`) is maintained in both English and Traditional Chinese. Every heading, list item, table row, and code block must correspond 1-to-1 across both files. Run `node tools/docs.mjs check` before committing.
