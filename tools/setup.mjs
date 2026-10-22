@@ -98,6 +98,16 @@ function readSettings() {
   return fs.existsSync(settingsPath) ? JSON.parse(fs.readFileSync(settingsPath, 'utf8')) : {}
 }
 
+// For the commands that write settings.json back: a file that does not parse is refused, never rewritten from an empty one
+function readSettingsOrExit() {
+  try {
+    return readSettings()
+  } catch (e) {
+    console.error(`Invalid JSON in ${settingsPath}: ${e.message}`)
+    process.exit(1)
+  }
+}
+
 // settings.json is shared with everything else Claude Code stores there, so keep a copy of what it was
 function writeSettings(next) {
   fs.mkdirSync(cfgDir, { recursive: true })
@@ -118,7 +128,7 @@ function ensureSettingsWiring(port, fix) {
     } catch {}
   }
   if (!fs.existsSync(settingsPath)) {
-    if (!fix) return { ok: false, msg: `Missing ${settingsPath} (run with --fix to wire ANTHROPIC_BASE_URL=${expectedUrl})` }
+    if (!fix) return { ok: false, fixable: true, msg: `Missing ${settingsPath} (run with --fix to wire ANTHROPIC_BASE_URL=${expectedUrl})` }
     writeSettings({ env: { ANTHROPIC_BASE_URL: expectedUrl } })
     return { ok: true, msg: `Created ${settingsPath} with ANTHROPIC_BASE_URL=${expectedUrl}` }
   }
@@ -132,15 +142,18 @@ function ensureSettingsWiring(port, fix) {
   if (cur === expectedUrl) {
     return { ok: true, msg: `settings.json ANTHROPIC_BASE_URL=${cur}` }
   }
-  // Another gateway (LiteLLM, a company proxy) is someone's choice: say so, and never replace it. A loopback address
-  // on another port is most likely this relay before "set port", so --fix still moves that one
-  const ours = !cur || /^http:\/\/(127\.0\.0\.1|localhost):\d+\/?$/i.test(cur)
+  // Another gateway (LiteLLM, a company proxy, your own on localhost:4000) is someone's choice: say so, and never replace
+  // it. Only an unset value, or this relay's own port spelled with localhost or a slash, is ours to set; "set port" already
+  // moves the wiring, so an address on some other port is not guessed to be this relay's
+  const own = /^http:\/\/(127\.0\.0\.1|localhost):(\d+)\/?$/i.exec(cur || '')
+  const ours = !cur || (own !== null && Number(own[2]) === port)
   if (!ours) {
     return { ok: false, msg: `settings.json env.ANTHROPIC_BASE_URL is "${cur}", which is not this relay; Claude Code talks to that address, not to ${expectedUrl}. Nothing was changed: remove it yourself if model-relay should take over` }
   }
   if (!fix) {
     return {
       ok: false,
+      fixable: true,
       msg: `settings.json env.ANTHROPIC_BASE_URL is ${cur ? `"${cur}"` : 'unset'} (expected "${expectedUrl}" — run "node tools/setup.mjs doctor --fix" to set it)`,
     }
   }
@@ -376,8 +389,7 @@ if (cmd === 'alias') {
   const cfg = L.parseCfg(config)
   // matchModels and models as the router reads them, whether or not a key is exported here
   const shape = L.parseShape(config)
-  let settings = {}
-  try { settings = readSettings() } catch {}
+  const settings = readSettingsOrExit()
   const env = settings?.env || {}
 
   if (!slot || slot === 'status' || slot === 'list') {
@@ -694,6 +706,9 @@ function pingWords(r, p) {
   }
 }
 
+// Whether a /__health answer is a model-relay router's, whose pid may be killed; any other JSON on the port is not
+const isRouter = (h) => h.ok === true && Number.isInteger(h.pid) && h.pid > 1
+
 // A router that answers on our port but was started for another config directory (or by an older version that does
 // not say) uses a different config, PKI and tokens; returns a sentence about it, or null when it is ours
 function foreignRouter(h, port) {
@@ -776,7 +791,7 @@ if (cmd === 'restart') {
   refuseIfOutdated()
   const port = relayPort()
   const h = await fetchHealth(port)
-  if (h && !(h.ok === true && Number.isInteger(h.pid) && h.pid > 1)) {
+  if (h && !isRouter(h)) {
     console.error(`Refusing to restart: something answers on 127.0.0.1:${port} but not as a model-relay router. Nothing was changed.`)
     process.exit(1)
   }
@@ -832,13 +847,7 @@ if (cmd === 'proxy') {
   const go = hasFlag('--go')
   const pki = PKI.paths(cfgDir)
   const ca = fwd(pki.ca)
-  let settings
-  try {
-    settings = readSettings()
-  } catch (e) {
-    console.error(`Invalid JSON in ${settingsPath}: ${e.message}`)
-    process.exit(1)
-  }
+  const settings = readSettingsOrExit()
   const mode = wiringMode(settings, port)
 
   if (sub === 'status') {
@@ -904,7 +913,7 @@ if (cmd === 'proxy') {
     const issued = PKI.ensure(cfgDir, { hosts: [L.PROXY_MITM_HOST], force: sub === 'renew' })
     const wasEnabled = setProxyEnabled(true)
     let h = await fetchHealth(port)
-    if (h && !h.proxy && h.pid) {
+    if (h && isRouter(h) && !h.proxy) {
       console.log(`Restarting the router (pid ${h.pid}) so it runs the proxy code; requests in flight are retried by Claude Code.`)
       try {
         process.kill(h.pid)
@@ -1129,6 +1138,7 @@ if (cmd === 'rc') {
     }
   }
   if (json) console.log(JSON.stringify(report, null, 2))
+  else if (wiring.fixable) console.log('The settings.json fix above is not applied yet: run "/provider doctor --fix" (or "node tools/setup.mjs doctor --fix").')
 } else {
   console.error('Usage: node tools/setup.mjs [init|presets|add|providers|alias|set|remove|migrate|doctor|check|restart|proxy|rc] [--fix] [--ping] [--json] [--go]')
   process.exit(2)
