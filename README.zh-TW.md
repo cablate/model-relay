@@ -139,6 +139,21 @@ node tools/setup.mjs alias subagent sonnet       # 在 settings.json 設定 CLAU
 
 若想在單次派子代理時直接指定走某個供應商，`model-relay` 會在執行期透過 `$.agent.register` 為轉發站服務的每個供應商自動註冊一個等同預設 `Agent` 工具（繼承全部父層工具）的 `model-relay:<name>`（如 `model-relay:backup`），並在 `on('agent.spawn')` 鎖定該供應商的模型 ID——直接指定 `subagent_type: "model-relay:backup"` 即可，不必建 `.claude/agents/*.md` 定義檔，也不用重開對話。
 
+每個供應商都能在 `~/.claude/model-relay.json` 用 `agent` 物件調整自己的子代理。欄位和 agent 定義檔 frontmatter 一樣，照寫的生效；`name` 與 `model` 一律是該供應商的。`description` 是 Claude 決定派哪個子代理時在清單裡讀到的那一行，請寫清楚什麼時候該派它：
+
+```json
+"providers": {
+  "backup": {
+    "model": "your-model-id",
+    "agent": {
+      "description": "Use for routine, well-scoped tasks: code search, summaries, small edits.",
+      "effort": "medium",
+      "maxTurns": 40
+    }
+  }
+}
+```
+
 Claude Code 仍可能不聲不響地讓這種子代理跑在別的模型上（不在 `availableModels` 裡的模型會被換掉，只在它的除錯日誌留一行）。外掛會檢查兩次：子代理啟動時，比對 Claude Code 回報它實際用的模型；子代理結束時，比對轉發站真正收到的模型。任何一次不一致都會跳出提示，並指向 `/provider doctor`。
 
 ### 用指令改設定，不必手改 JSON
@@ -199,6 +214,7 @@ node tools/setup.mjs rc
 | `providers.<name>.stripCacheControl` | `false` | 是否在送出前遞迴移除所有 `cache_control` 欄位 |
 | `providers.<name>.authHeader` | `"both"` | 金鑰標頭傳遞方式：`"bearer"`、`"x-api-key"` 或 `"both"` |
 | `providers.<name>.launch` | `null` | `{ "command": "...", "args": [...] }`，當本機連接埠未開時自動拉起程序 |
+| `providers.<name>.agent` | `null` | 這個供應商的 `model-relay:<name>` 子代理欄位，同 agent 定義檔：`description`、`prompt`、`tools`、`disallowedTools`、`skills`、`effort`、`permissionMode`、`maxTurns`、`autoCompactWindow`、`initialPrompt`、`memory`、`isolation`、`background`、`omitClaudeMd`、`mcpServers`、`hooks`。格式不對的欄位會被略過；Claude Code 整組不接受時，子代理先用預設值並跳出提示 |
 
 ### 在自己的 statusline 顯示轉發站狀態
 

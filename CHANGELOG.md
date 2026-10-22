@@ -6,6 +6,10 @@ All notable changes to `model-relay` are documented in this file. Format follows
 
 ## [Unreleased]
 
+### Added
+
+- **Per-provider subagent settings (`providers.<name>.agent`):** Each provider's `model-relay:<name>` subagent can now set its own `description` (the line Claude reads when choosing which agent to spawn), `prompt`, `tools`, `effort`, `maxTurns` and the other agent-file fields in `~/.claude/model-relay.json`; `name` and `model` stay the provider's.
+
 ## [0.7.1] - 2026-10-22
 
 Lets custom statuslines (such as [coralline](https://github.com/Nanako0129/coralline)'s `relay` segment) display the actual model and routing state of each Claude Code window, and hides the plugin's own yellow status line above the prompt by default so the two do not duplicate each other.

@@ -26,6 +26,48 @@ export function parseLocal(raw: unknown, oldName = false): LocalCfg | null {
   return { port, nodePath, outdated: oldName || r.format !== 2, statusBar: r.statusBar === true }
 }
 
+// The agent fields a provider's "agent" object in the config may set, with the shape each must have; `name` and `model`
+// are not among them: the type is named after the provider and runs on its model. Claude Code validates the rest.
+const isStr = (v: unknown) => typeof v === 'string' && v.trim().length > 0
+const isStrList = (v: unknown) => Array.isArray(v) && v.every((x) => typeof x === 'string')
+const AGENT_FIELDS: Record<string, (v: unknown) => boolean> = {
+  description: isStr,
+  prompt: isStr,
+  tools: isStrList,
+  disallowedTools: isStrList,
+  skills: isStrList,
+  effort: (v) => isStr(v) || (typeof v === 'number' && Number.isInteger(v) && v > 0),
+  permissionMode: isStr,
+  maxTurns: (v) => typeof v === 'number' && Number.isInteger(v) && v > 0,
+  autoCompactWindow: (v) => typeof v === 'number' && Number.isInteger(v) && v > 0,
+  initialPrompt: isStr,
+  memory: (v) => v === 'user' || v === 'project' || v === 'local',
+  isolation: (v) => v === 'worktree' || v === 'remote',
+  background: (v) => v === true,
+  omitClaudeMd: (v) => v === true,
+  mcpServers: (v) => Array.isArray(v) && v.every((x) => typeof x === 'string' || (typeof x === 'object' && x !== null && !Array.isArray(x))),
+  hooks: (v) => typeof v === 'object' && v !== null && !Array.isArray(v),
+}
+
+export type AgentOptions = Record<string, unknown>
+
+// Each provider's "agent" object from the config, by name, keeping only the fields above in the right shape
+export function providerAgentOptions(raw: unknown): Record<string, AgentOptions> {
+  const out: Record<string, AgentOptions> = {}
+  const providers = (raw as { providers?: unknown } | null)?.providers
+  if (typeof providers !== 'object' || providers === null || Array.isArray(providers)) return out
+  for (const [name, p] of Object.entries(providers as Record<string, unknown>)) {
+    const agent = (p as { agent?: unknown } | null)?.agent
+    if (typeof agent !== 'object' || agent === null || Array.isArray(agent)) continue
+    const kept: AgentOptions = {}
+    for (const [k, v] of Object.entries(agent as Record<string, unknown>)) {
+      if (has(AGENT_FIELDS, k) && AGENT_FIELDS[k]!(v)) kept[k] = v
+    }
+    if (Object.keys(kept).length) out[name] = kept
+  }
+  return out
+}
+
 export function outdatedText(lang: 'zh' | 'en' = 'zh'): string {
   return lang === 'en'
     ? 'Config from an older version, not read by this one: run /provider setup upgrade my model-relay config'
@@ -501,7 +543,7 @@ export function helpText(providers: string[], lang: 'zh' | 'en' = 'zh'): string 
   return lines.join('\n')
 }
 
-export interface ProviderAgentSpec {
+export interface ProviderAgentSpec extends AgentOptions {
   name: string
   description: string
   prompt: string
@@ -513,11 +555,13 @@ const DEFAULT_AGENT_PROMPT =
 
 // Builds one `$.agent.register` spec per provider the router serves. `tools` is omitted so the subagent inherits every
 // tool the parent has (identical to the built-in general-purpose Agent), while `model` is set to the provider's model ID.
-export function providerAgentSpecs(providers: Record<string, string>): ProviderAgentSpec[] {
+// `options` holds each provider's "agent" object from the config: what it sets replaces these defaults as written.
+export function providerAgentSpecs(providers: Record<string, string>, options: Record<string, AgentOptions> = {}): ProviderAgentSpec[] {
   return Object.entries(providers).map(([name, model]) => ({
-    name,
     description: `General-purpose agent routed to ${name} (${model}) via model-relay. Same full toolset as the default Agent tool.`,
     prompt: DEFAULT_AGENT_PROMPT,
+    ...(has(options, name) ? options[name] : {}),
+    name,
     model,
   }))
 }

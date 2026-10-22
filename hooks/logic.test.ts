@@ -18,6 +18,7 @@ import {
   pingText,
   probeArgv,
   providerAgentSpecs,
+  providerAgentOptions,
   providerReport,
   reachedRelay,
   relayAgent,
@@ -192,6 +193,17 @@ test('switches are changed through the setup CLI, and each provider gets a model
   const providers = { aaa: 'aaa-9[1m]', bbb: 'bbb-1' }
   const specs = providerAgentSpecs(providers)
   assert(specs.length === 2 && specs[0]?.name === 'aaa' && specs[0]?.model === 'aaa-9[1m]' && specs[1]?.model === 'bbb-1', 'one spec per provider')
+  const opts = providerAgentOptions({ providers: {
+    aaa: { agent: { description: 'Hard reviews.', effort: 'high', tools: ['Read', 'Grep'], name: 'evil', model: 'other', maxTurns: -1, memory: 'cloud' } },
+    bbb: { agent: 'yes' },
+    ccc: { token: 't' },
+  } })
+  assert(JSON.stringify(opts) === '{"aaa":{"description":"Hard reviews.","effort":"high","tools":["Read","Grep"]}}', 'agent fields in the right shape only; no name or model')
+  assert(JSON.stringify(providerAgentOptions(null)) === '{}' && JSON.stringify(providerAgentOptions({ providers: [] })) === '{}', 'no providers object')
+  const custom = providerAgentSpecs(providers, opts)
+  assert(custom[0]!.description === 'Hard reviews.' && custom[0]!.effort === 'high' && (custom[0]!.tools as string[]).length === 2, 'the config sets the description and fields as written')
+  assert(custom[0]!.name === 'aaa' && custom[0]!.model === 'aaa-9[1m]' && custom[0]!.prompt === specs[0]!.prompt, "name and model stay the provider's; unset fields keep defaults")
+  assert(JSON.stringify(custom[1]) === JSON.stringify(specs[1]), 'a provider without an agent object is unchanged')
   assert(relayAgent('model-relay:BBB', providers)?.model === 'bbb-1', 'locks model-relay:<name> to its model')
   assert(relayAgent('Explore', providers) === null && relayAgent('model-relay:ghost', providers) === null, 'other types and unknown names untouched')
   assert(relayAgent('model-relay:constructor', providers) === null && !has(providers, 'toString'), 'no prototype names')

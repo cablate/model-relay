@@ -139,6 +139,21 @@ node tools/setup.mjs alias subagent sonnet       # set CLAUDE_CODE_SUBAGENT_MODE
 
 For per-call subagent routing, `model-relay` also dynamically registers a full-capability `Agent` type `model-relay:<name>` for each provider the router serves (such as `model-relay:backup`) via `$.agent.register` with all parent tools and `model` set to that provider's model ID, and locks that model in `on('agent.spawn')`—so you can spawn `subagent_type: "model-relay:backup"` on the fly without creating `.claude/agents/*.md` files or restarting the session.
 
+Each provider can shape its agent with an `agent` object in `~/.claude/model-relay.json`. The fields are the ones an agent file's frontmatter takes, used as written; `name` and `model` always stay the provider's. `description` is the line Claude reads in its list of agent types when it decides which one to spawn, so say when to pick this agent:
+
+```json
+"providers": {
+  "backup": {
+    "model": "your-model-id",
+    "agent": {
+      "description": "Use for routine, well-scoped tasks: code search, summaries, small edits.",
+      "effort": "medium",
+      "maxTurns": 40
+    }
+  }
+}
+```
+
 Claude Code can still run such a subagent on another model without saying so (a model missing from `availableModels` is swapped, with a line only in its debug log). The plugin checks twice: when the subagent starts, against the model Claude Code reports it started on, and when it finishes, against the models the router actually received. Either mismatch shows a notice that points to `/provider doctor`.
 
 ### Edit the config from the command line
@@ -199,6 +214,7 @@ Configuration lives in `~/.claude/model-relay.json`. The directory defaults to `
 | `providers.<name>.stripCacheControl` | `false` | Recursively remove `cache_control` fields before forwarding |
 | `providers.<name>.authHeader` | `"both"` | How to send credentials: `"bearer"`, `"x-api-key"`, or `"both"` |
 | `providers.<name>.launch` | `null` | `{ "command": "...", "args": [...] }` to auto-spawn if localhost port is closed |
+| `providers.<name>.agent` | `null` | Fields for this provider's `model-relay:<name>` subagent, as in an agent file: `description`, `prompt`, `tools`, `disallowedTools`, `skills`, `effort`, `permissionMode`, `maxTurns`, `autoCompactWindow`, `initialPrompt`, `memory`, `isolation`, `background`, `omitClaudeMd`, `mcpServers`, `hooks`. A field of the wrong shape is ignored; if Claude Code refuses the whole set, the subagent keeps the defaults and a notice says so |
 
 ### Show the relay in your statusline
 

@@ -6,6 +6,10 @@
 
 ## [未發布]
 
+### 新增
+
+- **每個供應商的子代理設定（`providers.<name>.agent`）：** 每個供應商的 `model-relay:<name>` 子代理現在可以在 `~/.claude/model-relay.json` 自訂 `description`（Claude 決定派哪個子代理時讀的那一行）、`prompt`、`tools`、`effort`、`maxTurns` 等 agent 定義檔欄位；`name` 與 `model` 一律是該供應商的。
+
 ## [0.7.1] - 2026-10-22
 
 讓自訂狀態列（例如 [coralline](https://github.com/Nanako0129/coralline) 的 `relay` segment）能直接顯示每個 Claude Code 視窗實際連線的模型與分流狀態，並預設收起輸入框上方的外掛黃字狀態列，畫面不再重複佔位。

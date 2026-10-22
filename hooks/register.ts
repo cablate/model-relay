@@ -21,6 +21,7 @@ import {
   pingReport,
   probeArgv,
   providerAgentSpecs,
+  providerAgentOptions,
   providerReport,
   reachedRelay,
   relayAgent,
@@ -86,11 +87,24 @@ async function myVersion($: EngineInterface): Promise<string> {
 // One model-relay:<name> agent per provider, and the provider names in /provider's hint; redone when the router's list changes
 async function syncProviders($: EngineInterface, providers: Record<string, string>): Promise<void> {
   knownProviders = providers
-  const specs = providerAgentSpecs(providers)
+  let options: ReturnType<typeof providerAgentOptions> = {}
+  try {
+    options = providerAgentOptions(JSON.parse(await $.fs.read(`${await configDir($)}/${CONFIG_NAME}`)))
+  } catch {}
+  const specs = providerAgentSpecs(providers, options)
   const sig = JSON.stringify(specs)
   if (sig === registeredSig) return
-  for (const spec of specs) {
-    await $.agent.register(spec).catch(() => undefined)
+  const plain = providerAgentSpecs(providers)
+  for (const [i, spec] of specs.entries()) {
+    const ok = await $.agent.register(spec).then(() => true, () => false)
+    // Claude Code refused this provider's "agent" fields: keep the agent with the defaults rather than lose it
+    if (!ok && has(options, spec.name)) {
+      await $.agent.register(plain[i]!).catch(() => undefined)
+      const lang = await detectLang($)
+      $.ui.toast(lang === 'en'
+        ? `Claude Code refused providers.${spec.name}.agent in model-relay.json; model-relay:${spec.name} uses the defaults`
+        : `Claude Code 不接受 model-relay.json 的 providers.${spec.name}.agent，model-relay:${spec.name} 先用預設值`)
+    }
   }
   await $.command.register({
     name: 'provider',
