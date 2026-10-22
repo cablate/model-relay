@@ -8,7 +8,7 @@ const http = require('node:http')
 const net = require('node:net')
 const os = require('node:os')
 const path = require('node:path')
-const { spawnSync } = require('node:child_process')
+const { execFile, spawn, spawnSync } = require('node:child_process')
 
 const setup = path.join(__dirname, '..', 'tools', 'setup.mjs')
 
@@ -154,4 +154,58 @@ test('the relay\'s own CA path spelled differently, or a shell CA already overri
   }
   const o = runWith({ NODE_EXTRA_CA_CERTS: '/etc/corp/ca.pem' }, f.dir, 'proxy', 'renew', '--go')
   assert.strictEqual(o.code, 0, `settings.json already holds the relay CA: ${o.out}`)
+})
+
+test('doctor only looks until --fix, then hints at it; --fix wires the relay\'s own address and nothing else', async (t) => {
+  const f = await fixture(t, { model: 'sonnet', env: { FOO: '1' } })
+  const url = `http://127.0.0.1:${f.port}`
+  const before = fs.readFileSync(f.settingsPath, 'utf8')
+
+  const look = run(f.dir, 'doctor')
+  assert.strictEqual(look.code, 0, look.out)
+  assert.strictEqual(fs.readFileSync(f.settingsPath, 'utf8'), before, 'a read-only doctor changes nothing')
+  assert.match(look.out.trim().split('\n').pop(), /\/provider doctor --fix/, 'and the last line says how to apply the fix')
+  assert.strictEqual(run(f.dir, 'doctor', '--json').out.includes('/provider doctor --fix'), false, 'json stays machine output')
+
+  const fixed = run(f.dir, 'doctor', '--fix')
+  assert.strictEqual(f.read().env.ANTHROPIC_BASE_URL, url)
+  assert.doesNotMatch(fixed.out, /\/provider doctor --fix/, 'nothing left to hint at')
+
+  // the address spelled with localhost is the relay's too, and is written back in the usual form
+  fs.writeFileSync(f.settingsPath, JSON.stringify({ env: { ANTHROPIC_BASE_URL: `http://localhost:${f.port}` } }))
+  run(f.dir, 'doctor', '--fix')
+  assert.strictEqual(f.read().env.ANTHROPIC_BASE_URL, url)
+})
+
+test('doctor --fix leaves a local gateway on another port alone, and does not offer to replace it', async (t) => {
+  for (const gateway of ['http://127.0.0.1:4000', 'http://localhost:4000/']) {
+    const f = await fixture(t, { env: { ANTHROPIC_BASE_URL: gateway } })
+    const before = fs.readFileSync(f.settingsPath, 'utf8')
+    for (const args of [['doctor'], ['doctor', '--fix'], ['init', '--fix']]) {
+      const r = run(f.dir, ...args)
+      assert.match(r.out, /not this relay/, `${gateway} ${args.join(' ')}: ${r.out}`)
+      assert.doesNotMatch(r.out, /\/provider doctor --fix/, 'a fix that would not apply is not offered')
+      assert.strictEqual(fs.readFileSync(f.settingsPath, 'utf8'), before, `${gateway} ${args.join(' ')}: settings.json is byte-identical`)
+    }
+  }
+})
+
+test('proxy enable --go kills only what answers /__health as a router, never any process whose pid it reports', async (t) => {
+  const f = await fixture(t, { env: {} })
+  const bystander = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' })
+  t.after(() => bystander.kill())
+  // not a router: no "ok": true, but a pid
+  const fake = http.createServer((q, r) => r.end(JSON.stringify({ pid: bystander.pid })))
+  await new Promise((r) => fake.listen(f.port, '127.0.0.1', r))
+  t.after(() => fake.close())
+  // the server above lives in this process, which a synchronous spawn would block
+  const env = { ...process.env, CLAUDE_CONFIG_DIR: f.dir }
+  delete env.NODE_EXTRA_CA_CERTS
+  const r = await new Promise((resolve) => {
+    execFile(process.execPath, [setup, 'proxy', 'enable', '--go'], { env }, (e, stdout, stderr) => resolve({ code: e ? e.code : 0, out: `${stdout}${stderr}` }))
+  })
+  assert.doesNotThrow(() => process.kill(bystander.pid, 0), `the process the answer named is still alive: ${r.out}`)
+  assert.doesNotMatch(r.out, /Restarting the router/)
+  assert.strictEqual(r.code, 1, 'and the enable does not go through on that answer')
+  assert.deepStrictEqual(f.read(), { env: {} })
 })

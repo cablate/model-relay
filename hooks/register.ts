@@ -31,6 +31,7 @@ import {
   sessionArgv,
   setupBrief,
   setupCliArgv,
+  setupCommandArgs,
   setupScript,
   spawnedElsewhere,
   staleStatusText,
@@ -457,8 +458,7 @@ export const register: Register = (on) => {
       return { text: lang === 'en' ? 'Handing setup to Claude…' : '已交給 Claude 協助設定…' }
     }
     if (first === 'init' || first === 'doctor' || first === 'presets' || first === 'restart') {
-      const cliArgs = first === 'init' ? ['init', '--fix'] : first === 'doctor' ? ['doctor', '--fix', ...(arg.includes('--ping') ? ['--ping'] : [])] : [first]
-      const r = await $.process.run([cfg?.nodePath ?? 'node', setupScript($.plugin.root), ...cliArgs], { timeoutMs: 60000 }).catch(() => null)
+      const r = await $.process.run([cfg?.nodePath ?? 'node', setupScript($.plugin.root), ...setupCommandArgs(first, arg)], { timeoutMs: 60000 }).catch(() => null)
       const out = ((r?.stdout || '') + (r?.stderr || '')).trim()
       return { text: out || (lang === 'en' ? 'Setup command did not respond.' : '設定指令沒有回應。') }
     }

@@ -27,6 +27,7 @@ import {
   routerUrl,
   sessionArgv,
   setupBrief,
+  setupCommandArgs,
   setupScript,
   spawnedElsewhere,
   startArgv,
@@ -207,6 +208,18 @@ test('switches are changed through the setup CLI, and each provider gets a model
   assert(relayAgent('model-relay:BBB', providers)?.model === 'bbb-1', 'locks model-relay:<name> to its model')
   assert(relayAgent('Explore', providers) === null && relayAgent('model-relay:ghost', providers) === null, 'other types and unknown names untouched')
   assert(relayAgent('model-relay:constructor', providers) === null && !has(providers, 'toString'), 'no prototype names')
+})
+
+test('/provider doctor only looks until the user types --fix; init still wires settings.json', () => {
+  const args = (first: string, arg = first) => setupCommandArgs(first, arg).join(' ')
+  assert(args('doctor') === 'doctor', 'a bare doctor is read-only')
+  assert(args('doctor', 'doctor --ping') === 'doctor --ping', '--ping passes through and still changes nothing')
+  assert(args('doctor', 'doctor --fix') === 'doctor --fix', '--fix is the user asking for the change')
+  assert(args('doctor', 'doctor --fix --ping') === 'doctor --fix --ping' && args('doctor', 'doctor --ping --fix') === 'doctor --fix --ping', 'both flags, in either order')
+  assert(args('doctor', 'doctor --prefix') === 'doctor', 'only the flag itself counts')
+  assert(args('init') === 'init --fix', 'setting up is what init is for')
+  assert(args('presets') === 'presets' && args('restart') === 'restart', 'the others pass their name only')
+  assert(helpText([], 'en').includes('/provider doctor [--ping] [--fix]') && helpText([], 'zh').includes('/provider doctor [--ping] [--fix]'), 'help says doctor takes --fix')
 })
 
 test('a model-relay subagent that Claude Code ran on another model, or that never reached the relay, is noticed', () => {

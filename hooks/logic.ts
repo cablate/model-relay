@@ -167,6 +167,14 @@ export function setupCliArgv(cfg: LocalCfg, script: string, cliArgs: string[]): 
   return [cfg.nodePath, script, ...cliArgs]
 }
 
+// What /provider init|doctor|presets|restart runs. init is setting up, so it wires settings.json; doctor only looks until the person types --fix
+export function setupCommandArgs(first: string, arg: string): string[] {
+  const typed = arg.split(/\s+/)
+  if (first === 'init') return ['init', '--fix']
+  if (first === 'doctor') return ['doctor', ...['--fix', '--ping'].filter((flag) => typed.includes(flag))]
+  return [first]
+}
+
 // Detaches the router process on both Windows and POSIX platforms.
 export function startArgv(cfg: LocalCfg, script: string, configDir: string, isWin = true): string[] {
   if (isWin) {
@@ -527,7 +535,7 @@ export function helpText(providers: string[], lang: 'zh' | 'en' = 'zh'): string 
     [en ? 'Setup and checks:' : '設定與檢查：', [
       ['/provider ping', en ? 'Test every provider: does it answer, and how soon' : '測試每個供應商：能不能回應、多快開始回應'],
       ['/provider setup [goal]', en ? 'Let Claude walk you through setup (e.g. /provider setup add deepseek)' : '讓 Claude 帶你設定（例：/provider setup 加上 deepseek）'],
-      ['/provider doctor [--ping]', en ? 'Check the config, Claude Code settings and the relay, with fixes' : '檢查設定檔、Claude Code 設定與轉發站，並列出修法'],
+      ['/provider doctor [--ping] [--fix]', en ? 'Check the config, Claude Code settings and the relay; changes nothing unless --fix (wires settings.json)' : '檢查設定檔、Claude Code 設定與轉發站；不加 --fix 不會改任何東西（--fix 會設定 settings.json）'],
       ['/provider restart', en ? 'Restart the relay so it runs this plugin version' : '重啟轉發站，讓它跑這個外掛版本的程式'],
       ['/provider init', en ? 'Create an empty config' : '建立空的設定檔'],
     ]],

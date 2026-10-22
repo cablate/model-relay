@@ -339,3 +339,19 @@ test('alias points haiku at a provider in both settings.json and matchModels, an
   assert.deepStrictEqual(f.read().providers.gemini.matchModels, ['^gemini', 'sonnet'])
 })
 
+
+test('alias refuses a settings.json it cannot parse, and rewrites neither it nor the config', (t) => {
+  const f = fixture(t)
+  const settingsFile = path.join(f.dir, 'settings.json')
+  const broken = '{ "env": { "FOO": "1", }, "permissions": { "allow": ["Bash"] }'
+  fs.writeFileSync(settingsFile, broken)
+  const cfgBefore = fs.readFileSync(f.file, 'utf8')
+  for (const args of [['alias', 'haiku', 'gemini'], ['alias', 'haiku', 'claude'], ['alias', 'subagent', 'sonnet'], ['alias']]) {
+    const r = f.run(...args)
+    assert.strictEqual(r.code, 1, `${args.join(' ')}: ${r.out}`)
+    assert.match(r.out, /Invalid JSON in .*settings\.json/, args.join(' '))
+    assert.strictEqual(fs.readFileSync(settingsFile, 'utf8'), broken, `${args.join(' ')}: settings.json is byte-identical`)
+    assert.strictEqual(fs.readFileSync(f.file, 'utf8'), cfgBefore, `${args.join(' ')}: the config is untouched`)
+  }
+  assert.deepStrictEqual(fs.readdirSync(f.dir).sort(), ['model-relay.json', 'settings.json'], 'no backup or temp file was written')
+})
