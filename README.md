@@ -79,7 +79,7 @@ claude plugin install model-relay@model-relay
        ✓ backup     (your-model-id) -> answers, first byte after 640 ms
    ```
 
-   Anything `doctor` finds is listed with a `⚠` and what fixes it; `/provider setup` can run those fixes with you. `doctor --json` prints the same findings for an assistant or a script, each with the `setup.mjs` arguments that fix it (`fix`) and whether that command changes something you should agree to first (`needsConsent`).
+   Anything `doctor` finds is listed with a `⚠` and what fixes it; `/provider setup` can run those fixes with you. `doctor` only reports and changes nothing; add `--fix` (`/provider doctor --fix`) to let it apply the repairs it can make itself, such as pointing `ANTHROPIC_BASE_URL` in `~/.claude/settings.json` at the relay. `doctor --json` prints the same findings for an assistant or a script, each with the `setup.mjs` arguments that fix it (`fix`) and whether that command changes something you should agree to first (`needsConsent`).
 
 **Nothing goes to a provider unless you say so.** A new config keeps `haiku` and every other request on Claude; the first provider you `add` becomes the one that takes over on a 429 (`failover.chain`). To send Claude Code's `haiku` calls (subagents, `WebFetch` summaries, internal helpers) to a provider, run `node tools/setup.mjs alias haiku <name>`.
 
@@ -95,7 +95,7 @@ claude plugin install model-relay@model-relay
 
 ### Interactive `AbovePrompt` control panel and provider test
 
-Type `/provider` to open a panel right above your prompt input box. It does one thing: pick which model this window uses, one button per row. Once a switch takes, the panel closes and a notice names the model now in use. Click a button, or press `ctrl+x tab` and then the key shown on it (`1`–`9` to switch, `p` to test every provider, and `r` to try Claude again while a 429 cooldown runs). Switching a pinned window back to Claude takes a second press to confirm. The switches every window shares stay folded under Settings [s]: press it to show 429 failover, retry and Remote Control (`f` / `t` / `x`) and the model aliases. They turn on or off without editing JSON: failover and retry apply from the next request, while Remote Control asks first because it rewrites `settings.json`, and it only reaches new sessions.
+Type `/provider` to open a panel right above your prompt input box. It does one thing: pick which model this window uses, one button per row. Once a switch takes, the panel closes and a notice names the model now in use. Click a button, or press `ctrl+x tab` and then the key shown on it (`1`–`9` to switch, `p` to test every provider, and `r` to try Claude again while a 429 cooldown runs). Switching a pinned window back to Claude takes a second press to confirm. The switches every window shares stay folded under Settings [s]: press it to show 429 failover, retry and Remote Control (`f` / `t` / `x`) and the model aliases. They turn on or off without editing JSON: failover and retry apply from the next request, while Remote Control asks first because it rewrites `settings.json`: turning it on reaches new sessions only, and turning it off disconnects sessions already running in proxy mode until they are restarted.
 
 Each provider row shows two things apart: the last real request (`last 200 · 45.0s`) and the last test (`test ok 640ms`). The test sends one 1-token request and stops at the first byte (15 seconds at most), so a long reply never reads as a slow provider, and a failure says what is wrong in words: the key was refused, the model name is wrong, the quota is used up, the local gateway is not running, or there was no answer in time. The router keeps the provider's key out of anything it shows. When the router skips a provider (its `env:` variable is unset for the router), the panel says so.
 
@@ -127,6 +127,8 @@ Pointing a Claude tier like `haiku` at a provider (for example `backup`, with mo
 
 - `~/.claude/settings.json` → `env.ANTHROPIC_DEFAULT_HAIKU_MODEL = "your-model-id[1m]"` so Claude Code itself resolves the `haiku` alias to that model (including the `[1m]` context window) and sends `"model": "your-model-id"`.
 - `~/.claude/model-relay.json` → `providers.backup.matchModels` gains `"haiku"`, so the router also catches internal Claude Code calls that hardcode `"claude-haiku-*"`, rewriting the wire `model` field to `"your-model-id"`. A request for a provider's own model always reaches that provider. `node tools/setup.mjs alias haiku claude` undoes both.
+
+**How a request finds its provider:** a request whose `model` is some provider's own `model` goes to that provider first, whatever the order in the config. Only then are the `matchModels` patterns tried, in config order, and the first match wins. A request caught by a pattern keeps the model name it came with, except a Claude name (`claude-*`, `haiku`, `sonnet`, `opus`), which is replaced by the provider's `model`. So a pattern should match the real model ID the upstream knows, not the provider's name in this file: `^backup` would catch requests named after the provider and pass on a name the upstream has never heard of.
 
 Use `setup.mjs alias` (or `/provider alias`) to inspect or set both files in one step:
 
@@ -170,6 +172,8 @@ node tools/setup.mjs set providers.local.fallback none
 node tools/setup.mjs migrate --go
 ```
 
+`remove <name>` takes the provider out of `failover.chain` and out of other providers' `fallback` lists, but it does not touch the `ANTHROPIC_DEFAULT_*_MODEL` aliases in `~/.claude/settings.json`. If `haiku`, `sonnet` or `opus` pointed at the removed provider's model, Claude Code keeps sending that model name and, with no provider left to claim it, the request goes to Claude. Reset each of those aliases yourself with `node tools/setup.mjs alias haiku claude` (or `alias haiku <name>` to give it to another provider; likewise for `sonnet` and `opus`). `doctor` warns about an alias that no provider matches.
+
 ### Remote Control without giving up the relay
 
 Remote Control only starts when Claude Code talks to `api.anthropic.com`, which a base URL pointing at the relay breaks. HTTPS proxy mode keeps that address and makes the relay the proxy instead: Claude Code connects through `HTTPS_PROXY`, the relay answers for `api.anthropic.com` with a certificate that Claude Code trusts through `NODE_EXTRA_CA_CERTS`, and model calls are routed exactly as before (providers, sticky failover, retries). Everything else, token refresh and Remote Control traffic included, passes to Anthropic unchanged.
@@ -181,7 +185,7 @@ node tools/setup.mjs rc
 
 - **Contained trust:** The CA the relay creates can only vouch for `api.anthropic.com` (a critical name constraint), its private key is discarded right after signing, and only Claude Code processes that carry `NODE_EXTRA_CA_CERTS` load it. The system certificate store is never touched.
 - **Safe fallback:** Without a usable certificate the relay tunnels `api.anthropic.com` untouched, so Claude Code keeps working, just unrouted. A stopped router is different: the plugin's automatic direct fallback only works in `ANTHROPIC_BASE_URL` mode, so in proxy mode Claude Code cannot connect until the router is restarted (`node tools/setup.mjs rc`).
-- **Reversible:** `proxy disable --go` restores `ANTHROPIC_BASE_URL`, and the previous `settings.json` is kept as `settings.json.model-relay-backup`.
+- **Reversible:** `proxy disable --go` restores `ANTHROPIC_BASE_URL`, and the previous `settings.json` is kept as `settings.json.model-relay-backup`. Sessions already running in proxy mode lose their connection until you restart them.
 
 `HTTPS_PROXY` lives in `settings.json` `env`, so it also applies to commands Claude Code runs (`git`, `curl`, `gh`): they go through the relay as blind tunnels, and fail while the router is down.
 
@@ -198,22 +202,22 @@ Configuration lives in `~/.claude/model-relay.json`. The directory defaults to `
 | `proxy.enabled` | `false` | Accept HTTPS-proxy connections for Remote Control. Off by default. When on, a `CONNECT` to any host other than `api.anthropic.com` is a blind tunnel that any local process can use; `node tools/setup.mjs proxy enable --go` turns it on and `proxy disable --go` off |
 | `failover.enabled` | `true` | Automatically switch to the failover chain on Claude 429 usage limits |
 | `failover.chain` | `[]` | Ordered providers that take over when Claude is out of quota or a provider keeps failing; unknown names are skipped. Empty means a 429 from Claude is passed back as it is (`add` puts the first provider of a new config here) |
-| `failover.cooldownMs` | `600000` | Milliseconds before probing Claude again for new sessions (10 minutes, minimum `60000`) |
+| `failover.cooldownMs` | `600000` | Milliseconds before probing Claude again for new sessions (10 minutes). Kept between `60000` (1 minute) and `7200000` (2 hours): a value outside that range is moved to the nearest limit |
 | `retry.enabled` | `true` | Master switch for retrying a failing provider; `false` keeps the other retry settings for later |
-| `retry.attempts` | `3` | Times the SAME provider is retried with backoff when it answers 429/5xx; `0` means retry forever |
-| `retry.delayMs` | `2000` | First retry delay; multiplied by `retry.backoff` each attempt |
-| `retry.backoff` | `2` | Multiplier between retries (2s → 4s → …), capped by `retry.maxDelayMs` |
-| `retry.maxDelayMs` | `10000` | Longest single wait; a longer `Retry-After` keeps polling at this interval |
+| `retry.attempts` | `3` | Times the SAME provider is retried with backoff when it answers 429/5xx; `0` means retry forever. Any other value is capped at `30` |
+| `retry.delayMs` | `2000` | First retry delay; multiplied by `retry.backoff` each attempt. Capped at `60000` (60 seconds), or `300000` (300 seconds) when set in a provider's own `retry` |
+| `retry.backoff` | `2` | Multiplier between retries (2s → 4s → …), capped by `retry.maxDelayMs`. Kept between `1` and `4` |
+| `retry.maxDelayMs` | `10000` | Longest single wait; a longer `Retry-After` keeps polling at this interval. Capped at `300000` (300 seconds) |
 | `retry.failover` | `false` | Opt-in: after retries are exhausted, forward the original request to the next provider in the chain instead of returning the error |
-| `providers.<name>.retry` | `true` | Per-provider switch: `false` never retries this provider (failure returns at once); `true` follows the global `retry`; or a partial object like `{ "attempts": 5 }` overrides just those fields |
+| `providers.<name>.retry` | `true` | Per-provider switch: `false` never retries this provider (failure returns at once); `true` follows the global `retry`; or a partial object like `{ "attempts": 5 }` overrides just those fields, within the limits listed above |
 | `providers.<name>.fallback` | the chain | Who takes over from this provider: `false` for nobody, or a list like `["backup"]` |
 | `providers.<name>.preset` | `<name>` | Optional preset (`zai`, `deepseek`, `kimi`, `minimax`, `openrouter`): the address and compatibility switches, never a model |
 | `providers.<name>.baseUrl` | (from preset) | Anthropic-compatible upstream URL for this provider |
 | `providers.<name>.token` | (required) | Literal token or `"env:ENV_VAR_NAME"`. The variable is read from the router process's environment (inherited from the Claude Code session or setup command that started it), so one exported later is not seen until the router restarts |
 | `providers.<name>.model` | (required) | Target model ID when rewriting requests (suffixes like `[1m]` are stripped on wire) |
-| `providers.<name>.matchModels` | (from preset, else the model's first word) | Regex patterns matched against incoming request `model`, besides the provider's own model, which always matches |
+| `providers.<name>.matchModels` | (from preset, else the model's first word) | Regex patterns matched against the incoming request `model`, in config order; the first match wins. A request for a provider's own `model` goes to that provider before any pattern is tried. A pattern match sends the model name on unchanged (a Claude name is replaced by the provider's `model`), so match the real model ID the upstream knows (see Model alias routing) |
 | `providers.<name>.stripCacheControl` | `false` | Recursively remove `cache_control` fields before forwarding |
-| `providers.<name>.authHeader` | `"both"` | How to send credentials: `"bearer"`, `"x-api-key"`, or `"both"` |
+| `providers.<name>.authHeader` | (from preset, else `"bearer"`) | How to send credentials: `"bearer"`, `"x-api-key"`, or `"both"`. Of the built-in presets only `zai` uses `"both"`; the others use `"bearer"` |
 | `providers.<name>.launch` | `null` | `{ "command": "...", "args": [...] }` to auto-spawn if localhost port is closed |
 | `providers.<name>.agent` | `null` | Fields for this provider's `model-relay:<name>` subagent, as in an agent file: `description`, `prompt`, `tools`, `disallowedTools`, `skills`, `effort`, `permissionMode`, `maxTurns`, `autoCompactWindow`, `initialPrompt`, `memory`, `isolation`, `background`, `omitClaudeMd`, `mcpServers`, `hooks`. A field of the wrong shape is ignored; if Claude Code refuses the whole set, the subagent keeps the defaults and a notice says so |
 
@@ -241,14 +245,14 @@ Each window writes its relay state to `~/.claude/model-relay-status/<session id>
 | `/provider status` | The status as text: where this window goes, the switches every window shares, and anything to fix |
 | `/provider help` | Every command, grouped by what it reaches: this window, every window, setup and checks |
 | `/provider setup [goal]` | Let Claude walk you through setup with the setup tool; keys stay out of the chat |
-| `/provider init` · `/provider doctor [--ping]` | First-run setup and health check; work from any folder, with or without a config file |
+| `/provider init` · `/provider doctor [--ping] [--fix]` | First-run setup and health check; `doctor` only reports unless you add `--fix`, which applies the repairs it can make itself. Work from any folder, with or without a config file |
 | `/provider restart` | Restart the relay so it runs the installed plugin's code. After `claude plugin update` the plugin does this by itself once the relay answers no request; a relay left by an older plugin cannot report that, so a notice asks you to run it when no window has a reply in progress |
 | `/provider ping` | Test every provider: does it answer, how soon does the answer start, and what is wrong if it does not |
 | `/provider probe` | Reset the 429 cooldown timer so the next new session tries Claude immediately |
 | `/provider alias [haiku\|sonnet\|opus] [<name>\|claude]` | Inspect or point a Claude model alias at a provider (updates both `settings.json` and `matchModels`) |
 | `/provider failover [on\|off\|<a,b>]` | Turn 429 failover on/off or update `failover.chain` |
 | `/provider retry [on\|off]` | Turn automatic provider retries on or off |
-| `/provider rc [on\|off]` | Turn Remote Control HTTPS proxy mode on or off (applies to new sessions) |
+| `/provider rc [on\|off]` | Turn Remote Control HTTPS proxy mode on or off. On reaches new sessions only; off disconnects sessions already running in proxy mode until you restart them |
 
 ## Cost, privacy, and permissions
 
@@ -287,8 +291,10 @@ Start with `/provider doctor --ping`: it lists each problem with a `⚠` and the
 
 ## Uninstall
 
-1. Run `claude plugin uninstall model-relay@model-relay` and remove `ANTHROPIC_BASE_URL` from `~/.claude/settings.json` (in proxy mode remove `HTTPS_PROXY`, `NODE_EXTRA_CA_CERTS` and `NO_PROXY` instead; running `node tools/setup.mjs proxy disable --go` first does that and puts `ANTHROPIC_BASE_URL` back, which you then remove).
-2. Delete optional state files (`~/.claude/model-relay.json`, `~/.claude/model-relay-state.json`, `~/.claude/model-relay-status/`, `~/.claude/model-relay-pki/`, `~/.claude/model-relay.log`, `~/.claude/model-relay-requests.log`, and any `*.model-relay-backup` copies).
+1. Run `/provider doctor` and note the router's `pid` (on the `Router health` line; `Router status: offline` means nothing is running, so skip stopping it). Do this before uninstalling, because the tool that prints it lives in the plugin's folder.
+2. Run `claude plugin uninstall model-relay@model-relay` and remove `ANTHROPIC_BASE_URL` from `~/.claude/settings.json` (in proxy mode remove `HTTPS_PROXY`, `NODE_EXTRA_CA_CERTS` and `NO_PROXY` instead; running `node tools/setup.mjs proxy disable --go` first does that and puts `ANTHROPIC_BASE_URL` back, which you then remove).
+3. Close the Claude Code windows that still have the plugin loaded (an open one starts the router again), then stop the router with `kill <pid>` (macOS/Linux) or `taskkill /PID <pid> /F` (Windows). It keeps running after the plugin is removed. A gateway the router started from a provider's `launch` also keeps running on its own, so stop it after the router, which restarts a closed one within about 30 seconds. Find its process by the port in that provider's `baseUrl` (`lsof -i :<port>` on macOS/Linux, `netstat -ano | findstr :<port>` on Windows) and stop it the same way.
+4. Delete optional state files (`~/.claude/model-relay.json`, `~/.claude/model-relay-state.json`, `~/.claude/model-relay-status/`, `~/.claude/model-relay-pki/`, `~/.claude/model-relay.log`, `~/.claude/model-relay-requests.log`, and any `*.model-relay-backup` copies).
 
 ## Run from source
 
@@ -299,7 +305,7 @@ claude plugin test .
 node tools/smoke.mjs   # one real Claude Code request through this checkout's router; add --provider <name> for a provider
 ```
 
-`tools/smoke.mjs` needs a logged-in `claude`, so CI does not run it. Run it before a release and after a Claude Code update.
+`tools/smoke.mjs` needs a logged-in `claude`, so CI does not run it. Run it before a release and after a Claude Code update. `node tools/check.mjs` also runs the TypeScript hook tests, which need Node.js 22.6 or later; only running the plugin gets by on 20+.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for architecture and release steps.
 

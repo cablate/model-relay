@@ -4,7 +4,7 @@ Contributions, bug reports, and provider compatibility notes are welcome.
 
 ## Development setup
 
-1. Clone the repository and ensure Node.js 20+ and Claude Code CLI are installed.
+1. Clone the repository and install the Claude Code CLI and Node.js. Running the plugin needs Node.js 20+, but developing it needs Node.js 22.6+: `tools/test-hooks.mjs` runs the TypeScript hook tests with `--experimental-strip-types`, a flag that first appeared in 22.6 (from 22.18 type stripping is on by default and the flag is harmless). CI uses Node.js 22.
 2. Run the test suite:
 
 ```bash
