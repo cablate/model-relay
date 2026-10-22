@@ -380,3 +380,49 @@ test('a request on Message Threads is refused for a provider, in the wording Cla
   assert.match(msg, /anthropic[-_]beta/)
   assert.ok(L.threadBetaRefusal({ 'anthropic-beta': ['x', 'message-threads-2027-01-01'] }).includes('message-threads-2027-01-01'))
 })
+
+// A model-relay:<name> subagent's request as Claude Code sends it after one ToolSearch call (captured 2026-10-22):
+// the search, a placeholder, the tool it loaded with defer_loading, and the search's tool_reference result.
+const searchRound = () => ({
+  model: 'gpt-x',
+  tools: [
+    { name: 'Read', input_schema: { type: 'object' } },
+    { name: 'ToolSearch', input_schema: { type: 'object' } },
+    { name: 'DeferredToolPlaceholder', input_schema: { type: 'object', properties: {} }, defer_loading: true },
+    { name: 'WebFetch', input_schema: { type: 'object' }, defer_loading: true },
+  ],
+  messages: [
+    { role: 'user', content: 'fetch it' },
+    { role: 'assistant', content: [{ type: 'tool_use', id: 't1', name: 'ToolSearch', input: { query: 'select:WebFetch' } }] },
+    { role: 'user', content: [{ type: 'tool_result', tool_use_id: 't1', content: [{ type: 'tool_reference', tool_name: 'WebFetch' }] }] },
+  ],
+})
+
+test('a provider gets tool search it can use: the search renamed, loaded tools kept, references as text', () => {
+  const { body, restoreToolSearch } = L.rewriteBody(Buffer.from(JSON.stringify(searchRound())), {})
+  const j = JSON.parse(body.toString())
+  assert.deepStrictEqual(j.tools.map((t) => t.name), ['Read', 'load_deferred_tools', 'WebFetch'], 'z.ai hides every tool beside one named ToolSearch')
+  assert.ok(j.tools.every((t) => !('defer_loading' in t)), 'a loaded tool reaches the provider as an ordinary tool')
+  assert.strictEqual(j.messages[1].content[0].name, 'load_deferred_tools', 'the earlier call matches the renamed tool')
+  assert.deepStrictEqual(j.messages[2].content[0].content, [{ type: 'text', text: 'Tool WebFetch is loaded and can be called now.' }])
+  assert.strictEqual(restoreToolSearch, true)
+  const plain = Buffer.from('{"model":"glm-5.3","tools":[{"name":"Read"}]}')
+  assert.deepStrictEqual(L.rewriteBody(plain, {}), { body: plain, restoreToolSearch: false }, 'a request without tool search is sent as it came')
+})
+
+test("the provider's calls to the renamed search reach Claude Code as ToolSearch, across chunk and UTF-8 splits", async () => {
+  const sse = 'event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"t2","name": "load_deferred_tools","input":{}}}\n\nevent: content_block_delta\ndata: {"delta":{"text":"說明 load_deferred_tools"}}\n\n'
+  const bytes = Buffer.from(sse)
+  const cuts = [bytes.indexOf('deferred'), bytes.indexOf('說') + 1]
+  const parts = [bytes.subarray(0, cuts[0]), bytes.subarray(cuts[0], cuts[1]), bytes.subarray(cuts[1])]
+  const out = []
+  const t = L.toolSearchRestorer()
+  t.on('data', (c) => out.push(c))
+  const done = new Promise((r) => t.on('end', r))
+  for (const p of parts) t.write(p)
+  t.end()
+  await done
+  const text = Buffer.concat(out).toString('utf8')
+  assert.ok(text.includes('"name":"ToolSearch"') && !text.includes('"name": "load_deferred_tools"'), 'the tool name is restored')
+  assert.ok(text.includes('"text":"說明 load_deferred_tools"'), 'text that only mentions the alias is left alone, and no character is broken')
+})
