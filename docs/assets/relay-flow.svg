@@ -43,7 +43,7 @@
   <g class="s3">
     <rect x="44" y="216" width="404" height="58" rx="8" fill="#172033" stroke="#818cf8" stroke-width="1.5"/>
     <text x="58" y="238" class="mono" font-size="13" fill="#c4b5fd">⇄ model-relay: failover → backup (backup-9[1m])</text>
-    <text x="58" y="258" class="sans m">Session #1 pinned (Sticky) · ToolSearch stripped automatically</text>
+    <text x="58" y="258" class="sans m">Session #1 pinned (Sticky) · ToolSearch keeps working</text>
   </g>
 
   <g class="s4">
