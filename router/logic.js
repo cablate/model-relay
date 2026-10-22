@@ -54,10 +54,22 @@ function cfgMissingMessage(unresolved) {
   return `no provider is usable; skipped ${list}. Export the variable(s), then restart the router (it keeps the environment it was started with)`
 }
 
+// null for a Claude-looking model: a default ^claude would catch every Claude request and send it to this provider
 function defaultPrefixRegex(name, model) {
   const clean = wireModel(model)
   const prefix = clean.split(/[-_.:/]/)[0] || name
+  if (isClaudeModel(prefix)) return null
   return `^${prefix.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`
+}
+
+// An http(s) address that new URL() accepts, or null: anything else would throw inside a request and stop the router
+function httpUrl(s) {
+  if (!str(s) || !/^https?:\/\//i.test(s)) return null
+  try {
+    return new URL(s).hostname ? s : null
+  } catch {
+    return null
+  }
 }
 
 // Built-in providers: each service's address and the switches it needs. The model is always the person's to name,
@@ -78,10 +90,10 @@ function parseProvider(name, raw, env = process.env, baseRetry = parseRetryCfg(u
   if (typeof raw !== 'object' || raw === null) return null
   const presetKey = (str(raw.preset) || name || '').toLowerCase()
   const preset = Object.hasOwn(presets, presetKey) ? presets[presetKey] : null
-  const url = str(raw.baseUrl || raw.url || preset?.baseUrl)
+  const url = httpUrl(raw.baseUrl || raw.url || preset?.baseUrl)
   const token = resolveToken(raw.token, env)
   const model = str(raw.model || preset?.model)
-  if (!url || !/^https?:\/\//.test(url) || !token || !model) return null
+  if (!url || !token || !model) return null
 
   const stripCacheControl = raw.stripCacheControl !== undefined
     ? Boolean(raw.stripCacheControl)
@@ -92,7 +104,7 @@ function parseProvider(name, raw, env = process.env, baseRetry = parseRetryCfg(u
 
   const rawMatchers = Array.isArray(raw.matchModels) && raw.matchModels.length > 0
     ? raw.matchModels.filter((m) => typeof m === 'string' && m.length > 0)
-    : (preset?.matchModels || [defaultPrefixRegex(name, model)])
+    : (preset?.matchModels || [defaultPrefixRegex(name, model)].filter(Boolean))
 
   const matchRegexes = []
   for (const pat of rawMatchers) {
@@ -158,9 +170,11 @@ function bareCfg(raw) {
     failoverChain: [],
     failoverProvider: null,
     port: isPort(r.port) ? r.port : 8950,
-    claudeUrl: str(r.claudeUrl) || 'https://api.anthropic.com',
+    claudeUrl: httpUrl(r.claudeUrl) || 'https://api.anthropic.com',
     failoverEnabled: fo.enabled !== false,
     cooldownMs: Math.min(7200000, Math.max(60000, cooldownMs)),
+    // How long an upstream may stay silent (no bytes either way) before the request is treated as failed
+    idleTimeoutMs: typeof r.idleTimeoutMs === 'number' && r.idleTimeoutMs > 0 ? Math.min(3600000, Math.max(1000, r.idleTimeoutMs)) : 300000,
     retry: parseRetryCfg(r.retry),
     proxy: parseProxyCfg(r.proxy),
   }
@@ -283,11 +297,12 @@ function nextFallback(cfg, providerName, tried = []) {
 function matchProviderByModel(cfg, model) {
   if (typeof model !== 'string' || !model || !cfg || !cfg.providers) return null
   const clean = wireModel(model)
-  for (const p of Object.values(cfg.providers)) {
-    if (clean.toLowerCase() === wireModel(p.model).toLowerCase()) return p.name
-    if (p.matchRegexes && p.matchRegexes.some((re) => re.test(model) || re.test(clean))) return p.name
-  }
-  return null
+  const all = Object.values(cfg.providers)
+  // A provider's own model wins over another provider's pattern, whichever comes first in the file
+  const own = all.find((p) => clean.toLowerCase() === wireModel(p.model).toLowerCase())
+  if (own) return own.name
+  const byPattern = all.find((p) => p.matchRegexes && p.matchRegexes.some((re) => re.test(model) || re.test(clean)))
+  return byPattern ? byPattern.name : null
 }
 
 // Claude's three model tiers and their full model IDs. When a provider's matchModels catches one of these (for

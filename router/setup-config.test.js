@@ -144,19 +144,21 @@ test('remove drops the provider everywhere it is mentioned, after a dry run', (t
   assert.notStrictEqual(f.run('remove', 'gemini', '--go').code, 0, 'the last provider stays')
 })
 
-test('doctor points out an unknown failover name and a model another provider steals', (t) => {
+test('doctor points out an unknown failover name and a model two providers both name', (t) => {
   const f = fixture(t, {
     format: 2,
     port: 8999, // nothing listens here, so doctor does not talk to a real router
     providers: {
       aaa: { baseUrl: 'https://a.example', token: 't1', model: 'glm-5.3', matchModels: ['^glm'] },
       bbb: { baseUrl: 'https://b.example', token: 't2', model: 'glm-9', matchModels: ['^zzz'] },
+      ccc: { baseUrl: 'https://c.example', token: 't3', model: 'glm-5.3' },
     },
     failover: { enabled: true, chain: ['aaa', 'ghost'], cooldownMs: 600000 },
   })
   const r = f.run('doctor')
   assert.match(r.out, /ghost/)
-  assert.match(r.out, /glm-9 go to aaa, not bbb/)
+  assert.match(r.out, /glm-5\.3 go to aaa, not ccc/)
+  assert.doesNotMatch(r.out, /glm-9 go to/, "a provider's own model is no longer taken by another provider's pattern")
 })
 
 test('doctor warns when settings.json availableModels would drop a provider subagent model', (t) => {

@@ -140,7 +140,7 @@ const sweepStatus = () => {
 sweepStatus()
 setInterval(sweepStatus, 3600000).unref()
 
-const short = (sid) => (sid ? sid.slice(0, 8) : '-')
+const short = (sid) => (sid ? String(sid).slice(0, 8) : '-')
 const stick = (sid, providerName, why) => {
   if (!sid || !providerName) return
   const prev = state.sticky?.[sid]?.provider
@@ -187,6 +187,9 @@ function send(base, req, res, body, headers, onResponse, onError) {
   // A socket error after the answer started streaming (a reset mid-stream) can neither be retried nor reported:
   // the headers are gone, and a second writeHead would throw and take the router down. Cut the caller off instead.
   up.on('error', (e) => (res.headersSent ? res.destroy() : onError(e)))
+  // An upstream that accepts the request and then says nothing would hold the caller forever
+  const idleMs = readCfg()?.idleTimeoutMs || 300000
+  up.setTimeout(idleMs, () => up.destroy(new Error(`no data for ${Math.round(idleMs / 1000)}s`)))
   // The caller gave up (Esc in Claude Code): stop the upstream generation instead of paying for the rest of it
   const callerLeft = () => {
     if (!res.writableEnded) up.destroy()
@@ -290,6 +293,13 @@ function toProvider(provider, req, res, body, rewrite, sid, attempt = 0, tried =
       if (maybeRetry(status, ur.headers, null)) return
       giveUp(status, text, ur.headers)
     })
+    // The provider dropped the connection before the error body ended: 'end' never comes, so answer as unreachable
+    ur.on('close', () => {
+      if (ur.complete) return
+      logReq({ to: `${provider.name}-fail`, sid: short(sid), status, attempt, error: 'connection dropped mid-answer' })
+      if (maybeRetry(502, null, 'connection dropped')) return
+      giveUp(502, null, null)
+    })
   }, (e) => {
     logReq({ to: `${provider.name}-fail`, sid: short(sid), status: 0, attempt, error: e.message })
     if (maybeRetry(502, null, e.message)) return
@@ -307,7 +317,10 @@ function toClaude(cfg, req, res, body, trial, sid) {
     const chunks = []
     ur.on('data', (c) => chunks.push(c))
     ur.on('end', () => {
-      const text = Buffer.concat(chunks).toString('utf8')
+      const raw = Buffer.concat(chunks)
+      // A compressed body is passed back byte for byte; only a plain one can be read for the usage-limit wording
+      const encoded = ur.headers['content-encoding'] && ur.headers['content-encoding'] !== 'identity'
+      const text = encoded ? '' : raw.toString('utf8')
       const foProvider = cfg.failoverProvider ? cfg.providers[cfg.failoverProvider] : null
       if (cfg.failoverEnabled && foProvider && L.isUsageLimit(429, ur.headers, text)) {
         setState(L.onLimited(state, cfg, Date.now()), `claude usage limit${trial ? ' (still)' : ''}: using ${foProvider.name} (${foProvider.model})`)
@@ -315,7 +328,7 @@ function toClaude(cfg, req, res, body, trial, sid) {
         return toProvider(foProvider, req, res, body, true, sid)
       }
       res.writeHead(ur.statusCode, ur.headers)
-      res.end(text)
+      res.end(raw)
     })
   }, (e) => apiError(res, 502, `Anthropic unreachable: ${e.message}`))
 }
@@ -359,8 +372,8 @@ function control(req, res, body) {
     try {
       ;({ sid, on } = JSON.parse(body.toString('utf8')))
     } catch {}
-    on = String(on || '').trim().toLowerCase()
-    if (!sid || !on) return apiError(res, 400, 'need {sid, on: "<provider>" | "claude"}')
+    on = typeof on === 'string' ? on.trim().toLowerCase() : ''
+    if (typeof sid !== 'string' || !sid || !on) return apiError(res, 400, 'need {sid, on: "<provider>" | "claude"} as strings')
     if (on !== 'claude' && !cfg?.providers?.[on]) {
       const avail = cfg ? Object.keys(cfg.providers).join(', ') : 'none'
       return apiError(res, 400, `unknown provider "${on}" (configured: ${avail})`)
@@ -615,6 +628,10 @@ server.on('error', (e) => {
   log(`server error: ${e.message}`)
   process.exit(1)
 })
+// Every open Claude Code window goes through this one process, so a slip in one request is logged, not fatal
+process.on('uncaughtException', (e) => log(`unexpected error (router kept running): ${e && e.stack ? e.stack : e}`))
+process.on('unhandledRejection', (e) => log(`unexpected rejection (router kept running): ${e && e.stack ? e.stack : e}`))
+
 server.listen(PORT, '127.0.0.1', () => {
   log(`router up on ${server.address().port}, pid ${process.pid}`)
   superviseLaunchers()
@@ -628,12 +645,22 @@ function superviseLaunchers() {
   for (const p of Object.values(cfg.providers)) launchIfDown(p)
 }
 
+// host:port -> { at, waitMs } of the last launch there. Providers that share one gateway start it once, and a gateway
+// that keeps failing to come up is started again after 1, 2, 4… up to 10 minutes instead of every 30 seconds.
+const launches = new Map()
+
 function launchIfDown(p) {
   const l = p.launch
   if (!l || typeof l.command !== 'string' || !P.isLocal(p.url)) return
-  const port = Number(new URL(p.url).port) || 80
-  P.portOpen('127.0.0.1', port, 2000).then((up) => {
-    if (up) return
+  const u = new URL(p.url)
+  const host = u.hostname.replace(/^\[|\]$/g, '')
+  const port = Number(u.port) || 80
+  const key = `${host}:${port}`
+  const last = launches.get(key)
+  if (last && Date.now() - last.at < last.waitMs) return
+  launches.set(key, { at: Date.now(), waitMs: last ? Math.min(600000, last.waitMs * 2) : 60000 }) // claimed before the async probe
+  P.portOpen(host, port, 2000).then((up) => {
+    if (up) return launches.delete(key) // running: the next time it is down, it is started at once
     try {
       const c = require('child_process').spawn(l.command, Array.isArray(l.args) ? l.args : [], { detached: true, stdio: 'ignore', windowsHide: true })
       c.on('error', (e) => log(`launch [${p.name}] failed: ${e.message}`))
