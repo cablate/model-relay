@@ -6,6 +6,10 @@ All notable changes to `model-relay` are documented in this file. Format follows
 
 ## [Unreleased]
 
+## [0.7.3] - 2026-10-22
+
+Tools that Claude Code loads on demand (`WebFetch`, MCP tools and others) work again on third-party providers, so `model-relay:<name>` subagents get their whole toolset back.
+
 ### Fixed
 
 - **Tool search on third-party providers:** `model-relay:<name>` subagents and the main conversation on a third-party provider can use `ToolSearch` again, so tools loaded on demand (`WebFetch`, MCP tools and others) become callable. Before, the router dropped `ToolSearch` and every tool loaded through it, so those tools quietly went missing on subagents since 0.6.0. The router now gives `ToolSearch` another name on the way to the provider (z.ai, for one, replaces a tool called `ToolSearch` with its own and hides the rest) and turns the name back in the answer.

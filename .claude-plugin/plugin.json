@@ -1,6 +1,6 @@
 {
   "name": "model-relay",
-  "version": "0.7.2",
+  "version": "0.7.3",
   "description": "Per-window model switcher, subagent router, and automatic 429 failover for Claude Code — switch any window from the /provider panel, route subagents to any provider, and keep working when quota runs out.",
   "author": { "name": "CabLate" }
 }
