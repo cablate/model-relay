@@ -6,6 +6,10 @@
 
 ## [未發布]
 
+## [0.7.2] - 2026-10-22
+
+每個供應商的 `model-relay:<name>` 子代理現在可以在 `~/.claude/model-relay.json` 調整：寫清楚 Claude 什麼時候該派它，並給它自己的提示詞、工具與 effort。
+
 ### 新增
 
 - **每個供應商的子代理設定（`providers.<name>.agent`）：** 每個供應商的 `model-relay:<name>` 子代理現在可以在 `~/.claude/model-relay.json` 自訂 `description`（Claude 決定派哪個子代理時讀的那一行）、`prompt`、`tools`、`effort`、`maxTurns` 等 agent 定義檔欄位；`name` 與 `model` 一律是該供應商的。
@@ -186,7 +190,8 @@
 
 - **舊版 `custom_agent` 子程序工具：** 移除已棄用的 `claude.exe -p` 子程序包裝程式碼，讓外掛專注於純粹、零額外負擔的 HTTP 模型轉發與對話路由。
 
-[unreleased]: https://github.com/cablate/model-relay/compare/v0.7.1...HEAD
+[unreleased]: https://github.com/cablate/model-relay/compare/v0.7.2...HEAD
+[0.7.2]: https://github.com/cablate/model-relay/compare/v0.7.1...v0.7.2
 [0.7.1]: https://github.com/cablate/model-relay/compare/v0.7.0...v0.7.1
 [0.7.0]: https://github.com/cablate/model-relay/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/cablate/model-relay/compare/v0.5.0...v0.6.0

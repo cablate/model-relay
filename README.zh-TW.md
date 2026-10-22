@@ -154,6 +154,8 @@ node tools/setup.mjs alias subagent sonnet       # 在 settings.json 設定 CLAU
 }
 ```
 
+改了 `agent` 之後，從你的下一則訊息起生效，不用重開 Claude Code。在 Claude Code 2.1.308 實測：主對話是 `bypassPermissions` 時，`permissionMode` 改變不了它；`initialPrompt` 不會套用到 Agent 工具派出的子代理（它是給 `claude --agent` 用的）；`memory` 沒有作用，一般的 `.claude/agents/*.md` 也一樣。
+
 Claude Code 仍可能不聲不響地讓這種子代理跑在別的模型上（不在 `availableModels` 裡的模型會被換掉，只在它的除錯日誌留一行）。外掛會檢查兩次：子代理啟動時，比對 Claude Code 回報它實際用的模型；子代理結束時，比對轉發站真正收到的模型。任何一次不一致都會跳出提示，並指向 `/provider doctor`。
 
 ### 用指令改設定，不必手改 JSON

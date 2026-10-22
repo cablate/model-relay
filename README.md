@@ -154,6 +154,8 @@ Each provider can shape its agent with an `agent` object in `~/.claude/model-rel
 }
 ```
 
+A change to `agent` applies from your next message, without restarting Claude Code. Tested on Claude Code 2.1.308: `permissionMode` cannot loosen or tighten a parent running in `bypassPermissions`; `initialPrompt` is not applied to subagents started by the Agent tool (it is for `claude --agent`); `memory` had no effect, the same as in an ordinary `.claude/agents/*.md` file.
+
 Claude Code can still run such a subagent on another model without saying so (a model missing from `availableModels` is swapped, with a line only in its debug log). The plugin checks twice: when the subagent starts, against the model Claude Code reports it started on, and when it finishes, against the models the router actually received. Either mismatch shows a notice that points to `/provider doctor`.
 
 ### Edit the config from the command line

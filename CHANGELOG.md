@@ -6,6 +6,10 @@ All notable changes to `model-relay` are documented in this file. Format follows
 
 ## [Unreleased]
 
+## [0.7.2] - 2026-10-22
+
+Each provider's `model-relay:<name>` subagent can now be shaped in `~/.claude/model-relay.json`: write when Claude should pick it, and give it its own prompt, tools and effort.
+
 ### Added
 
 - **Per-provider subagent settings (`providers.<name>.agent`):** Each provider's `model-relay:<name>` subagent can now set its own `description` (the line Claude reads when choosing which agent to spawn), `prompt`, `tools`, `effort`, `maxTurns` and the other agent-file fields in `~/.claude/model-relay.json`; `name` and `model` stay the provider's.
@@ -186,7 +190,8 @@ Type `/provider` to open an interactive `AbovePrompt` control panel right above 
 
 - **Legacy child-process `custom_agent` tool:** Removed the deprecated `claude.exe -p` child-process wrapper so the plugin focuses purely on fast, zero-overhead HTTP relay and session routing.
 
-[unreleased]: https://github.com/cablate/model-relay/compare/v0.7.1...HEAD
+[unreleased]: https://github.com/cablate/model-relay/compare/v0.7.2...HEAD
+[0.7.2]: https://github.com/cablate/model-relay/compare/v0.7.1...v0.7.2
 [0.7.1]: https://github.com/cablate/model-relay/compare/v0.7.0...v0.7.1
 [0.7.0]: https://github.com/cablate/model-relay/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/cablate/model-relay/compare/v0.5.0...v0.6.0
