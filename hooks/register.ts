@@ -1,10 +1,20 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
-import type { PanelNote, PanelUi } from '../types'
+import type { AvatarEntry, AvatarView, PanelNote, PanelUi } from '../types'
 import {
+  AVATAR_EMPTY,
+  AVATAR_START,
   CONFIG_NAME,
   OLD_CONFIG_NAME,
   PING_LIMIT_S,
+  avatarArgv,
+  avatarLabel,
+  avatarMade,
+  avatarName,
+  avatarScratch,
+  avatarSource,
+  avatarWanted,
+  base64ToBytes,
   buildPanelData,
   elsewhereText,
   foreignConfigDir,
@@ -23,6 +33,7 @@ import {
   providerAgentSpecs,
   providerAgentOptions,
   providerReport,
+  rasterCells,
   reachedRelay,
   relayAgent,
   routerIsStale,
@@ -42,9 +53,12 @@ import {
   statusText,
   switchedText,
   toggleArgv,
+  type AvatarAim,
+  type AvatarWant,
   type Health,
   type LocalCfg,
 } from './logic'
+import { avatarTree } from './avatar'
 import { panelTree, type PanelActions } from './panel'
 
 const panelUi = atom(
@@ -52,6 +66,10 @@ const panelUi = atom(
   { open: false, confirmingClaude: false, pinging: false } satisfies PanelUi,
 )
 const panelData = atom({ plugin: 'model-relay', key: 'panelData' } as const, null)
+// Change the tag when AvatarView's fields change: a value an earlier version stored outlives a reload
+const avatarView = atom({ plugin: 'model-relay', key: 'avatarView' } as const, AVATAR_EMPTY, { shape: 'avatar-1' })
+const AVATAR_PANE = 'model-relay-avatar'
+const AVATAR_TITLE = 'model-relay avatar'
 
 let ticking = false
 let shownStatus: string | undefined = ''
@@ -71,8 +89,11 @@ let outdatedTold = false // the toast about an older config, once per session
 let knownProviders: Record<string, string> = {}
 // model-relay:<name> subagents started and not finished yet, by agentId: checked against the router when their turn ends
 const pending = new Map<string, { name: string; model: string; since: number }>()
+let avatarEntries: Record<string, AvatarEntry> = {} // the config's "avatars", read each tick
+let avatarAim: AvatarAim = AVATAR_START // what the avatar pane is asked to show; its view catches up
+let avatarBusy = false // a conversion is running: one at a time
 
-const COMMAND_WORDS = ['claude', 'status', 'help', 'ping', 'setup', 'doctor', 'restart', 'failover', 'retry', 'rc', 'alias']
+const COMMAND_WORDS = ['claude', 'status', 'help', 'ping', 'setup', 'doctor', 'restart', 'failover', 'retry', 'rc', 'alias', 'avatar']
 
 async function myVersion($: EngineInterface): Promise<string> {
   if (pluginVersion === null) {
@@ -149,7 +170,10 @@ async function readLocal($: EngineInterface): Promise<LocalCfg | null> {
       cfg = parseLocal(await read(OLD_CONFIG_NAME), true)
     } catch {}
   }
-  if (cfg) statusBar = cfg.statusBar
+  if (cfg) {
+    statusBar = cfg.statusBar
+    avatarEntries = cfg.avatars
+  }
   return cfg
 }
 
@@ -183,6 +207,71 @@ async function showStatus($: EngineInterface, text: string, fields: [string, str
   $.ui.status(shown)
 }
 
+// One avatar view from what is wanted: the pixels from ffmpeg as cells, or a view that says why there are none
+async function makeAvatar($: EngineInterface, want: AvatarWant): Promise<AvatarView> {
+  const view: AvatarView = { ...want, cells: null, error: null }
+  if (!want.entry) return { ...view, error: 'unset' }
+  if (want.cols < 1) return view
+  try {
+    const dir = await configDir($)
+    const out = avatarScratch(dir, await $.session.id())
+    await $.fs.write(out, '') // makes the folder ffmpeg writes into
+    const run = await $.process.run(avatarArgv(avatarSource(dir, want.entry.image), out, want.mode, want.entry.head, want.cols, want.rows), { timeoutMs: 20000 })
+    if (run.exitCode !== 0) return { ...view, error: 'failed' }
+    const rgba = base64ToBytes((await $.fs.read(out, { as: 'bytes' })).base64)
+    await $.fs.write(out, '').catch(() => undefined) // the pixels are held now; one empty file per window stays
+    return rgba.length === want.cols * want.rows * 8 ? { ...view, cells: rasterCells(rgba, want.cols, want.rows) } : { ...view, error: 'failed' }
+  } catch {
+    return { ...view, error: 'failed' }
+  }
+}
+
+// Brings the avatar view up to what is wanted, one conversion at a time. A result is kept only if the wish did not move
+// while ffmpeg ran, and the loop then goes round for the new wish; the pass limit is only a stop for a loop that cannot end.
+async function pumpAvatar($: EngineInterface): Promise<void> {
+  if (avatarBusy) return
+  avatarBusy = true
+  try {
+    for (let pass = 0; pass < 8; pass++) {
+      const have = await read($, avatarView)
+      if (avatarMade(have, avatarWanted(avatarAim, avatarEntries))) return
+      const view = await makeAvatar($, avatarWanted(avatarAim, avatarEntries))
+      if (avatarMade(view, avatarWanted(avatarAim, avatarEntries))) await update($, avatarView, () => view)
+    }
+  } catch {
+  } finally {
+    avatarBusy = false
+  }
+}
+
+// Points the avatar pane at the persona this window talks to now. Until the pane has drawn once there is no body to
+// convert for, and its first draw starts the conversion.
+function followAvatar($: EngineInterface, h: Health | null, foreign = false): void {
+  const name = avatarName(h, foreign)
+  avatarAim = { ...avatarAim, name, label: avatarLabel(name, h?.providers ?? {}) }
+  if (avatarAim.body) void pumpAvatar($)
+}
+
+// The pane's draw is what tells the body its picture goes in
+function sizeAvatar($: EngineInterface, props: { bodyColumns: number; placement: 'dock' | 'inline'; scroll: { bodyRows: number } }): void {
+  avatarAim = { ...avatarAim, body: { placement: props.placement, columns: props.bodyColumns, rows: props.scroll.bodyRows } }
+  void pumpAvatar($)
+}
+
+// /provider avatar closes the pane when it is drawn and opens it otherwise; a command is the person asking, so it is placed at any width
+async function toggleAvatar($: EngineInterface, lang: 'zh' | 'en'): Promise<string> {
+  const en = lang === 'en'
+  if ((await $.ui.panes()).some((p) => p.id === AVATAR_PANE && p.isPlaced)) {
+    avatarAim = { ...avatarAim, body: null }
+    await $.ui.close({ id: AVATAR_PANE })
+    return en ? 'Avatar pane closed.' : '頭像面板已關閉。'
+  }
+  await update($, avatarView, () => AVATAR_EMPTY) // a reopened pane tries again: the image may have changed, or ffmpeg got onto PATH
+  const opened = await $.ui.open({ id: AVATAR_PANE, title: AVATAR_TITLE })
+  if (opened.isPlaced) return en ? 'Avatar pane open.' : '頭像面板已開啟。'
+  return en ? `Avatar pane is open but not drawn yet: ${opened.reason}` : `頭像面板已開啟，但還沒畫出來：${opened.reason}`
+}
+
 async function syncPanelData($: EngineInterface, cfg: LocalCfg, h: Health | null, lang: 'zh' | 'en'): Promise<void> {
   try {
     const ui = await read($, panelUi)
@@ -209,6 +298,7 @@ async function ours($: EngineInterface, cfg: LocalCfg, h: Health, lang: 'zh' | '
   startFailed = false
   await syncProviders($, h.providers)
   await syncPanelData($, cfg, h, lang)
+  followAvatar($, h)
 }
 
 // Keeps the router alive; when it cannot be brought back, this session talks to
@@ -230,6 +320,7 @@ async function tick($: EngineInterface): Promise<void> {
         $.ui.toast(lang === 'en' ? `Port ${cfg.port} belongs to another relay (${other}); connected directly to Claude` : `連接埠 ${cfg.port} 屬於另一個轉發站（${other}），主線直連 Claude`)
       }
       await showStatus($, foreignStatusText(other, lang), statusFields(null, direct, true))
+      followAvatar($, null, true)
       return
     }
     const h = seen
@@ -290,6 +381,7 @@ async function tick($: EngineInterface): Promise<void> {
     }
     await showStatus($, cfg.outdated ? `${statusText(null, direct, lang)} · ${outdatedText(lang)}` : statusText(null, direct, lang), statusFields(null, direct))
     await syncPanelData($, cfg, null, lang)
+    followAvatar($, null)
   } finally {
     ticking = false
   }
@@ -313,7 +405,10 @@ function panelActions($: EngineInterface): PanelActions {
         if (cfg) {
           const lang = await detectLang($)
           const h = await health($, cfg)
-          if (h) await showStatus($, statusText(h, false, lang), statusFields(h, false))
+          if (h) {
+            await showStatus($, statusText(h, false, lang), statusFields(h, false))
+            followAvatar($, h)
+          }
           await syncPanelData($, cfg, h, lang)
         }
         await setPanelNote($, note)
@@ -403,6 +498,7 @@ export const register: Register = (on) => {
   on('session.start', async ($, e, next) => {
     await syncProviders($, {}) // /provider exists even before the router answers; tick adds the providers
     await tick($)
+    if (Object.keys(avatarEntries).length > 0) void $.ui.open({ id: AVATAR_PANE, title: AVATAR_TITLE }).catch(() => undefined)
     $.clock.every(10000, () => {
       void tick($).catch(() => {})
     })
@@ -441,6 +537,19 @@ export const register: Register = (on) => {
       return data
         ? panelTree($.ui.resolve(e), { ...data, ...ui, columns: e.props.bodyColumns }, panelActions($))
         : next(e)
+    } catch {
+      return next(e)
+    }
+  })
+
+  on('ui.render', { component: 'Pane', requestId: AVATAR_PANE }, async ($, e, next) => {
+    try {
+      sizeAvatar($, e.props)
+      const toggleMode = () => {
+        avatarAim = { ...avatarAim, mode: avatarAim.mode === 'full' ? 'head' : 'full' }
+        void pumpAvatar($)
+      }
+      return avatarTree($.ui.resolve(e), await read($, avatarView), e.props.bodyColumns, await detectLang($), { toggleMode })
     } catch {
       return next(e)
     }
@@ -487,6 +596,8 @@ export const register: Register = (on) => {
       return { text: `${cfg.outdated ? `${outdatedText(lang)}\n\n` : ''}${providerReport(await health($, cfg), Date.now(), lang)}` }
     }
 
+    if (arg === 'avatar') return { text: await toggleAvatar($, lang) }
+
     if (arg === 'ping') {
       await $.process.run(pingArgv(cfg, '', win), { timeoutMs: (PING_LIMIT_S + 5) * 1000 }).catch(() => null)
       const h = await health($, cfg)
@@ -527,7 +638,10 @@ export const register: Register = (on) => {
       const out = ((r?.stdout || '') + (r?.stderr || '')).trim()
       const cfgNext = (await readLocal($)) ?? cfg
       const h = await health($, cfgNext)
-      if (h) await showStatus($, statusText(h, false, lang), statusFields(h, false))
+      if (h) {
+        await showStatus($, statusText(h, false, lang), statusFields(h, false))
+        followAvatar($, h)
+      }
       await syncPanelData($, cfgNext, h, lang)
       return { text: out || (lang === 'en' ? 'Setup command did not respond.' : '設定指令沒有回應。') }
     }
@@ -540,7 +654,10 @@ export const register: Register = (on) => {
         return { text: lang === 'en' ? 'Relay did not respond; nothing changed.' : '轉發站沒有回應，沒有改變。' }
       }
       const h = await health($, cfg)
-      if (h) await showStatus($, statusText(h, false, lang), statusFields(h, false))
+      if (h) {
+        await showStatus($, statusText(h, false, lang), statusFields(h, false))
+        followAvatar($, h)
+      }
       await syncPanelData($, cfg, h, lang)
       return { text: switchedText(arg, providers[arg] ?? arg, lang) }
     }

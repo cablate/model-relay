@@ -1,6 +1,20 @@
 import { test } from 'claude-code/testing'
 import {
+  AVATAR_EMPTY,
+  AVATAR_INLINE_ROWS,
+  AVATAR_START,
+  avatarArgv,
+  avatarFilter,
+  avatarLabel,
+  avatarMade,
+  avatarName,
+  avatarScratch,
+  avatarSize,
+  avatarSource,
+  avatarWanted,
+  base64ToBytes,
   buildPanelData,
+  bytesToBase64,
   compareVersions,
   elsewhereText,
   fit,
@@ -11,6 +25,7 @@ import {
   healthHints,
   helpText,
   outdatedText,
+  parseAvatars,
   parseHealth,
   parseLocal,
   pingArgv,
@@ -20,6 +35,7 @@ import {
   providerAgentSpecs,
   providerAgentOptions,
   providerReport,
+  rasterCells,
   reachedRelay,
   relayAgent,
   routerIsStale,
@@ -52,7 +68,7 @@ test('the hook reads only the port, the node path and the status bar switch from
   assert(parseLocal({ port: 80 })!.port === 8950, 'privileged port refused')
   assert(parseLocal({ port: 9001, nodePath: 'C:/n/node.exe' })!.nodePath === 'C:/n/node.exe', 'node path kept')
   assert(parseLocal({})!.statusBar === false && parseLocal({ statusBar: true })!.statusBar === true && parseLocal({ statusBar: 'yes' })!.statusBar === false, 'status bar is opt-in, true only')
-  assert(Object.keys(parseLocal({ port: 9001 })!).sort().join() === 'nodePath,outdated,port,statusBar', 'nothing about providers')
+  assert(Object.keys(parseLocal({ port: 9001 })!).sort().join() === 'avatars,nodePath,outdated,port,statusBar', 'nothing about providers')
   assert(parseLocal({ format: 2 })!.outdated === false, 'format 2 is read')
   assert(parseLocal({ providers: {} })!.outdated && parseLocal({ format: '2' })!.outdated, 'no "format": 2 is an older config')
   assert(parseLocal({ format: 2, port: 9001 }, true)!.outdated && parseLocal({ format: 2, port: 9001 }, true)!.port === 9001, 'the older file name: its port only')
@@ -129,7 +145,7 @@ test('a switch answers in one line, and the command list waits for /provider hel
   assert(ping.includes('test ok 300ms') && !ping.includes('/provider claude') && !ping.includes('Shared by every window'), 'a ping shows only the providers and their tests')
   const help = helpText(['aaa'], 'zh')
   assert(['這個視窗：', '所有視窗共用：', '設定與檢查：'].every((g) => help.includes(g)), 'commands grouped by what they reach')
-  assert(['status', 'ping', 'setup', 'doctor', 'restart', 'failover', 'retry', 'rc', 'alias', 'probe', 'init'].every((c) => help.includes(`/provider ${c}`)) && help.includes('model-relay:aaa'), 'every command and the subagent type')
+  assert(['status', 'avatar', 'ping', 'setup', 'doctor', 'restart', 'failover', 'retry', 'rc', 'alias', 'probe', 'init'].every((c) => help.includes(`/provider ${c}`)) && help.includes('model-relay:aaa'), 'every command and the subagent type')
 })
 
 test('a router with no usable provider, or no failover chain, is shown as such rather than guessed at', () => {
@@ -255,4 +271,113 @@ test('a router left running by an older plugin is stale; a current or newer one 
   assert(!routerIsStale(null, '0.6.1'), 'no router is not stale')
   const p = health({ configDir: '/d', version: '0.6.1', inflight: 2 })
   assert(p.version === '0.6.1' && p.inflight === 2, 'version and inflight are parsed')
+})
+
+test('the avatars in the config are parsed at the boundary: a path or { image, head }, and nothing malformed gets through', () => {
+  const a = parseAvatars({
+    Claude: { image: ' pics/c.webp ', head: [471.4, 200, 340] },
+    aaa: 'pics/a.webp',
+    bbb: { image: 'pics/b.webp', head: [1, 2] },
+    ccc: { image: 'pics/c.webp', head: [10, 20, 0] },
+    ddd: { head: [1, 2, 3] },
+    eee: 5,
+    fff: '',
+    ggg: '  ',
+    hhh: null,
+    iii: { image: 7 },
+    jjj: { image: 'pics/j.webp', head: [1, '2', 3] },
+    '': 'pics/none.webp',
+  })
+  assert(Object.keys(a).sort().join() === 'aaa,bbb,ccc,claude,jjj', 'only entries with a usable image, names lower-cased')
+  assert(a.claude!.image === 'pics/c.webp' && a.claude!.head!.join() === '471,200,340', 'image trimmed, head rounded to whole pixels')
+  assert(a.aaa!.image === 'pics/a.webp' && a.aaa!.head === null, 'a bare path has no head')
+  assert(a.bbb!.head === null && a.ccc!.head === null && a.jjj!.head === null && a.bbb!.image === 'pics/b.webp', 'a bad head is dropped alone, the picture stays')
+  assert(Object.keys(parseAvatars(null)).length + Object.keys(parseAvatars([])).length + Object.keys(parseAvatars('x')).length === 0, 'not an object')
+  const proto = parseAvatars(JSON.parse('{"__proto__":"pics/p.webp"}'))
+  assert(has(proto, '__proto__') && Object.getPrototypeOf(proto) === Object.prototype, 'a name like __proto__ is just a name')
+  assert(Object.keys(parseLocal({})!.avatars).length === 0 && parseLocal({ avatars: { aaa: 'p.png' } })!.avatars.aaa!.image === 'p.png', 'the local config carries them')
+})
+
+test('the avatar follows the persona the status file names, and is Claude whenever no router answers for this window', () => {
+  const h = health({ session: 'claude', providers: { aaa: 'aaa-9', bbb: 'bbb-1' }, failoverProvider: 'bbb', failoverChain: ['bbb'] })
+  assert(avatarName(h) === 'claude', 'a window on Claude')
+  assert(avatarName({ ...h, session: 'aaa' }) === 'aaa', 'pinned to a provider')
+  assert(avatarName({ ...h, failoverSince: 5 }) === 'bbb', 'a Claude limit handed the window to a provider')
+  assert(avatarName({ ...h, session: 'aaa', failoverSince: 5 }) === 'aaa', 'a pin outranks the failover')
+  assert(avatarName({ ...h, failoverSince: 5, failoverProvider: undefined }) === 'claude', 'a limit with nobody to hand over to')
+  assert(avatarName({ ...h, session: 'gone' }) === 'claude', 'a pin the router no longer lists')
+  assert(avatarName(null) === 'claude' && avatarName(h, true) === 'claude' && avatarName({ ...h, session: 'aaa' }, true) === 'claude', 'offline, direct, or another relay on the port')
+  assert(avatarLabel('claude', h.providers) === 'Claude' && avatarLabel('aaa', h.providers) === 'aaa · aaa-9', 'name and model id')
+  assert(avatarLabel('zzz', h.providers) === 'zzz' && avatarLabel('constructor', {}) === 'constructor', 'a name the router does not list is shown as it is')
+})
+
+test('ffmpeg is asked for exactly the box: the whole image fitted inside it, or the head square first', () => {
+  const tail = ',format=rgba,pad=60:60:(ow-iw)/2:(oh-ih)/2:color=0x00000000'
+  assert(avatarFilter('full', null, 60, 30) === `scale=60:60:force_original_aspect_ratio=decrease${tail}`, 'cols wide, twice the rows tall, aspect kept, transparent padding')
+  assert(avatarFilter('head', [471, 200, 340], 60, 30) === `crop=340:340:301:30,scale=60:60:force_original_aspect_ratio=decrease${tail}`, 'the head square, centred on x and y')
+  assert(avatarFilter('head', [100, 50, 340], 60, 30).startsWith('crop=340:340:0:0,'), 'a square that sticks out on the left or top starts at 0')
+  assert(avatarFilter('head', null, 60, 30) === avatarFilter('full', null, 60, 30) && avatarFilter('full', [471, 200, 340], 60, 30) === avatarFilter('full', null, 60, 30), 'no head square, or the whole picture asked for: the full filter')
+  const argv = avatarArgv('/c/pics/a.webp', '/c/out.rgba', 'full', null, 6, 3)
+  assert(argv[0] === 'ffmpeg' && argv[argv.indexOf('-i') + 1] === '/c/pics/a.webp' && argv[argv.indexOf('-vf') + 1] === avatarFilter('full', null, 6, 3), 'input and filter')
+  assert(argv.slice(argv.indexOf('-frames:v')).join(' ') === '-frames:v 1 -f rawvideo -pix_fmt rgba /c/out.rgba', 'one raw RGBA frame, even from an animated image, into the output file')
+})
+
+test('the picture box fills the pane body less the rows under it, within the caps; inline above the prompt stays short', () => {
+  assert(JSON.stringify(avatarSize('dock', 40, 30, 2)) === '{"cols":40,"rows":28}', 'body less the label and the switch')
+  assert(JSON.stringify(avatarSize('dock', 300, 300, 1)) === '{"cols":160,"rows":100}', 'the caps')
+  assert(JSON.stringify(avatarSize('inline', 40, 30, 1)) === `{"cols":40,"rows":${AVATAR_INLINE_ROWS}}`, 'inline')
+  assert(JSON.stringify(avatarSize('dock', 40.9, 30.9, 1)) === '{"cols":40,"rows":29}', 'whole cells')
+  const none = '{"cols":0,"rows":0}'
+  assert(JSON.stringify(avatarSize('dock', 40, 2, 2)) === none && JSON.stringify(avatarSize('inline', 0, 30, 1)) === none && JSON.stringify(avatarSize('dock', Number.NaN, 30, 1)) === none, 'nothing fits: no box, never a negative one')
+})
+
+test('image paths resolve against the config dir, and each window converts into a file of its own', () => {
+  assert(avatarSource('/c', 'pics/a.webp') === '/c/pics/a.webp' && avatarSource('/c', 'C:\\pics\\a.webp') === 'C:/pics/a.webp' && avatarSource('/c', '/pics/a.webp') === '/pics/a.webp', 'relative, drive path, root path')
+  assert(avatarScratch('/c', 'ab-12') === '/c/model-relay-avatars/.cache/ab-12.rgba', 'one file per session id')
+  assert(!avatarScratch('/c', '../x').includes('..') && avatarScratch('/c', '').endsWith('/window.rgba'), 'a session id cannot name a path')
+})
+
+test('a view counts as made only from exactly what is wanted now, down to the config entry', () => {
+  const entries = parseAvatars({ aaa: { image: 'a.png', head: [5, 5, 4] } })
+  const body = { placement: 'dock' as const, columns: 10, rows: 6 }
+  const aim = { ...AVATAR_START, name: 'aaa', label: 'aaa · m', mode: 'head' as const, body }
+  const want = avatarWanted(aim, entries)
+  assert(want.mode === 'head' && want.entry?.image === 'a.png', 'a persona with a head square can show it')
+  assert(want.cols === 10 && want.rows === 4, 'the label and the mode switch take two of the six rows')
+  assert(avatarWanted({ ...aim, name: 'bbb' }, entries).rows === 5 && avatarWanted(AVATAR_START, entries).cols === 0, 'one row for the label alone; no box before the pane has drawn')
+  const made = { ...want, cells: 'AAAA', error: null }
+  assert(avatarMade(made, want) && !avatarMade(AVATAR_EMPTY, want), 'made from this, not from nothing')
+  assert(!avatarMade(made, avatarWanted({ ...aim, body: { ...body, columns: 11 } }, entries)) && !avatarMade(made, avatarWanted({ ...aim, mode: 'full' }, entries)) && !avatarMade(made, avatarWanted({ ...aim, label: 'aaa · n' }, entries)), 'another size, mode or label')
+  assert(!avatarMade(made, avatarWanted(aim, parseAvatars({ aaa: { image: 'b.png', head: [5, 5, 4] } }))), 'an edited config entry')
+  assert(avatarWanted({ ...aim, name: 'bbb' }, entries).entry === null && avatarWanted(aim, parseAvatars({ aaa: 'a.png' })).mode === 'full', 'no entry, or an entry without a head square: the whole picture, whatever the preference')
+})
+
+test('two pixels make one half-block cell, and a see-through pixel is the terminal default, never a painted half', () => {
+  const words = (rgba: number[], cols: number, rows: number) => {
+    const bytes = base64ToBytes(rasterCells(Uint8Array.from(rgba), cols, rows))
+    const view = new DataView(bytes.buffer)
+    return Array.from({ length: bytes.length / 4 }, (_, i) => view.getUint32(i * 4, true))
+  }
+  const red = [255, 0, 0, 255]
+  const blue = [0, 0, 255, 255]
+  const hex = (w: number[]) => w.map((x) => x.toString(16)).join(' ')
+  assert(hex(words([...red, ...blue], 1, 1)) === '2580 ff0000 ff', 'upper pixel is the foreground of the upper half block, lower the background')
+  assert(Array.from(base64ToBytes(rasterCells(Uint8Array.from([...red, ...blue]), 1, 1))).join() === '128,37,0,0,0,0,255,0,255,0,0,0', 'little-endian u32 triplets')
+  assert(hex(words([...red, 9, 9, 9, 0], 1, 1)) === '2580 ff0000 1000000', 'a clear lower pixel is the default background')
+  assert(hex(words([9, 9, 9, 127, ...blue], 1, 1)) === '2584 ff 1000000', 'a clear upper pixel makes a lower half block: an upper one would paint the text color there')
+  assert(hex(words([9, 9, 9, 128, ...blue], 1, 1)) === '2580 90909 ff', 'half opaque counts as a pixel')
+  assert(hex(words([1, 2, 3, 0, 4, 5, 6, 0], 1, 1)) === '20 1000000 1000000', 'nothing in either half: a blank')
+  assert(hex(words([...red, 0, 255, 0, 255, ...blue, 255, 255, 255, 255], 2, 1)) === '2580 ff0000 ff 2580 ff00 ffffff', 'rows of pixels pair up per column, cells run left to right')
+  assert(words(Array.from({ length: 4 * 4 }, (_, i) => (i % 4 === 3 ? 255 : i)), 1, 2).length === 6, 'a cell per two pixel rows')
+})
+
+test('base64 matches the standard encoding both ways, padding included', () => {
+  const text = (s: string) => Uint8Array.from(Array.from(s, (c) => c.charCodeAt(0)))
+  assert(bytesToBase64(text('Many hands make light work.')) === 'TWFueSBoYW5kcyBtYWtlIGxpZ2h0IHdvcmsu', 'no padding')
+  assert(bytesToBase64(text('Ma')) === 'TWE=' && bytesToBase64(text('M')) === 'TQ==' && bytesToBase64(new Uint8Array(0)) === '', 'padding')
+  for (const n of [0, 1, 2, 3, 4, 5, 255, 256]) {
+    const bytes = Uint8Array.from({ length: n }, (_, i) => (i * 37 + 11) & 255)
+    assert(base64ToBytes(bytesToBase64(bytes)).join() === bytes.join(), `${n} bytes survive the round trip`)
+  }
+  assert(base64ToBytes('TWE=').join() === '77,97' && base64ToBytes('TQ').join() === '77', 'padded or not')
 })

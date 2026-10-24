@@ -47,11 +47,35 @@ export type PanelUi = {
   note?: PanelNote
 }
 
+// One persona's picture from the config's "avatars": the image path as written, and the square of it that is the head
+// (centre x, centre y, side, in source pixels) when the config gives one
+export type AvatarEntry = { image: string; head: [number, number, number] | null }
+
+// full: the whole image fitted into the box; head: the head square fitted into it
+export type AvatarMode = 'full' | 'head'
+
+// unset: the persona has no entry in "avatars"; failed: ffmpeg or the image did not give pixels
+export type AvatarError = 'unset' | 'failed'
+
+// What the avatar pane draws: the last finished conversion, with everything it was made from, so what is drawn always
+// belongs together. cells (cols x rows, packed as a Raster's) is null while there is none or when it could not be made.
+export type AvatarView = {
+  name: string // 'claude' or a provider name
+  label: string // provider name and model id
+  entry: AvatarEntry | null
+  mode: AvatarMode
+  cols: number
+  rows: number
+  cells: string | null
+  error: AvatarError | null
+}
+
 declare module 'claude-code' {
   interface PluginState {
     'model-relay': {
       panelUi: PanelUi
       panelData: PanelData | null
+      avatarView: Shaped<AvatarView>
     }
   }
 }

@@ -1,4 +1,4 @@
-import type { PanelData, PingStat, ProviderStat } from '../types'
+import type { AvatarEntry, AvatarMode, AvatarView, PanelData, PingStat, ProviderStat } from '../types'
 
 // What the hook takes from the config file: where the router listens and which node runs it. Providers, aliases and the
 // failover chain come from the router's /__health only, so the plugin never second-guesses how the router reads a config.
@@ -6,11 +6,13 @@ import type { PanelData, PingStat, ProviderStat } from '../types'
 // file name); the hook then starts and replaces no router, so a router that still reads it keeps working until migrate
 // statusBar: also draw the relay state in Claude Code's plugin status line ("statusBar": true); off by default, since
 // the per-session status file (statusFields) lets a statusline tool show it instead
+// avatars: the pictures of the avatar pane, by persona (parseAvatars); the router ignores the key
 export interface LocalCfg {
   port: number
   nodePath: string
   outdated: boolean
   statusBar: boolean
+  avatars: Record<string, AvatarEntry>
 }
 
 export const CONFIG_NAME = 'model-relay.json'
@@ -23,7 +25,7 @@ export function parseLocal(raw: unknown, oldName = false): LocalCfg | null {
   const r = raw as Record<string, unknown>
   const port = typeof r.port === 'number' && Number.isInteger(r.port) && r.port > 1024 && r.port < 65536 ? r.port : 8950
   const nodePath = typeof r.nodePath === 'string' && r.nodePath.length > 0 ? r.nodePath : 'node'
-  return { port, nodePath, outdated: oldName || r.format !== 2, statusBar: r.statusBar === true }
+  return { port, nodePath, outdated: oldName || r.format !== 2, statusBar: r.statusBar === true, avatars: parseAvatars(r.avatars) }
 }
 
 // The agent fields a provider's "agent" object in the config may set, with the shape each must have; `name` and `model`
@@ -402,6 +404,155 @@ export function statusFile(configDir: string, sid: string, fields: [string, stri
   return { path: `${configDir}/model-relay-status/${sid}`, line: `${clean(fields[0])}\t${clean(fields[1])}\n` }
 }
 
+// ---- avatar pane ----
+
+const isNum = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v)
+
+// The head square of an avatar entry, [centre x, centre y, side] in whole source pixels; null for anything else
+function parseHead(v: unknown): [number, number, number] | null {
+  if (!Array.isArray(v) || v.length !== 3 || !v.every(isNum)) return null
+  const [x, y, side] = v.map(Math.round) as [number, number, number]
+  return x >= 0 && y >= 0 && side > 0 ? [x, y, side] : null
+}
+
+// The config's "avatars": a persona name (claude or a provider, lower case like the router's) to an image path, or to
+// { image, head }. An entry without a usable image is dropped; a head that is not three numbers is dropped alone, so the
+// picture still shows.
+export function parseAvatars(raw: unknown): Record<string, AvatarEntry> {
+  if (!isObj(raw)) return {}
+  const entries: [string, AvatarEntry][] = []
+  for (const [key, v] of Object.entries(raw)) {
+    const name = key.trim().toLowerCase()
+    const image = typeof v === 'string' ? v : isObj(v) ? v.image : undefined
+    if (!name || typeof image !== 'string' || !image.trim()) continue
+    entries.push([name, { image: image.trim(), head: isObj(v) ? parseHead(v.head) : null }])
+  }
+  return Object.fromEntries(entries)
+}
+
+// The persona of this window for the avatar pane, by statusFields' rules: the pinned provider, else the one a Claude
+// limit handed the window to, else Claude (also with no router answering for it)
+export function avatarName(h: Health | null, foreign = false): string {
+  if (foreign || !h) return 'claude'
+  if (h.session !== 'claude' && has(h.providers, h.session)) return h.session
+  if (h.failoverSince && h.failoverProvider) return h.failoverProvider
+  return 'claude'
+}
+
+export function avatarLabel(name: string, providers: Record<string, string>): string {
+  if (name === 'claude') return 'Claude'
+  return has(providers, name) ? `${name} · ${providers[name]}` : name
+}
+
+// What the avatar pane is asked to show: the persona, the person's mode preference, and the pane body the picture goes in
+// (null until the pane has drawn once). The view's own mode is what was made, which is full for a persona with no head square.
+export type AvatarBody = { placement: 'dock' | 'inline'; columns: number; rows: number }
+export type AvatarAim = { name: string; label: string; mode: AvatarMode; body: AvatarBody | null }
+export type AvatarWant = Omit<AvatarView, 'cells' | 'error'>
+
+export const AVATAR_START: AvatarAim = { name: 'claude', label: 'Claude', mode: 'full', body: null }
+export const AVATAR_EMPTY: AvatarView = { name: '', label: '', entry: null, mode: 'full', cols: 0, rows: 0, cells: null, error: null }
+
+// The picture's box in cells: as wide as the pane's body and as tall as it leaves after the rows under the picture (the
+// label, and the mode switch when there is a head square). A Raster cell is one pixel wide and two tall, so the box is
+// cols x 2*rows pixels. Inline above the prompt it stays short, to leave the transcript its room. 0 x 0 when nothing fits.
+export const AVATAR_MAX_COLS = 160
+export const AVATAR_MAX_ROWS = 100
+export const AVATAR_INLINE_ROWS = 12
+
+export const avatarLabelRows = (hasHead: boolean): number => (hasHead ? 2 : 1)
+
+export function avatarSize(placement: 'dock' | 'inline', bodyColumns: number, bodyRows: number, labelRows: number): { cols: number; rows: number } {
+  const cols = Math.min(Math.floor(bodyColumns), AVATAR_MAX_COLS)
+  const rows = Math.min(Math.floor(bodyRows) - labelRows, placement === 'inline' ? AVATAR_INLINE_ROWS : AVATAR_MAX_ROWS)
+  return cols >= 1 && rows >= 1 ? { cols, rows } : { cols: 0, rows: 0 }
+}
+
+export function avatarWanted(aim: AvatarAim, entries: Record<string, AvatarEntry>): AvatarWant {
+  const entry = has(entries, aim.name) ? entries[aim.name]! : null
+  const { body } = aim
+  const size = body ? avatarSize(body.placement, body.columns, body.rows, avatarLabelRows(Boolean(entry?.head))) : { cols: 0, rows: 0 }
+  return { name: aim.name, label: aim.label, entry, mode: aim.mode === 'head' && entry?.head ? 'head' : 'full', ...size }
+}
+
+// A view is current when it was made from exactly what is wanted now, config entry included
+export const avatarMade = (v: AvatarView, w: AvatarWant): boolean =>
+  JSON.stringify([v.name, v.label, v.entry, v.mode, v.cols, v.rows]) === JSON.stringify([w.name, w.label, w.entry, w.mode, w.cols, w.rows])
+
+// Config paths are relative to the config directory unless they start from a root
+export function avatarSource(configDir: string, image: string): string {
+  const path = image.replace(/\\/g, '/')
+  return /^([A-Za-z]:)?\//.test(path) ? path : `${configDir}/${path}`
+}
+
+// One scratch file per window, so two windows converting at once never share an output
+export const avatarScratch = (configDir: string, sid: string): string => `${configDir}/model-relay-avatars/.cache/${sid.replace(/[^A-Za-z0-9_-]/g, '_') || 'window'}.rgba`
+
+// The video filter that makes the box's pixels: the head square first when asked for, then the image fitted inside the
+// box, never cropped, with transparent padding
+export function avatarFilter(mode: AvatarMode, head: [number, number, number] | null, cols: number, rows: number): string {
+  const [w, h] = [cols, rows * 2]
+  const crop = mode === 'head' && head ? `crop=${head[2]}:${head[2]}:${Math.max(0, Math.round(head[0] - head[2] / 2))}:${Math.max(0, Math.round(head[1] - head[2] / 2))},` : ''
+  return `${crop}scale=${w}:${h}:force_original_aspect_ratio=decrease,format=rgba,pad=${w}:${h}:(ow-iw)/2:(oh-ih)/2:color=0x00000000`
+}
+
+// ffmpeg writes one raw RGBA frame of cols x 2*rows pixels to `out`
+export function avatarArgv(input: string, out: string, mode: AvatarMode, head: [number, number, number] | null, cols: number, rows: number): string[] {
+  return ['ffmpeg', '-v', 'error', '-y', '-i', input, '-vf', avatarFilter(mode, head, cols, rows), '-frames:v', '1', '-f', 'rawvideo', '-pix_fmt', 'rgba', out]
+}
+
+const B64 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'
+
+// Standard padded base64, written out because the engine's environment and plain Node do not share a built-in for it
+export function bytesToBase64(bytes: Uint8Array): string {
+  let out = ''
+  for (let i = 0; i < bytes.length; i += 3) {
+    const n = (bytes[i]! << 16) | ((bytes[i + 1] ?? 0) << 8) | (bytes[i + 2] ?? 0)
+    out += B64[(n >> 18) & 63]! + B64[(n >> 12) & 63]! + (i + 1 < bytes.length ? B64[(n >> 6) & 63]! : '=') + (i + 2 < bytes.length ? B64[n & 63]! : '=')
+  }
+  return out
+}
+
+export function base64ToBytes(text: string): Uint8Array {
+  const clean = text.replace(/[^A-Za-z0-9+/]/g, '')
+  const out = new Uint8Array(Math.floor((clean.length * 3) / 4))
+  let acc = 0
+  let bits = 0
+  let at = 0
+  for (const ch of clean) {
+    acc = (acc << 6) | B64.indexOf(ch)
+    bits += 6
+    if (bits >= 8) {
+      bits -= 8
+      out[at++] = (acc >> bits) & 255
+      acc &= (1 << bits) - 1
+    }
+  }
+  return out
+}
+
+const CELL_DEFAULT = 0x01000000
+
+// RGBA pixels (cols wide, 2*rows tall) as a Raster's cells: each cell is two pixels, the upper as the foreground of ▀
+// and the lower as its background. A pixel under half opaque is the terminal's default color; since the foreground of a
+// ▀ whose upper half is transparent would paint the terminal's text color, that cell is a ▄ carrying the lower pixel, and
+// one with neither pixel is a space.
+export function rasterCells(rgba: Uint8Array, cols: number, rows: number): string {
+  const view = new DataView(new ArrayBuffer(cols * rows * 12))
+  const pixel = (x: number, y: number): number | null => {
+    const i = (y * cols + x) * 4
+    return (rgba[i + 3] ?? 0) < 128 ? null : ((rgba[i] ?? 0) << 16) | ((rgba[i + 1] ?? 0) << 8) | (rgba[i + 2] ?? 0)
+  }
+  for (let y = 0; y < rows; y++) {
+    for (let x = 0; x < cols; x++) {
+      const [up, down] = [pixel(x, 2 * y), pixel(x, 2 * y + 1)]
+      const cell = up !== null ? [0x2580, up, down ?? CELL_DEFAULT] : down !== null ? [0x2584, down, CELL_DEFAULT] : [0x20, CELL_DEFAULT, CELL_DEFAULT]
+      cell.forEach((word, k) => view.setUint32((y * cols + x) * 12 + k * 4, word, true))
+    }
+  }
+  return bytesToBase64(new Uint8Array(view.buffer))
+}
+
 export function fmtLatency(ms: number): string {
   return ms >= 1000 ? `${(ms / 1000).toFixed(1)}s` : `${ms}ms`
 }
@@ -524,6 +675,7 @@ export function helpText(providers: string[], lang: 'zh' | 'en' = 'zh'): string 
       ['/provider', en ? "Open the panel to switch this window's model" : '開啟面板，切換這個視窗的模型'],
       ['/provider <name> | claude', en ? 'Switch this window directly (e.g. /provider claude)' : '直接切換這個視窗（例：/provider claude）'],
       ['/provider status', en ? 'The same status as text' : '文字版狀態'],
+      ['/provider avatar', en ? "Show or hide the picture of this window's model (config key avatars)" : '開關這個視窗模型的頭像面板（設定檔的 avatars）'],
     ]],
     [en ? 'Shared by every window:' : '所有視窗共用：', [
       ['/provider failover <on|off|a,b>', en ? 'Turn 429 failover on or off, or set who takes over' : '開關 429 備援或設定接手順序'],

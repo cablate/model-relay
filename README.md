@@ -191,13 +191,14 @@ node tools/setup.mjs rc
 
 ## Configuration
 
-Configuration lives in `~/.claude/model-relay.json`. The directory defaults to `$CLAUDE_CONFIG_DIR` when set, falling back to `$USERPROFILE/.claude` or `$HOME/.claude`. [`model-relay.example.json`](model-relay.example.json) shows a provider from a preset and a local gateway.
+Configuration lives in `~/.claude/model-relay.json`. The directory defaults to `$CLAUDE_CONFIG_DIR` when set, falling back to `$USERPROFILE/.claude` or `$HOME/.claude`. [`model-relay.example.json`](model-relay.example.json) shows a provider from a preset, a local gateway and avatar pictures.
 
 | Field | Default | Meaning |
 |---|---|---|
 | `format` | (none) | `2` for a config in the current format (`init`, `add` and `migrate --go` set it), the only format the router reads. A file without it, or one named `custom-agent.json`, is an older config: until `migrate --go` rewrites it, the plugin starts and replaces no router for it, so a 0.6 router still running keeps using it, and with none answering the session talks to Claude directly. The plugin says so in a notice, the panel and, with `statusBar` on, the status line; see [UPGRADING.md](UPGRADING.md) |
 | `port` | `8950` | Localhost port for the relay HTTP server (`1025`–`65535`). Change it with `node tools/setup.mjs set port <n>`, which also updates `settings.json`; the router already running keeps the old port until you stop it (the command prints its pid), and it refuses a port that already answers |
 | `statusBar` | `false` | Also show the relay state in Claude Code's plugin status line, the yellow line above the input. Off by default: each window's state is written to a status file for your own statusline instead (see below). Notices about upgrades and outages still appear as toasts |
+| `avatars` | (none) | The pictures for the avatar pane (see below): a persona name mapped to an image path or `{ "image", "head" }`. The plugin reads it; the router ignores it |
 | `claudeUrl` | `"https://api.anthropic.com"` | Upstream Anthropic API base URL |
 | `idleTimeoutMs` | `300000` | How long an upstream may send nothing before the request counts as failed and follows the retry and failover rules (`1000`–`3600000`); a streaming answer that keeps sending data is never cut |
 | `proxy.enabled` | `false` | Accept HTTPS-proxy connections for Remote Control. Off by default. When on, a `CONNECT` to any host other than `api.anthropic.com` is a blind tunnel that any local process can use; `node tools/setup.mjs proxy enable --go` turns it on and `proxy disable --go` off |
@@ -237,6 +238,23 @@ Each window writes its relay state to `~/.claude/model-relay-status/<session id>
 
 [coralline](https://github.com/Nanako0129/coralline)'s `relay` segment reads this file.
 
+### Show the model's picture in a pane
+
+Add `avatars` and the plugin draws the picture of the model this window is talking to in a side pane, swapping it when you switch with `/provider <name>`, when a Claude limit hands the window to a provider, and when it goes back to Claude. It is drawn with colored half-block characters, so it also works in terminals without an image protocol, such as Windows Terminal. It needs `ffmpeg` on `PATH`.
+
+```json
+"avatars": {
+  "claude": { "image": "model-relay-avatars/claude.webp", "head": [471, 200, 340] },
+  "backup": "model-relay-avatars/backup.webp"
+}
+```
+
+- A key is `claude` or a provider's name. A value is an image path, relative to the config directory unless it starts from a root, or `{ "image", "head" }`. `head` is the square that holds the head: `[centerX, centerY, size]` in the image's own pixels.
+- With `head` set, a button in the pane switches between the whole picture, fitted into the pane, and the head square. A persona with no entry shows its name and the key to add.
+- The pane opens at the start of a session when `avatars` is set and the terminal is wide enough, and `/provider avatar` opens and closes it at any width. Close and reopen it after you change an image file.
+- Each conversion writes its pixels to `model-relay-avatars/.cache/<session id>.rgba` in the config directory and empties the file when it is done; the folder is safe to delete.
+- The repository ships no pictures; use only images you may use.
+
 ## Commands
 
 | Command | Description |
@@ -244,6 +262,7 @@ Each window writes its relay state to `~/.claude/model-relay-status/<session id>
 | `/provider` | Open the panel above the prompt to pick this window's model |
 | `/provider <name>` · `/provider claude` | Switch this window without the panel, answered in one line (e.g. `/provider backup`); back to Claude, the next turn rebuilds the prompt cache |
 | `/provider status` | The status as text: where this window goes, the switches every window shares, and anything to fix |
+| `/provider avatar` | Open or close the pane with the picture of this window's model (needs `avatars` in the config and `ffmpeg`) |
 | `/provider help` | Every command, grouped by what it reaches: this window, every window, setup and checks |
 | `/provider setup [goal]` | Let Claude walk you through setup with the setup tool; keys stay out of the chat |
 | `/provider init` · `/provider doctor [--ping] [--fix]` | First-run setup and health check; `doctor` only reports unless you add `--fix`, which applies the repairs it can make itself. Work from any folder, with or without a config file |

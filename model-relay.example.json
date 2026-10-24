@@ -21,5 +21,9 @@
       "authHeader": "bearer",
       "launch": { "command": "my-gateway", "args": ["serve", "--port", "4000"] }
     }
+  },
+  "avatars": {
+    "claude": { "image": "model-relay-avatars/claude.webp", "head": [471, 200, 340] },
+    "backup": "model-relay-avatars/backup.webp"
   }
 }
