@@ -6,6 +6,10 @@ All notable changes to `model-relay` are documented in this file. Format follows
 
 ## [Unreleased]
 
+## [0.7.5] - 2026-10-24
+
+A window switched to a provider can call MCP tools that reconnected mid-session again, and an experimental pane can show the picture of the model you are talking to.
+
 ### Added
 
 - **Experimental, a picture of the model beside the chat:** Add `avatars` to `model-relay.json` and a side pane draws the picture of the model this window is talking to, swapping it when you switch with `/provider <name>`, when a Claude limit hands the window to a provider, and when it goes back to Claude. It is off by default: `/provider avatar on` turns it on for every window, and `/provider avatar` alone opens or closes it in this window. It needs `ffmpeg` on `PATH`, and it is left out of `/provider help`. See the README.
@@ -231,7 +235,10 @@ Type `/provider` to open an interactive `AbovePrompt` control panel right above 
 
 - **Legacy child-process `custom_agent` tool:** Removed the deprecated `claude.exe -p` child-process wrapper so the plugin focuses purely on fast, zero-overhead HTTP relay and session routing.
 
-[unreleased]: https://github.com/cablate/model-relay/compare/v0.7.2...HEAD
+[unreleased]: https://github.com/cablate/model-relay/compare/v0.7.5...HEAD
+[0.7.5]: https://github.com/cablate/model-relay/compare/v0.7.4...v0.7.5
+[0.7.4]: https://github.com/cablate/model-relay/compare/v0.7.3...v0.7.4
+[0.7.3]: https://github.com/cablate/model-relay/compare/v0.7.2...v0.7.3
 [0.7.2]: https://github.com/cablate/model-relay/compare/v0.7.1...v0.7.2
 [0.7.1]: https://github.com/cablate/model-relay/compare/v0.7.0...v0.7.1
 [0.7.0]: https://github.com/cablate/model-relay/compare/v0.6.0...v0.7.0

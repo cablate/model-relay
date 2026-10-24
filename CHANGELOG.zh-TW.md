@@ -6,6 +6,10 @@
 
 ## [未發布]
 
+## [0.7.5] - 2026-10-24
+
+切到供應商的視窗，又能叫用對話中途重新連上的 MCP 工具；另有實驗性的面板，可以顯示你正在對話的模型頭像。
+
 ### 新增
 
 - **實驗性：聊天旁的模型頭像：** 在 `model-relay.json` 加上 `avatars`，側邊面板就會畫出這個視窗正在對話的模型頭像，並在你用 `/provider <name>` 切換、Claude 額度用完交給供應商、或切回 Claude 時換圖。預設關閉：`/provider avatar on` 替所有視窗打開，只打 `/provider avatar` 則開關這個視窗的面板。需要 `ffmpeg` 在 `PATH` 上，也沒有列在 `/provider help` 裡。細節見 README。
@@ -231,7 +235,10 @@
 
 - **舊版 `custom_agent` 子程序工具：** 移除已棄用的 `claude.exe -p` 子程序包裝程式碼，讓外掛專注於純粹、零額外負擔的 HTTP 模型轉發與對話路由。
 
-[unreleased]: https://github.com/cablate/model-relay/compare/v0.7.2...HEAD
+[unreleased]: https://github.com/cablate/model-relay/compare/v0.7.5...HEAD
+[0.7.5]: https://github.com/cablate/model-relay/compare/v0.7.4...v0.7.5
+[0.7.4]: https://github.com/cablate/model-relay/compare/v0.7.3...v0.7.4
+[0.7.3]: https://github.com/cablate/model-relay/compare/v0.7.2...v0.7.3
 [0.7.2]: https://github.com/cablate/model-relay/compare/v0.7.1...v0.7.2
 [0.7.1]: https://github.com/cablate/model-relay/compare/v0.7.0...v0.7.1
 [0.7.0]: https://github.com/cablate/model-relay/compare/v0.6.0...v0.7.0
