@@ -10,6 +10,10 @@ All notable changes to `model-relay` are documented in this file. Format follows
 
 - **Experimental, a picture of the model beside the chat:** Add `avatars` to `model-relay.json` and a side pane draws the picture of the model this window is talking to, swapping it when you switch with `/provider <name>`, when a Claude limit hands the window to a provider, and when it goes back to Claude. It is off by default: `/provider avatar on` turns it on for every window, and `/provider avatar` alone opens or closes it in this window. It needs `ffmpeg` on `PATH`, and it is left out of `/provider help`. See the README.
 
+### Fixed
+
+- **A provider now sees tools an MCP server brought back mid-session:** when an MCP server reconnects, Claude Code announces its tools in system messages (`tool_addition`, `tool_removal`) rather than in the tool list. Anthropic applies them; other providers ignored them, so a window switched to a provider could not call those tools at all (seen with a cc-agent agent on glm, whose web-reply tools vanished). The router now applies them to the tool list before the request leaves.
+
 ## [0.7.4] - 2026-10-22
 
 The router stays up and answers when a config value is wrong or a provider stalls, and `/provider doctor` no longer changes anything unless you ask it to.

@@ -10,6 +10,10 @@
 
 - **實驗性：聊天旁的模型頭像：** 在 `model-relay.json` 加上 `avatars`，側邊面板就會畫出這個視窗正在對話的模型頭像，並在你用 `/provider <name>` 切換、Claude 額度用完交給供應商、或切回 Claude 時換圖。預設關閉：`/provider avatar on` 替所有視窗打開，只打 `/provider avatar` 則開關這個視窗的面板。需要 `ffmpeg` 在 `PATH` 上，也沒有列在 `/provider help` 裡。細節見 README。
 
+### 修正
+
+- **對話中途重新連上的 MCP 工具，供應商也看得到了：** MCP server 重新連線時，Claude Code 會把它的工具寫在對話裡的系統訊息（`tool_addition`、`tool_removal`），不放進工具清單。Anthropic 會照著套用，其他供應商不認得，所以切到供應商的視窗完全叫不到這些工具（cc-agent 員工切到 glm 後，回覆網頁的工具全部消失）。現在轉發站會先把它們套進工具清單再送出。
+
 ## [0.7.4] - 2026-10-22
 
 設定值寫錯或供應商卡住時，轉發站會繼續運作並回應；`/provider doctor` 也不再自己改設定，除非你要求。
