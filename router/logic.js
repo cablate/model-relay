@@ -462,6 +462,30 @@ function adaptToolSearch(j) {
   return { aliased: j.tools.some((t) => t && t.name === SEARCH_ALIAS) }
 }
 
+// Claude Code announces tools that arrive or go mid-session (an MCP server that reconnected) as tool_addition and
+// tool_removal blocks in system messages, not in tools[]. Anthropic applies them in order; no other provider does, so
+// they are applied here: tools[] ends up as the session's tools stand now, and the blocks leave the messages, along
+// with any system message they leave empty. Rewrites j in place; whether anything changed.
+function applyToolChanges(j) {
+  if (!Array.isArray(j.messages)) return false
+  const isChange = (b) => b && (b.type === 'tool_addition' || b.type === 'tool_removal')
+  if (!j.messages.some((m) => Array.isArray(m && m.content) && m.content.some(isChange))) return false
+  const tools = new Map((Array.isArray(j.tools) ? j.tools : []).map((t) => [t && t.name, t]))
+  for (const m of j.messages) {
+    for (const b of Array.isArray(m && m.content) ? m.content : []) {
+      if (b && b.type === 'tool_addition' && isObj(b.tool && b.tool.definition)) tools.set(b.tool.definition.name, b.tool.definition)
+      if (b && b.type === 'tool_removal' && b.tool) tools.delete(b.tool.name)
+    }
+  }
+  j.tools = [...tools.values()]
+  j.messages = j.messages.flatMap((m) => {
+    if (!Array.isArray(m && m.content) || !m.content.some(isChange)) return [m]
+    const content = m.content.filter((b) => !isChange(b))
+    return content.length ? [{ ...m, content }] : []
+  })
+  return true
+}
+
 // A provider's answer with its calls to the alias named ToolSearch again; works line by line, so a name cut across two
 // chunks is still found, and decodes UTF-8 as a stream so a character cut across two chunks stays whole
 function toolSearchRestorer() {
@@ -495,11 +519,12 @@ function rewriteBody(bodyBuf, opts = {}) {
   const noCache = Boolean(opts.stripCacheControl)
   const j = JSON.parse(bodyBuf.toString('utf8'))
   if (noCache) stripCache(j)
+  const changedTools = applyToolChanges(j)
   const search = adaptToolSearch(j)
   const restoreToolSearch = Boolean(search && search.aliased)
   const targetModel = model || (defaultModel && isClaudeModel(j.model) ? defaultModel : null)
   const strippedSame = !targetModel && typeof j.model === 'string' && wireModel(j.model) !== j.model ? wireModel(j.model) : null
-  if (!targetModel && !strippedSame && !search && !noCache) return { body: bodyBuf, restoreToolSearch }
+  if (!targetModel && !strippedSame && !search && !noCache && !changedTools) return { body: bodyBuf, restoreToolSearch }
   if (targetModel) j.model = wireModel(targetModel)
   else if (strippedSame) j.model = strippedSame
   return { body: Buffer.from(JSON.stringify(j), 'utf8'), restoreToolSearch }
