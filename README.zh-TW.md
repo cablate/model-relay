@@ -191,15 +191,13 @@ node tools/setup.mjs rc
 
 ## 設定
 
-設定檔位於 `~/.claude/model-relay.json`。設定目錄預設優先讀取 `$CLAUDE_CONFIG_DIR`，若未設定則使用 `$USERPROFILE/.claude` 或 `$HOME/.claude`。[`model-relay.example.json`](model-relay.example.json) 示範一個用 preset 的供應商、一個本機 Gateway 和頭像設定。
+設定檔位於 `~/.claude/model-relay.json`。設定目錄預設優先讀取 `$CLAUDE_CONFIG_DIR`，若未設定則使用 `$USERPROFILE/.claude` 或 `$HOME/.claude`。[`model-relay.example.json`](model-relay.example.json) 示範一個用 preset 的供應商和一個本機 Gateway。
 
 | 欄位 | 預設值 | 說明 |
 |---|---|---|
 | `format` | （無） | 目前格式的設定檔是 `2`（`init`、`add` 與 `migrate --go` 會設定），也是轉發站唯一讀取的格式。沒有這個欄位的檔案，或檔名為 `custom-agent.json` 的檔案，就是舊設定：在 `migrate --go` 重寫它之前，外掛不會為它啟動或替換轉發站，所以還在執行的 0.6 轉發站會照舊用它，沒有轉發站回應時，對話直接連 Claude。外掛會用提示、面板，以及開啟 `statusBar` 時的狀態列告訴你；見 [UPGRADING.zh-TW.md](UPGRADING.zh-TW.md) |
 | `port` | `8950` | 本機轉發站監聽的連接埠（`1025`–`65535`）。用 `node tools/setup.mjs set port <n>` 修改，會一併更新 `settings.json`；已在執行的轉發站會一直用舊埠直到你把它停掉（指令會印出它的 pid），且會拒絕已有程式在回應的埠 |
 | `statusBar` | `false` | 同時在 Claude Code 的外掛狀態列（輸入框上方那一行黃字）顯示轉發站狀態。預設關閉：每個視窗的狀態改寫進狀態檔，交給你自己的 statusline 顯示（見下方）。升級與離線的提醒仍會以通知跳出 |
-| `avatars` | （無） | 頭像面板用的圖片（見下方）：角色名稱對應到圖片路徑或 `{ "image", "head" }`。外掛讀取它，轉發站不讀 |
-| `avatarPane` | `false` | 在每個視窗開啟頭像面板。預設關閉，只設 `avatars` 不會顯示任何東西；用 `/provider avatar on` / `off` 設定，開著的視窗幾秒內就會跟著開或關 |
 | `claudeUrl` | `"https://api.anthropic.com"` | 上游 Anthropic API 網址 |
 | `idleTimeoutMs` | `300000` | 上游多久沒有任何資料就當作失敗，接著照重試與備援規則處理（`1000`–`3600000`）；持續有資料的串流回應不會被切斷 |
 | `proxy.enabled` | `false` | 接受為 Remote Control 而來的 HTTPS 代理連線。預設關閉。開啟後，對 `api.anthropic.com` 以外任何主機的 `CONNECT` 都是盲轉送（blind tunnel），本機任何程序都能使用；`node tools/setup.mjs proxy enable --go` 開啟、`proxy disable --go` 關閉 |
@@ -239,9 +237,9 @@ node tools/setup.mjs rc
 
 [coralline](https://github.com/Nanako0129/coralline) 的 `relay` segment 會讀這個檔案。
 
-### 在側邊面板顯示模型的頭像
+### 實驗性：在側邊面板顯示模型的頭像
 
-加上 `avatars`，外掛就會在側邊面板畫出這個視窗正在對話的模型頭像，並在你用 `/provider <name>` 切換、Claude 額度用完交給供應商、或切回 Claude 時換圖。它用有顏色的方塊字元（一格的八分之一與四分之一）畫成，每一格挑最貼近圖形的那一種，所以在沒有圖片協定的終端機（例如 Windows Terminal）也能用；需要 `ffmpeg` 在 `PATH` 上。
+這是實驗性功能，之後可能改變或移除，所以沒有列在 `/provider help` 和上面的表格裡。加上 `avatars`，外掛就會在側邊面板畫出這個視窗正在對話的模型頭像，並在你用 `/provider <name>` 切換、Claude 額度用完交給供應商、或切回 Claude 時換圖。它用有顏色的方塊字元（一格的八分之一與四分之一）畫成，每一格挑最貼近圖形的那一種，所以在沒有圖片協定的終端機（例如 Windows Terminal）也能用；需要 `ffmpeg` 在 `PATH` 上。
 
 ```json
 "avatars": {
@@ -263,8 +261,6 @@ node tools/setup.mjs rc
 | `/provider` | 在輸入框上方開啟面板，選這個視窗用哪個模型 |
 | `/provider <name>` · `/provider claude` | 不開面板直接切換這個視窗，回覆只有一行（例如 `/provider backup`）；切回 Claude 時，下一輪會重建整段對話快取 |
 | `/provider status` | 用文字看狀態：這個視窗走哪裡、所有視窗共用的開關、需要處理的問題 |
-| `/provider avatar` | 開啟或關閉顯示這個視窗模型頭像的面板（設定檔要有 `avatars`，並要有 `ffmpeg`） |
-| `/provider avatar on` / `off` | 在每個視窗都開頭像面板，或全部不開（預設關閉） |
 | `/provider help` | 列出所有指令，依影響範圍分組：這個視窗、所有視窗、設定與檢查 |
 | `/provider setup [goal]` | 讓 Claude 用設定工具帶你完成設定，金鑰不會進對話 |
 | `/provider init` · `/provider doctor [--ping] [--fix]` | 首次設定與健康檢查；`doctor` 預設只回報，加上 `--fix` 才會套用它自己能做的修正。不論在哪個資料夾、有沒有設定檔都能用 |

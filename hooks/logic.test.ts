@@ -150,7 +150,7 @@ test('a switch answers in one line, and the command list waits for /provider hel
   assert(ping.includes('test ok 300ms') && !ping.includes('/provider claude') && !ping.includes('Shared by every window'), 'a ping shows only the providers and their tests')
   const help = helpText(['aaa'], 'zh')
   assert(['這個視窗：', '所有視窗共用：', '設定與檢查：'].every((g) => help.includes(g)), 'commands grouped by what they reach')
-  assert(['status', 'avatar', 'ping', 'setup', 'doctor', 'restart', 'failover', 'retry', 'rc', 'alias', 'probe', 'init'].every((c) => help.includes(`/provider ${c}`)) && help.includes('model-relay:aaa'), 'every command and the subagent type')
+  assert(['status', 'ping', 'setup', 'doctor', 'restart', 'failover', 'retry', 'rc', 'alias', 'probe', 'init'].every((c) => help.includes(`/provider ${c}`)) && help.includes('model-relay:aaa'), 'every command and the subagent type')
 })
 
 test('a router with no usable provider, or no failover chain, is shown as such rather than guessed at', () => {
@@ -241,6 +241,7 @@ test('/provider doctor only looks until the user types --fix; init still wires s
   assert(args('init') === 'init --fix', 'setting up is what init is for')
   assert(args('presets') === 'presets' && args('restart') === 'restart', 'the others pass their name only')
   assert(helpText([], 'en').includes('/provider doctor [--ping] [--fix]') && helpText([], 'zh').includes('/provider doctor [--ping] [--fix]'), 'help says doctor takes --fix')
+  assert(!helpText([], 'en').includes('avatar') && !helpText([], 'zh').includes('avatar'), 'the experimental avatar pane stays out of help')
 })
 
 test('a model-relay subagent that Claude Code ran on another model, or that never reached the relay, is noticed', () => {

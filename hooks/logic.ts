@@ -913,10 +913,8 @@ export function helpText(providers: string[], lang: 'zh' | 'en' = 'zh'): string 
       ['/provider', en ? "Open the panel to switch this window's model" : '開啟面板，切換這個視窗的模型'],
       ['/provider <name> | claude', en ? 'Switch this window directly (e.g. /provider claude)' : '直接切換這個視窗（例：/provider claude）'],
       ['/provider status', en ? 'The same status as text' : '文字版狀態'],
-      ['/provider avatar', en ? "Show or hide the picture of this window's model (config key avatars)" : '開關這個視窗模型的頭像面板（設定檔的 avatars）'],
     ]],
     [en ? 'Shared by every window:' : '所有視窗共用：', [
-      ['/provider avatar <on|off>', en ? 'Open the avatar pane in every window, or in none (off by default)' : '每個視窗都自動開頭像面板，或全部不開（預設關閉）'],
       ['/provider failover <on|off|a,b>', en ? 'Turn 429 failover on or off, or set who takes over' : '開關 429 備援或設定接手順序'],
       ['/provider retry <on|off>', en ? 'Turn automatic provider retries on or off' : '開關供應商失敗自動重試'],
       ['/provider rc <on|off>', en ? 'Turn Remote Control proxy mode on or off (new sessions)' : '開關手機遙控代理模式（新對話生效）'],
