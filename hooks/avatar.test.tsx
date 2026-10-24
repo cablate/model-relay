@@ -77,20 +77,28 @@ test('the pane draws the picture of the model this window talks to, and swaps it
   // Claude has no head square: the whole picture, 10 x 20 pixels a cell, then 8 x 8 samples a cell
   expect(state.ffmpeg[0]?.[state.ffmpeg[0].indexOf('-vf') + 1]).toMatch(/^scale=240:120:.*,scale=192:48:flags=area,unsharp/)
 
-  // /provider aaa: this window now talks to aaa, whose entry has a head square: the head, in the same box
+  // /provider aaa: this window now talks to aaa, whose entry has a head square: the head, in the box's shape (24 x 6
+  // cells is 240 x 120 pixels, so the 6-square flattens to its floor, 5 tall, and grows to 10 wide)
   state.session = 'aaa'
   await $.command.run(provider('aaa'))
   expect((await ui.find({ type: 'Text', text: 'aaa · aaa-9' }))?.text).toBe('aaa · aaa-9')
   expect((await ui.find({ key: 'avatar' }))?.props.rows).toBe(6)
   expect(state.ffmpeg).toHaveLength(2)
   expect(state.ffmpeg[1]?.[state.ffmpeg[1].indexOf('-i') + 1]).toBe('/.claude/pics/a.png')
-  expect(state.ffmpeg[1]?.[state.ffmpeg[1].indexOf('-vf') + 1]).toMatch(/^crop=6:6:1:1,scale=240:120:/)
+  expect(state.ffmpeg[1]?.[state.ffmpeg[1].indexOf('-vf') + 1]).toMatch(/^crop=w='min\(10,iw\)':h='min\(5,ih\)':x='max\(0,min\(4-ow\/2,iw-ow\)\)':y='max\(0,min\(4-oh\/2,ih-oh\)\)',scale=240:120:/)
   expect(await ui.find({ key: 'avatar:mode' })).toBeUndefined()
 
   // nothing changed since: no more conversions however often the pane draws
   await $.command.run(provider('aaa'))
   await ui.unmount()
   const again = await $.ui.mount({ ...PANE, props })
+  expect(await again.find({ key: 'avatar' })).toBeDefined()
+  expect(state.ffmpeg).toHaveLength(2)
+
+  // back to Claude: the picture made a moment ago is drawn again without ffmpeg
+  state.session = 'claude'
+  await $.command.run(provider('claude'))
+  expect((await again.find({ type: 'Text', text: 'Claude' }))?.text).toBe('Claude')
   expect(await again.find({ key: 'avatar' })).toBeDefined()
   expect(state.ffmpeg).toHaveLength(2)
   await again.unmount()

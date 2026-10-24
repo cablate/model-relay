@@ -4,7 +4,9 @@ import {
   AVATAR_INLINE_ROWS,
   AVATAR_START,
   avatarArgv,
+  AVATAR_MIN_SIDE,
   avatarBytes,
+  avatarCrop,
   avatarFilter,
   avatarLabel,
   avatarMade,
@@ -317,13 +319,22 @@ test('ffmpeg is asked for exactly the box: the whole image fitted inside it at i
   const fit = 'scale=600:600:force_original_aspect_ratio=decrease:flags=area,format=rgba,pad=600:600:(ow-iw)/2:(oh-ih)/2:color=0x00000000'
   const samples = 'scale=480:240:flags=area,unsharp=3:3:0.6,eq=saturation=1.12:contrast=1.04'
   assert(avatarFilter('full', null, 60, 30) === `${fit},${samples}`, 'a cell is 10 x 20 pixels, aspect kept, transparent padding, then 8 x 8 samples a cell, sharpened and a little more colorful')
-  assert(avatarFilter('head', [471, 200, 340], 60, 30) === `crop=340:340:301:30,${fit},${samples}`, 'the head square, centred on x and y')
-  assert(avatarFilter('head', [100, 50, 340], 60, 30).startsWith('crop=340:340:0:0,'), 'a square that sticks out on the left or top starts at 0')
+  assert(avatarFilter('head', [471, 200, 340], 60, 30) === `crop=w='min(340,iw)':h='min(340,ih)':x='max(0,min(471-ow/2,iw-ow))':y='max(0,min(200-oh/2,ih-oh))',${fit},${samples}`, 'a square box: the head square, centred on x and y and held inside the picture')
   assert(avatarBytes(60, 30) === 480 * 240 * 4 && avatarBytes(2, 1) === 512, 'the frame it writes: 8 x 8 RGBA samples a cell')
   assert(avatarFilter('head', null, 60, 30) === avatarFilter('full', null, 60, 30) && avatarFilter('full', [471, 200, 340], 60, 30) === avatarFilter('full', null, 60, 30), 'no head square, or the whole picture asked for: the full filter')
   const argv = avatarArgv('/c/pics/a.webp', '/c/out.rgba', 'full', null, 6, 3)
   assert(argv[0] === 'ffmpeg' && argv[argv.indexOf('-i') + 1] === '/c/pics/a.webp' && argv[argv.indexOf('-vf') + 1] === avatarFilter('full', null, 6, 3), 'input and filter')
   assert(argv.slice(argv.indexOf('-frames:v')).join(' ') === '-frames:v 1 -f rawvideo -pix_fmt rgba /c/out.rgba', 'one raw RGBA frame, even from an animated image, into the output file')
+})
+
+test('the head crop takes the box shape, narrowing no further than three quarters of its square', () => {
+  // 47 x 37 cells is 470 x 740 pixels: narrower than 0.75 of the square, so 0.75 wide and as tall as the box's shape
+  assert(JSON.stringify(avatarCrop([468, 149, 246], 47, 37)) === `[${Math.round(246 * AVATAR_MIN_SIDE)},${Math.round(Math.round(246 * AVATAR_MIN_SIDE) / (470 / 740))},468,149]`, 'a tall dock: narrowed to the floor, then grown down and up')
+  const [w, h] = avatarCrop([400, 300, 200], 40, 25) // 400 x 500: within the floor, so the box's own shape at the square's height
+  assert(w === 160 && h === 200, 'a slightly tall box keeps the square height')
+  const [ww, wh] = avatarCrop([400, 300, 200], 60, 10) // 600 x 200: flattened to the floor, then grown sideways
+  assert(wh === 150 && ww === 450, 'a wide box flattens no further than the floor either')
+  assert(JSON.stringify(avatarCrop([400, 300, 200], 60, 30)) === '[200,200,400,300]', 'a square box is the square')
 })
 
 test('the picture box fills the pane body less the rows under it, within the caps; inline above the prompt stays short', () => {

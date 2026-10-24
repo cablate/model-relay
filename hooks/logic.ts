@@ -490,12 +490,35 @@ export const avatarScratch = (configDir: string, sid: string): string => `${conf
 
 const SAMPLES = 8 // samples across and down one cell: what its glyph and colors are judged on
 
-// The video filter that makes the box's samples: the head square first when asked for, then the image fitted inside the
-// box at its true shape, never cropped, with transparent padding (a cell is taken to be 10 x 20 screen pixels), then
-// scaled to the 8 x 8 samples each cell is judged on, sharpened a little and given a little more color
+// How far the head crop may narrow from its square to take a tall box's shape (or flatten, for a wide one): further
+// would cut the hair beside the face
+export const AVATAR_MIN_SIDE = 0.75
+
+// The head crop in the box's shape, [width, height, centre x, centre y] in source pixels: narrowed (or flattened) toward
+// the box's shape no further than AVATAR_MIN_SIDE of the square, then grown along the other side to the box's shape, so
+// the face fills the box with no bands and is larger than the square alone would draw it
+export function avatarCrop(head: [number, number, number], cols: number, rows: number): [number, number, number, number] {
+  const [x, y, side] = head
+  const aspect = (cols * 10) / (rows * 20)
+  if (aspect < 1) {
+    const w = Math.round(side * Math.max(aspect, AVATAR_MIN_SIDE))
+    return [w, Math.round(w / aspect), x, y]
+  }
+  const h = Math.round(side * Math.max(1 / aspect, AVATAR_MIN_SIDE))
+  return [Math.round(h * aspect), h, x, y]
+}
+
+// The video filter that makes the box's samples: the head crop first when asked for (held inside the picture, its quoted
+// expressions keeping their commas from the filter chain), then the image fitted inside the box at its true shape with
+// transparent padding (a cell is taken to be 10 x 20 screen pixels), then scaled to the 8 x 8 samples each cell is judged
+// on, sharpened a little and given a little more color
 export function avatarFilter(mode: AvatarMode, head: [number, number, number] | null, cols: number, rows: number): string {
   const [w, h] = [cols * 10, rows * 20]
-  const crop = mode === 'head' && head ? `crop=${head[2]}:${head[2]}:${Math.max(0, Math.round(head[0] - head[2] / 2))}:${Math.max(0, Math.round(head[1] - head[2] / 2))},` : ''
+  let crop = ''
+  if (mode === 'head' && head) {
+    const [cw, ch, cx, cy] = avatarCrop(head, cols, rows)
+    crop = `crop=w='min(${cw},iw)':h='min(${ch},ih)':x='max(0,min(${cx}-ow/2,iw-ow))':y='max(0,min(${cy}-oh/2,ih-oh))',`
+  }
   return `${crop}scale=${w}:${h}:force_original_aspect_ratio=decrease:flags=area,format=rgba,pad=${w}:${h}:(ow-iw)/2:(oh-ih)/2:color=0x00000000,scale=${cols * SAMPLES}:${rows * SAMPLES}:flags=area,unsharp=3:3:0.6,eq=saturation=1.12:contrast=1.04`
 }
 

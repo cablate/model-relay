@@ -94,6 +94,9 @@ const pending = new Map<string, { name: string; model: string; since: number }>(
 let avatarEntries: Record<string, AvatarEntry> = {} // the config's "avatars", read each tick
 let avatarAim: AvatarAim = AVATAR_START // what the avatar pane is asked to show; its view catches up
 let avatarBusy = false // a conversion is running: one at a time
+// The last pictures made, by what they were made from, so switching back to a model draws at once; reopening the pane empties it
+const avatarMemo = new Map<string, string>()
+const AVATAR_MEMO_SIZE = 8
 
 const COMMAND_WORDS = ['claude', 'status', 'help', 'ping', 'setup', 'doctor', 'restart', 'failover', 'retry', 'rc', 'alias', 'avatar']
 
@@ -214,6 +217,9 @@ async function makeAvatar($: EngineInterface, want: AvatarWant): Promise<AvatarV
   const view: AvatarView = { ...want, cells: null, error: null }
   if (!want.entry) return { ...view, error: 'unset' }
   if (want.cols < 1) return view
+  const key = JSON.stringify([want.entry, want.mode, want.cols, want.rows])
+  const known = avatarMemo.get(key)
+  if (known) return { ...view, cells: known }
   try {
     const dir = await configDir($)
     const out = avatarScratch(dir, await $.session.id())
@@ -222,7 +228,11 @@ async function makeAvatar($: EngineInterface, want: AvatarWant): Promise<AvatarV
     if (run.exitCode !== 0) return { ...view, error: 'failed' }
     const rgba = base64ToBytes((await $.fs.read(out, { as: 'bytes' })).base64)
     await $.fs.write(out, '').catch(() => undefined) // the pixels are held now; one empty file per window stays
-    return rgba.length === avatarBytes(want.cols, want.rows) ? { ...view, cells: rasterCells(rgba, want.cols, want.rows) } : { ...view, error: 'failed' }
+    if (rgba.length !== avatarBytes(want.cols, want.rows)) return { ...view, error: 'failed' }
+    const cells = rasterCells(rgba, want.cols, want.rows)
+    avatarMemo.set(key, cells)
+    if (avatarMemo.size > AVATAR_MEMO_SIZE) avatarMemo.delete(avatarMemo.keys().next().value!)
+    return { ...view, cells }
   } catch {
     return { ...view, error: 'failed' }
   }
@@ -268,7 +278,9 @@ async function toggleAvatar($: EngineInterface, lang: 'zh' | 'en'): Promise<stri
     await $.ui.close({ id: AVATAR_PANE })
     return en ? 'Avatar pane closed.' : '頭像面板已關閉。'
   }
-  await update($, avatarView, () => AVATAR_EMPTY) // a reopened pane tries again: the image may have changed, or ffmpeg got onto PATH
+  // a reopened pane tries again: the image may have changed, or ffmpeg got onto PATH
+  avatarMemo.clear()
+  await update($, avatarView, () => AVATAR_EMPTY)
   const opened = await $.ui.open(AVATAR_OPEN)
   if (opened.isPlaced) return en ? 'Avatar pane open.' : '頭像面板已開啟。'
   return en ? `Avatar pane is open but not drawn yet: ${opened.reason}` : `頭像面板已開啟，但還沒畫出來：${opened.reason}`

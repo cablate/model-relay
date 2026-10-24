@@ -250,7 +250,7 @@ Add `avatars` and the plugin draws the picture of the model this window is talki
 ```
 
 - A key is `claude` or a provider's name. A value is an image path, relative to the config directory unless it starts from a root, or `{ "image", "head" }`. `head` is the square that holds the head: `[centerX, centerY, size]` in the image's own pixels.
-- With `head` set, the pane shows the head square; without it the whole picture is fitted into the pane. A persona with no entry shows its name and the key to add.
+- With `head` set, the pane shows the head, cropped to the pane's own shape around that square (narrowing to no less than three quarters of its side) so it fills the pane; without it the whole picture is fitted into the pane. Switching back to a model this window showed lately draws its picture at once. A persona with no entry shows its name and the key to add.
 - The pane opens at the start of a session when `avatars` is set and the terminal is wide enough, and `/provider avatar` opens and closes it at any width. It asks for a dock 80 columns wide, which Claude Code keeps to 45% of the terminal; the wider it is, the finer the picture. Close and reopen it after you change an image file.
 - Each conversion writes its pixels to `model-relay-avatars/.cache/<session id>.rgba` in the config directory and empties the file when it is done; the folder is safe to delete.
 - The repository ships no pictures; use only images you may use.
