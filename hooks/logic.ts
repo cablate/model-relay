@@ -7,12 +7,15 @@ import type { AvatarEntry, AvatarMode, AvatarView, PanelData, PingStat, Provider
 // statusBar: also draw the relay state in Claude Code's plugin status line ("statusBar": true); off by default, since
 // the per-session status file (statusFields) lets a statusline tool show it instead
 // avatars: the pictures of the avatar pane, by persona (parseAvatars); the router ignores the key
+// avatarPane: open the avatar pane in every window ("avatarPane": true); off by default, so pictures in the config show
+// nothing until it is turned on (/provider avatar on)
 export interface LocalCfg {
   port: number
   nodePath: string
   outdated: boolean
   statusBar: boolean
   avatars: Record<string, AvatarEntry>
+  avatarPane: boolean
 }
 
 export const CONFIG_NAME = 'model-relay.json'
@@ -25,7 +28,7 @@ export function parseLocal(raw: unknown, oldName = false): LocalCfg | null {
   const r = raw as Record<string, unknown>
   const port = typeof r.port === 'number' && Number.isInteger(r.port) && r.port > 1024 && r.port < 65536 ? r.port : 8950
   const nodePath = typeof r.nodePath === 'string' && r.nodePath.length > 0 ? r.nodePath : 'node'
-  return { port, nodePath, outdated: oldName || r.format !== 2, statusBar: r.statusBar === true, avatars: parseAvatars(r.avatars) }
+  return { port, nodePath, outdated: oldName || r.format !== 2, statusBar: r.statusBar === true, avatars: parseAvatars(r.avatars), avatarPane: r.avatarPane === true }
 }
 
 // The agent fields a provider's "agent" object in the config may set, with the shape each must have; `name` and `model`
@@ -913,6 +916,7 @@ export function helpText(providers: string[], lang: 'zh' | 'en' = 'zh'): string 
       ['/provider avatar', en ? "Show or hide the picture of this window's model (config key avatars)" : '開關這個視窗模型的頭像面板（設定檔的 avatars）'],
     ]],
     [en ? 'Shared by every window:' : '所有視窗共用：', [
+      ['/provider avatar <on|off>', en ? 'Open the avatar pane in every window, or in none (off by default)' : '每個視窗都自動開頭像面板，或全部不開（預設關閉）'],
       ['/provider failover <on|off|a,b>', en ? 'Turn 429 failover on or off, or set who takes over' : '開關 429 備援或設定接手順序'],
       ['/provider retry <on|off>', en ? 'Turn automatic provider retries on or off' : '開關供應商失敗自動重試'],
       ['/provider rc <on|off>', en ? 'Turn Remote Control proxy mode on or off (new sessions)' : '開關手機遙控代理模式（新對話生效）'],

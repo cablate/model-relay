@@ -8,7 +8,7 @@
 
 ### 新增
 
-- **聊天旁的模型頭像：** 在 `model-relay.json` 加上 `avatars`，側邊面板就會畫出這個視窗正在對話的模型頭像，並在你用 `/provider <name>` 切換、Claude 額度用完交給供應商、或切回 Claude 時換圖。需要 `ffmpeg` 在 `PATH` 上，`/provider avatar` 開啟或關閉面板。細節見 README。
+- **聊天旁的模型頭像：** 在 `model-relay.json` 加上 `avatars`，側邊面板就會畫出這個視窗正在對話的模型頭像，並在你用 `/provider <name>` 切換、Claude 額度用完交給供應商、或切回 Claude 時換圖。預設關閉：`/provider avatar on` 替所有視窗打開，只打 `/provider avatar` 則開關這個視窗的面板。需要 `ffmpeg` 在 `PATH` 上。細節見 README。
 
 ## [0.7.4] - 2026-10-22
 

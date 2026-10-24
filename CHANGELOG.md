@@ -8,7 +8,7 @@ All notable changes to `model-relay` are documented in this file. Format follows
 
 ### Added
 
-- **A picture of the model beside the chat:** Add `avatars` to `model-relay.json` and a side pane draws the picture of the model this window is talking to, swapping it when you switch with `/provider <name>`, when a Claude limit hands the window to a provider, and when it goes back to Claude. It needs `ffmpeg` on `PATH`, and `/provider avatar` opens and closes the pane. See the README.
+- **A picture of the model beside the chat:** Add `avatars` to `model-relay.json` and a side pane draws the picture of the model this window is talking to, swapping it when you switch with `/provider <name>`, when a Claude limit hands the window to a provider, and when it goes back to Claude. It is off by default: `/provider avatar on` turns it on for every window, and `/provider avatar` alone opens or closes it in this window. It needs `ffmpeg` on `PATH`. See the README.
 
 ## [0.7.4] - 2026-10-22
 

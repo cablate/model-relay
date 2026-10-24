@@ -1,5 +1,5 @@
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface, Register } from 'claude-code'
+import type { EngineInterface, Register, UiOpenResult } from 'claude-code'
 import type { AvatarEntry, AvatarView, PanelNote, PanelUi } from '../types'
 import {
   AVATAR_EMPTY,
@@ -94,6 +94,7 @@ const pending = new Map<string, { name: string; model: string; since: number }>(
 let avatarEntries: Record<string, AvatarEntry> = {} // the config's "avatars", read each tick
 let avatarAim: AvatarAim = AVATAR_START // what the avatar pane is asked to show; its view catches up
 let avatarBusy = false // a conversion is running: one at a time
+let avatarSwitch: boolean | null = null // the config's "avatarPane" (with pictures to show) as last followed; null before the first tick
 // The last pictures made, by what they were made from, so switching back to a model draws at once; reopening the pane empties it
 const avatarMemo = new Map<string, string>()
 const AVATAR_MEMO_SIZE = 8
@@ -270,18 +271,37 @@ function sizeAvatar($: EngineInterface, props: { bodyColumns: number; placement:
   void pumpAvatar($)
 }
 
+// A reopened pane tries again: the image may have changed, or ffmpeg got onto PATH
+async function openAvatar($: EngineInterface): Promise<UiOpenResult> {
+  avatarMemo.clear()
+  await update($, avatarView, () => AVATAR_EMPTY)
+  return $.ui.open(AVATAR_OPEN)
+}
+
+async function closeAvatar($: EngineInterface): Promise<void> {
+  avatarAim = { ...avatarAim, body: null }
+  await $.ui.close({ id: AVATAR_PANE }).catch(() => undefined)
+}
+
+// The "avatarPane" switch every window shares: turned on (or found on at the start) it opens the pane here, turned off it
+// closes it, within a tick of the change. Unchanged, it leaves alone a pane /provider avatar opened or closed.
+async function followAvatarSwitch($: EngineInterface, cfg: LocalCfg): Promise<void> {
+  const on = cfg.avatarPane && Object.keys(cfg.avatars).length > 0
+  if (on === avatarSwitch) return
+  const was = avatarSwitch
+  avatarSwitch = on
+  if (on) await openAvatar($).catch(() => undefined)
+  else if (was) await closeAvatar($)
+}
+
 // /provider avatar closes the pane when it is drawn and opens it otherwise; a command is the person asking, so it is placed at any width
 async function toggleAvatar($: EngineInterface, lang: 'zh' | 'en'): Promise<string> {
   const en = lang === 'en'
   if ((await $.ui.panes()).some((p) => p.id === AVATAR_PANE && p.isPlaced)) {
-    avatarAim = { ...avatarAim, body: null }
-    await $.ui.close({ id: AVATAR_PANE })
+    await closeAvatar($)
     return en ? 'Avatar pane closed.' : '頭像面板已關閉。'
   }
-  // a reopened pane tries again: the image may have changed, or ffmpeg got onto PATH
-  avatarMemo.clear()
-  await update($, avatarView, () => AVATAR_EMPTY)
-  const opened = await $.ui.open(AVATAR_OPEN)
+  const opened = await openAvatar($)
   if (opened.isPlaced) return en ? 'Avatar pane open.' : '頭像面板已開啟。'
   return en ? `Avatar pane is open but not drawn yet: ${opened.reason}` : `頭像面板已開啟，但還沒畫出來：${opened.reason}`
 }
@@ -323,6 +343,7 @@ async function tick($: EngineInterface): Promise<void> {
   try {
     const cfg = await readLocal($)
     if (!cfg) return
+    await followAvatarSwitch($, cfg)
     const lang = await detectLang($)
     const seen = await health($, cfg)
     // Another config dir's router on our port is not ours: never route through it, same as a router that is down
@@ -512,7 +533,6 @@ export const register: Register = (on) => {
   on('session.start', async ($, e, next) => {
     await syncProviders($, {}) // /provider exists even before the router answers; tick adds the providers
     await tick($)
-    if (Object.keys(avatarEntries).length > 0) void $.ui.open(AVATAR_OPEN).catch(() => undefined)
     $.clock.every(10000, () => {
       void tick($).catch(() => {})
     })
@@ -624,6 +644,16 @@ export const register: Register = (on) => {
 
     const parts = arg.split(/\s+/).filter(Boolean)
     const head = parts[0] ?? ''
+    // /provider avatar on|off: the switch every window shares, written to the config and followed here at once
+    if (head === 'avatar') {
+      const r = await $.process.run(setupCliArgv(cfg, setupScript($.plugin.root), ['set', 'avatarPane', parts[1] ?? '']), { timeoutMs: 15000 }).catch(() => null)
+      const out = ((r?.stdout || '') + (r?.stderr || '')).trim()
+      const cfgNext = (await readLocal($)) ?? cfg
+      await followAvatarSwitch($, cfgNext)
+      const none = cfgNext.avatarPane && Object.keys(cfgNext.avatars).length === 0
+      const hint = none ? (lang === 'en' ? '\nThere is no picture to show yet: add "avatars" to model-relay.json (see the README).' : '\n還沒有可顯示的頭像：在 model-relay.json 加上 "avatars"（見 README）。') : ''
+      return { text: (out || (lang === 'en' ? 'Setup command did not respond.' : '設定指令沒有回應。')) + hint }
+    }
     if (head === 'alias' || head === 'failover' || head === 'retry' || head === 'rc' || head === 'proxy') {
       const script = setupScript($.plugin.root)
       let cliArgs: string[]

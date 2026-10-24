@@ -343,6 +343,7 @@ const SETTABLE = {
     return Number(v)
   }, hint: '1025-65535 — the router\'s port; restart the router afterwards (settings.json is rewired for you)' },
   statusBar: { parse: bool, hint: 'on|off — also show the relay state in Claude Code\'s plugin status line' },
+  avatarPane: { parse: bool, hint: 'on|off — open the avatar pane in every window (needs "avatars")' },
   'failover.enabled': { parse: bool, hint: 'on|off — switch to the failover chain when Claude hits its usage limit' },
   'failover.chain': { parse: names, hint: 'a,b,c — who takes over, in order (provider names)' },
   'failover.cooldownMs': { parse: wholeNumber(60000), hint: 'how long to stay off Claude after a 429, e.g. 10m (minimum 1m)' },

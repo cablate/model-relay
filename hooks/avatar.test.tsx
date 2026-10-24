@@ -4,7 +4,7 @@ import { base64ToBytes, bytesToBase64 } from './logic'
 
 const PANE = { plugin: 'model-relay', component: 'Pane', requestId: 'model-relay-avatar', surface: 'terminal' } as const
 const props = { title: 'model-relay avatar', isFocused: false, bodyColumns: 24, placement: 'dock', scroll: { offset: 0, bodyRows: 7 }, view: {} } as const
-const config = { format: 2, port: 8950, avatars: { claude: 'pics/c.png', aaa: { image: 'pics/a.png', head: [4, 4, 6] } } }
+const config = { format: 2, port: 8950, avatarPane: true, avatars: { claude: 'pics/c.png', aaa: { image: 'pics/a.png', head: [4, 4, 6] } } }
 const provider = (args: string) => ({ command: 'provider', args, origin: { kind: 'composer' as const }, presentation: { isFullscreen: true, columns: 100 } })
 
 // White samples, but see-through over the first cell and over the upper half of every cell in the first row after it:
@@ -17,7 +17,7 @@ function seeThrough(w: number, h: number): Uint8Array {
 
 // What stands beneath the plugin: the config, a router that answers for this window, and an ffmpeg that writes the
 // samples of the size its filter asks for
-function beneath(on: On, state: { session: string; config: unknown; opened: string[]; columns: (number | undefined)[]; ffmpeg: string[][]; missing: boolean }) {
+function beneath(on: On, state: { session: string; config: unknown; opened: string[]; closed: string[]; columns: (number | undefined)[]; ffmpeg: string[][]; missing: boolean }) {
   let box = { w: 0, h: 0 }
   on('env.get', () => ({ value: undefined }))
   on('settings.read', () => ({ value: { language: 'en' } }))
@@ -33,6 +33,10 @@ function beneath(on: On, state: { session: string; config: unknown; opened: stri
     state.columns.push(e.columns)
     return { value: { isPlaced: true } }
   })
+  on('ui.close', (_$, e) => {
+    state.closed.push(e.id)
+    return { value: undefined }
+  })
   on('fs.write', () => ({ value: undefined }))
   on('fs.read', (_$, e) => ({ value: e.as === 'bytes' ? { base64: bytesToBase64(seeThrough(box.w, box.h)) } : JSON.stringify(state.config) }))
   on('process.run', (_$, e) => {
@@ -42,6 +46,14 @@ function beneath(on: On, state: { session: string; config: unknown; opened: stri
       box = { w: Number(w), h: Number(h) }
       return { value: { exitCode: state.missing ? 1 : 0, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
     }
+    // setup.mjs set avatarPane on|off writes the switch to the config
+    const at = e.argv.indexOf('avatarPane')
+    if (at > 0 && e.argv[at - 1] === 'set') {
+      const value = e.argv[at + 1]
+      if (value !== 'on' && value !== 'off') return { value: { exitCode: 2, stdout: '', stderr: 'avatarPane: expected on or off', isStdoutTruncated: false, isStderrTruncated: false } }
+      state.config = { ...(state.config as object), avatarPane: value === 'on' }
+      return { value: { exitCode: 0, stdout: `✓ avatarPane: ${value}`, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+    }
     const url = e.argv.at(-1) ?? ''
     const stdout = url.includes('/__health')
       ? JSON.stringify({ ok: true, session: state.session, providers: { aaa: 'aaa-9' }, aliases: {}, failoverChain: [] })
@@ -50,7 +62,39 @@ function beneath(on: On, state: { session: string; config: unknown; opened: stri
   })
 }
 
-const newState = () => ({ session: 'claude', config: structuredClone(config) as unknown, opened: [] as string[], columns: [] as (number | undefined)[], ffmpeg: [] as string[][], missing: false })
+const newState = () => ({ session: 'claude', config: structuredClone(config) as unknown, opened: [] as string[], closed: [] as string[], columns: [] as (number | undefined)[], ffmpeg: [] as string[][], missing: false })
+
+test('the avatar pane is off by default: pictures in the config open nothing until /provider avatar on', async ($, on) => {
+  const state = newState()
+  const { avatarPane: _off, ...withoutSwitch } = config
+  state.config = withoutSwitch
+  beneath(on, state)
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  expect(state.opened).toEqual([])
+
+  const turnedOn = await $.command.run(provider('avatar on'))
+  expect(state.config).toMatchObject({ avatarPane: true })
+  expect(state.opened).toEqual(['model-relay-avatar'])
+  expect(turnedOn.text).toContain('avatarPane')
+
+  const wrong = await $.command.run(provider('avatar maybe'))
+  expect(wrong.text).toContain('expected on or off')
+  expect(state.opened).toEqual(['model-relay-avatar'])
+
+  await $.command.run(provider('avatar off'))
+  expect(state.config).toMatchObject({ avatarPane: false })
+  expect(state.closed).toEqual(['model-relay-avatar'])
+})
+
+test('the switch on with no pictures opens nothing and says what to add', async ($, on) => {
+  const state = newState()
+  state.config = { format: 2, port: 8950 }
+  beneath(on, state)
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  const said = await $.command.run(provider('avatar on'))
+  expect(state.opened).toEqual([])
+  expect(said.text).toContain('add "avatars"')
+})
 
 test('the pane draws the picture of the model this window talks to, and swaps it when the window switches', async ($, on) => {
   const state = newState()
@@ -129,13 +173,9 @@ test('a config with no avatars opens no pane at the start of the session; /provi
   const state = newState()
   state.config = { format: 2, port: 8950 }
   beneath(on, state)
-  const closed: string[] = []
+  const closed = state.closed
   let pane: { isPlaced: boolean } | null = null
   on('ui.panes', () => ({ value: pane ? [{ id: 'model-relay-avatar', title: 'model-relay avatar', isShown: true, isFocused: false, ...pane }] : [] }))
-  on('ui.close', (_$, e) => {
-    closed.push(e.id)
-    return { value: undefined }
-  })
   await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
   expect(state.opened).toEqual([])
 
