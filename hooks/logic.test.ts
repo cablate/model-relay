@@ -344,18 +344,16 @@ test('image paths resolve against the config dir, and each window converts into 
 test('a view counts as made only from exactly what is wanted now, down to the config entry', () => {
   const entries = parseAvatars({ aaa: { image: 'a.png', head: [5, 5, 4] } })
   const body = { placement: 'dock' as const, columns: 10, rows: 6 }
-  const aim = { ...AVATAR_START, name: 'aaa', label: 'aaa · m', mode: 'head' as const, body }
+  const aim = { ...AVATAR_START, name: 'aaa', label: 'aaa · m', body }
   const want = avatarWanted(aim, entries)
-  assert(want.mode === 'head' && want.entry?.image === 'a.png', 'a persona with a head square can show it')
-  assert(want.cols === 10 && want.rows === 4, 'the label and the mode switch take two of the six rows')
-  assert(avatarWanted({ ...aim, name: 'bbb' }, entries).rows === 5 && avatarWanted(AVATAR_START, entries).cols === 0, 'one row for the label alone; no box before the pane has drawn')
+  assert(want.mode === 'head' && want.entry?.image === 'a.png', 'a persona with a head square shows it')
+  assert(want.cols === 10 && want.rows === 5 && avatarWanted({ ...aim, name: 'bbb' }, entries).rows === 5, 'the label takes one of the six rows, head square or not')
+  assert(avatarWanted(AVATAR_START, entries).cols === 0, 'no box before the pane has drawn')
   const made = { ...want, cells: 'AAAA', error: null }
   assert(avatarMade(made, want) && !avatarMade(AVATAR_EMPTY, want), 'made from this, not from nothing')
-  assert(!avatarMade(made, avatarWanted({ ...aim, body: { ...body, columns: 11 } }, entries)) && !avatarMade(made, avatarWanted({ ...aim, mode: 'full' }, entries)) && !avatarMade(made, avatarWanted({ ...aim, label: 'aaa · n' }, entries)), 'another size, mode or label')
+  assert(!avatarMade(made, avatarWanted({ ...aim, body: { ...body, columns: 11 } }, entries)) && !avatarMade(made, avatarWanted({ ...aim, label: 'aaa · n' }, entries)), 'another size or label')
   assert(!avatarMade(made, avatarWanted(aim, parseAvatars({ aaa: { image: 'b.png', head: [5, 5, 4] } }))), 'an edited config entry')
-  assert(avatarWanted({ ...aim, name: 'bbb' }, entries).entry === null && avatarWanted(aim, parseAvatars({ aaa: 'a.png' })).mode === 'full', 'no entry, or an entry without a head square: the whole picture, whatever the preference')
-  assert(AVATAR_START.mode === 'head' && avatarWanted({ ...AVATAR_START, name: 'aaa', body }, entries).mode === 'head', 'a persona with a head square starts on it')
-  assert(avatarWanted({ ...AVATAR_START, name: 'aaa', body }, parseAvatars({ aaa: 'a.png' })).mode === 'full', 'one without starts on the whole picture')
+  assert(avatarWanted({ ...aim, name: 'bbb' }, entries).entry === null && avatarWanted(aim, parseAvatars({ aaa: 'a.png' })).mode === 'full', 'no entry, or an entry without a head square: the whole picture')
 })
 
 // An image of cols x rows cells, 8 x 8 RGBA samples each, from a function of the sample's place

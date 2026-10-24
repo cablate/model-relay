@@ -547,11 +547,7 @@ export const register: Register = (on) => {
   on('ui.render', { component: 'Pane', requestId: AVATAR_PANE }, async ($, e, next) => {
     try {
       sizeAvatar($, e.props)
-      const toggleMode = () => {
-        avatarAim = { ...avatarAim, mode: avatarAim.mode === 'full' ? 'head' : 'full' }
-        void pumpAvatar($)
-      }
-      return avatarTree($.ui.resolve(e), await read($, avatarView), e.props.bodyColumns, await detectLang($), { toggleMode })
+      return avatarTree($.ui.resolve(e), await read($, avatarView), e.props.bodyColumns, await detectLang($))
     } catch {
       return next(e)
     }

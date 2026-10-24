@@ -77,33 +77,22 @@ test('the pane draws the picture of the model this window talks to, and swaps it
   // Claude has no head square: the whole picture, 10 x 20 pixels a cell, then 8 x 8 samples a cell
   expect(state.ffmpeg[0]?.[state.ffmpeg[0].indexOf('-vf') + 1]).toMatch(/^scale=240:120:.*,scale=192:48:flags=area,unsharp/)
 
-  // /provider aaa: this window now talks to aaa, whose entry has a head square, so a row goes to the mode switch; it
-  // starts on the head
+  // /provider aaa: this window now talks to aaa, whose entry has a head square: the head, in the same box
   state.session = 'aaa'
   await $.command.run(provider('aaa'))
   expect((await ui.find({ type: 'Text', text: 'aaa · aaa-9' }))?.text).toBe('aaa · aaa-9')
-  expect((await ui.find({ key: 'avatar' }))?.props.rows).toBe(5)
+  expect((await ui.find({ key: 'avatar' }))?.props.rows).toBe(6)
   expect(state.ffmpeg).toHaveLength(2)
   expect(state.ffmpeg[1]?.[state.ffmpeg[1].indexOf('-i') + 1]).toBe('/.claude/pics/a.png')
-  expect(state.ffmpeg[1]?.[state.ffmpeg[1].indexOf('-vf') + 1]).toMatch(/^crop=6:6:1:1,scale=240:100:/)
-  expect((await ui.find({ key: 'avatar:mode' }))?.props.label).toBe('Whole picture')
-
-  // the button shows the whole picture, the same box without the crop, and back to the head
-  await ui.press({ key: 'avatar:mode' })
-  expect(state.ffmpeg).toHaveLength(3)
-  expect(state.ffmpeg[2]?.[state.ffmpeg[2].indexOf('-vf') + 1]).toMatch(/^scale=240:100:/)
-  expect((await ui.find({ key: 'avatar:mode' }))?.props.label).toBe('Head only')
-  await ui.press({ key: 'avatar:mode' })
-  expect(state.ffmpeg).toHaveLength(4)
-  expect(state.ffmpeg[3]?.[state.ffmpeg[3].indexOf('-vf') + 1]).toMatch(/^crop=6:6:1:1,scale=240:100:/)
-  expect((await ui.find({ key: 'avatar:mode' }))?.props.label).toBe('Whole picture')
+  expect(state.ffmpeg[1]?.[state.ffmpeg[1].indexOf('-vf') + 1]).toMatch(/^crop=6:6:1:1,scale=240:120:/)
+  expect(await ui.find({ key: 'avatar:mode' })).toBeUndefined()
 
   // nothing changed since: no more conversions however often the pane draws
   await $.command.run(provider('aaa'))
   await ui.unmount()
   const again = await $.ui.mount({ ...PANE, props })
   expect(await again.find({ key: 'avatar' })).toBeDefined()
-  expect(state.ffmpeg).toHaveLength(4)
+  expect(state.ffmpeg).toHaveLength(2)
   await again.unmount()
 })
 

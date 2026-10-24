@@ -444,24 +444,23 @@ export function avatarLabel(name: string, providers: Record<string, string>): st
   return has(providers, name) ? `${name} · ${providers[name]}` : name
 }
 
-// What the avatar pane is asked to show: the persona, the person's mode preference (the head square, which a persona with
-// none shows whole), and the pane body the picture goes in (null until the pane has drawn once). The view's own mode is
-// what was made.
+// What the avatar pane is asked to show: the persona and the pane body the picture goes in (null until the pane has drawn
+// once). The pane shows the head square, or the whole picture for a persona with none.
 export type AvatarBody = { placement: 'dock' | 'inline'; columns: number; rows: number }
-export type AvatarAim = { name: string; label: string; mode: AvatarMode; body: AvatarBody | null }
+export type AvatarAim = { name: string; label: string; body: AvatarBody | null }
 export type AvatarWant = Omit<AvatarView, 'cells' | 'error'>
 
-export const AVATAR_START: AvatarAim = { name: 'claude', label: 'Claude', mode: 'head', body: null }
+export const AVATAR_START: AvatarAim = { name: 'claude', label: 'Claude', body: null }
 export const AVATAR_EMPTY: AvatarView = { name: '', label: '', entry: null, mode: 'full', cols: 0, rows: 0, cells: null, error: null }
 
-// The picture's box in cells: as wide as the pane's body and as tall as it leaves after the rows under the picture (the
-// label, and the mode switch when there is a head square). The picture is fitted inside it at its true shape, a cell being
+// The picture's box in cells: as wide as the pane's body and as tall as it leaves after the label row under the picture.
+// The picture is fitted inside it at its true shape, a cell being
 // taken as 10 x 20 pixels. Inline above the prompt it stays short, to leave the transcript its room. 0 x 0 when nothing fits.
 export const AVATAR_MAX_COLS = 160
 export const AVATAR_MAX_ROWS = 100
 export const AVATAR_INLINE_ROWS = 12
 
-export const avatarLabelRows = (hasHead: boolean): number => (hasHead ? 2 : 1)
+export const AVATAR_LABEL_ROWS = 1
 
 export function avatarSize(placement: 'dock' | 'inline', bodyColumns: number, bodyRows: number, labelRows: number): { cols: number; rows: number } {
   const cols = Math.min(Math.floor(bodyColumns), AVATAR_MAX_COLS)
@@ -472,8 +471,8 @@ export function avatarSize(placement: 'dock' | 'inline', bodyColumns: number, bo
 export function avatarWanted(aim: AvatarAim, entries: Record<string, AvatarEntry>): AvatarWant {
   const entry = has(entries, aim.name) ? entries[aim.name]! : null
   const { body } = aim
-  const size = body ? avatarSize(body.placement, body.columns, body.rows, avatarLabelRows(Boolean(entry?.head))) : { cols: 0, rows: 0 }
-  return { name: aim.name, label: aim.label, entry, mode: aim.mode === 'head' && entry?.head ? 'head' : 'full', ...size }
+  const size = body ? avatarSize(body.placement, body.columns, body.rows, AVATAR_LABEL_ROWS) : { cols: 0, rows: 0 }
+  return { name: aim.name, label: aim.label, entry, mode: entry?.head ? 'head' : 'full', ...size }
 }
 
 // A view is current when it was made from exactly what is wanted now, config entry included
