@@ -8,6 +8,7 @@ import {
   OLD_CONFIG_NAME,
   PING_LIMIT_S,
   avatarArgv,
+  avatarBytes,
   avatarLabel,
   avatarMade,
   avatarName,
@@ -67,9 +68,10 @@ const panelUi = atom(
 )
 const panelData = atom({ plugin: 'model-relay', key: 'panelData' } as const, null)
 // Change the tag when AvatarView's fields change: a value an earlier version stored outlives a reload
-const avatarView = atom({ plugin: 'model-relay', key: 'avatarView' } as const, AVATAR_EMPTY, { shape: 'avatar-1' })
+const avatarView = atom({ plugin: 'model-relay', key: 'avatarView' } as const, AVATAR_EMPTY, { shape: 'avatar-2' })
+// Asks for a wide dock: the picture has more cells to draw glyphs in the wider it is (the engine keeps it to 45% of the terminal)
 const AVATAR_PANE = 'model-relay-avatar'
-const AVATAR_TITLE = 'model-relay avatar'
+const AVATAR_OPEN = { id: AVATAR_PANE, title: 'model-relay avatar', columns: 80 }
 
 let ticking = false
 let shownStatus: string | undefined = ''
@@ -220,7 +222,7 @@ async function makeAvatar($: EngineInterface, want: AvatarWant): Promise<AvatarV
     if (run.exitCode !== 0) return { ...view, error: 'failed' }
     const rgba = base64ToBytes((await $.fs.read(out, { as: 'bytes' })).base64)
     await $.fs.write(out, '').catch(() => undefined) // the pixels are held now; one empty file per window stays
-    return rgba.length === want.cols * want.rows * 8 ? { ...view, cells: rasterCells(rgba, want.cols, want.rows) } : { ...view, error: 'failed' }
+    return rgba.length === avatarBytes(want.cols, want.rows) ? { ...view, cells: rasterCells(rgba, want.cols, want.rows) } : { ...view, error: 'failed' }
   } catch {
     return { ...view, error: 'failed' }
   }
@@ -267,7 +269,7 @@ async function toggleAvatar($: EngineInterface, lang: 'zh' | 'en'): Promise<stri
     return en ? 'Avatar pane closed.' : '頭像面板已關閉。'
   }
   await update($, avatarView, () => AVATAR_EMPTY) // a reopened pane tries again: the image may have changed, or ffmpeg got onto PATH
-  const opened = await $.ui.open({ id: AVATAR_PANE, title: AVATAR_TITLE })
+  const opened = await $.ui.open(AVATAR_OPEN)
   if (opened.isPlaced) return en ? 'Avatar pane open.' : '頭像面板已開啟。'
   return en ? `Avatar pane is open but not drawn yet: ${opened.reason}` : `頭像面板已開啟，但還沒畫出來：${opened.reason}`
 }
@@ -498,7 +500,7 @@ export const register: Register = (on) => {
   on('session.start', async ($, e, next) => {
     await syncProviders($, {}) // /provider exists even before the router answers; tick adds the providers
     await tick($)
-    if (Object.keys(avatarEntries).length > 0) void $.ui.open({ id: AVATAR_PANE, title: AVATAR_TITLE }).catch(() => undefined)
+    if (Object.keys(avatarEntries).length > 0) void $.ui.open(AVATAR_OPEN).catch(() => undefined)
     $.clock.every(10000, () => {
       void tick($).catch(() => {})
     })

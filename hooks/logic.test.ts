@@ -4,6 +4,7 @@ import {
   AVATAR_INLINE_ROWS,
   AVATAR_START,
   avatarArgv,
+  avatarBytes,
   avatarFilter,
   avatarLabel,
   avatarMade,
@@ -20,6 +21,7 @@ import {
   fit,
   foreignConfigDir,
   foreignStatusText,
+  glyphCells,
   has,
   healthArgv,
   healthHints,
@@ -311,11 +313,13 @@ test('the avatar follows the persona the status file names, and is Claude whenev
   assert(avatarLabel('zzz', h.providers) === 'zzz' && avatarLabel('constructor', {}) === 'constructor', 'a name the router does not list is shown as it is')
 })
 
-test('ffmpeg is asked for exactly the box: the whole image fitted inside it, or the head square first', () => {
-  const tail = ',format=rgba,pad=60:60:(ow-iw)/2:(oh-ih)/2:color=0x00000000'
-  assert(avatarFilter('full', null, 60, 30) === `scale=60:60:force_original_aspect_ratio=decrease${tail}`, 'cols wide, twice the rows tall, aspect kept, transparent padding')
-  assert(avatarFilter('head', [471, 200, 340], 60, 30) === `crop=340:340:301:30,scale=60:60:force_original_aspect_ratio=decrease${tail}`, 'the head square, centred on x and y')
+test('ffmpeg is asked for exactly the box: the whole image fitted inside it at its true shape, or the head square first, as 8 x 8 samples a cell', () => {
+  const fit = 'scale=600:600:force_original_aspect_ratio=decrease:flags=area,format=rgba,pad=600:600:(ow-iw)/2:(oh-ih)/2:color=0x00000000'
+  const samples = 'scale=480:240:flags=area,unsharp=3:3:0.6,eq=saturation=1.12:contrast=1.04'
+  assert(avatarFilter('full', null, 60, 30) === `${fit},${samples}`, 'a cell is 10 x 20 pixels, aspect kept, transparent padding, then 8 x 8 samples a cell, sharpened and a little more colorful')
+  assert(avatarFilter('head', [471, 200, 340], 60, 30) === `crop=340:340:301:30,${fit},${samples}`, 'the head square, centred on x and y')
   assert(avatarFilter('head', [100, 50, 340], 60, 30).startsWith('crop=340:340:0:0,'), 'a square that sticks out on the left or top starts at 0')
+  assert(avatarBytes(60, 30) === 480 * 240 * 4 && avatarBytes(2, 1) === 512, 'the frame it writes: 8 x 8 RGBA samples a cell')
   assert(avatarFilter('head', null, 60, 30) === avatarFilter('full', null, 60, 30) && avatarFilter('full', [471, 200, 340], 60, 30) === avatarFilter('full', null, 60, 30), 'no head square, or the whole picture asked for: the full filter')
   const argv = avatarArgv('/c/pics/a.webp', '/c/out.rgba', 'full', null, 6, 3)
   assert(argv[0] === 'ffmpeg' && argv[argv.indexOf('-i') + 1] === '/c/pics/a.webp' && argv[argv.indexOf('-vf') + 1] === avatarFilter('full', null, 6, 3), 'input and filter')
@@ -350,25 +354,95 @@ test('a view counts as made only from exactly what is wanted now, down to the co
   assert(!avatarMade(made, avatarWanted({ ...aim, body: { ...body, columns: 11 } }, entries)) && !avatarMade(made, avatarWanted({ ...aim, mode: 'full' }, entries)) && !avatarMade(made, avatarWanted({ ...aim, label: 'aaa · n' }, entries)), 'another size, mode or label')
   assert(!avatarMade(made, avatarWanted(aim, parseAvatars({ aaa: { image: 'b.png', head: [5, 5, 4] } }))), 'an edited config entry')
   assert(avatarWanted({ ...aim, name: 'bbb' }, entries).entry === null && avatarWanted(aim, parseAvatars({ aaa: 'a.png' })).mode === 'full', 'no entry, or an entry without a head square: the whole picture, whatever the preference')
+  assert(AVATAR_START.mode === 'head' && avatarWanted({ ...AVATAR_START, name: 'aaa', body }, entries).mode === 'head', 'a persona with a head square starts on it')
+  assert(avatarWanted({ ...AVATAR_START, name: 'aaa', body }, parseAvatars({ aaa: 'a.png' })).mode === 'full', 'one without starts on the whole picture')
 })
 
-test('two pixels make one half-block cell, and a see-through pixel is the terminal default, never a painted half', () => {
-  const words = (rgba: number[], cols: number, rows: number) => {
-    const bytes = base64ToBytes(rasterCells(Uint8Array.from(rgba), cols, rows))
-    const view = new DataView(bytes.buffer)
-    return Array.from({ length: bytes.length / 4 }, (_, i) => view.getUint32(i * 4, true))
+// An image of cols x rows cells, 8 x 8 RGBA samples each, from a function of the sample's place
+const samples = (cols: number, rows: number, pixel: (x: number, y: number) => number[]): Uint8Array => {
+  const out = new Uint8Array(cols * rows * 64 * 4)
+  for (let y = 0; y < rows * 8; y++) for (let x = 0; x < cols * 8; x++) out.set(pixel(x, y), (y * cols * 8 + x) * 4)
+  return out
+}
+const cellsOf = (rgba: Uint8Array, cols: number, rows: number): string[] => {
+  const { words } = glyphCells(rgba, cols, rows)
+  return Array.from({ length: words.length / 3 }, (_, i) => Array.from(words.slice(i * 3, i * 3 + 3), (w) => w.toString(16)).join(' '))
+}
+const RED = [255, 0, 0, 255]
+const BLUE = [0, 0, 255, 255]
+const CLEAR = [9, 9, 9, 0]
+
+test('a cell takes the block glyph that fits its 8 x 8 samples best, the part the glyph paints as its foreground', () => {
+  const one = (pixel: (x: number, y: number) => number[]) => cellsOf(samples(1, 1, pixel), 1, 1).join()
+  assert(one((x) => (x < 4 ? RED : BLUE)) === '258c ff0000 ff', 'left half red, right half blue: the left half block, red on blue')
+  assert(one((_x, y) => (y < 4 ? RED : BLUE)) === '2584 ff ff0000', 'top red, bottom blue: the lower half block, blue on red')
+  assert(one((_x, y) => (y < 3 ? RED : BLUE)) === '2585 ff ff0000', 'the top three rows red: the lower five eighths')
+  assert(one((x) => (x < 3 ? RED : BLUE)) === '258d ff0000 ff', 'the left three columns red: the left three eighths')
+  assert(one((x, y) => (x < 4 && y < 4 ? RED : BLUE)) === '2598 ff0000 ff', 'one quadrant: the quadrant block')
+  assert(one((x, y) => ((x < 4) === (y < 4) ? RED : BLUE)) === '259a ff0000 ff', 'a checker: the diagonal quadrants')
+  assert(one(() => [10, 200, 30, 255]) === '2588 ac81e 1000000', 'one color: the full block, and no color for the background that is never seen')
+})
+
+test('a see-through sample is the terminal default, painted with a glyph whose foreground is a real color', () => {
+  const one = (pixel: (x: number, y: number) => number[]) => cellsOf(samples(1, 1, pixel), 1, 1).join()
+  assert(one(() => CLEAR) === '20 1000000 1000000', 'nothing opaque: a blank in the default colors')
+  assert(one((_x, y) => (y < 4 ? RED : CLEAR)) === '2580 ff0000 1000000', 'the lower half clear: the upper half block, the default background below')
+  assert(one((_x, y) => (y < 4 ? CLEAR : BLUE)) === '2584 ff 1000000', 'the upper half clear: the lower half block')
+  assert(one((x) => (x < 4 ? CLEAR : BLUE)) === '2590 ff 1000000', 'the left half clear: the right half block, never a left half block in the default foreground (the text color)')
+  assert(one((x) => (x < 4 ? RED : CLEAR)) === '258c ff0000 1000000', 'the right half clear')
+  assert(one((x, y) => (x < 4 && y < 4 ? CLEAR : BLUE)) === '259f ff 1000000', 'the upper left quadrant clear: the other three quadrants')
+  assert(one((x) => (x < 7 ? CLEAR : BLUE)) === '2595 ff 1000000', 'a clear left seven eighths: the right eighth block')
+  assert(one((_x, y) => (y < 4 ? RED : [9, 9, 9, 127])) === '2580 ff0000 1000000', 'alpha 127 is clear')
+  assert(one((_x, y) => (y < 4 ? RED : [0, 0, 255, 128])) === '2584 ff ff0000', 'alpha 128 is a color')
+  assert(one((x, y) => (y < 4 ? RED : x === 0 && y === 7 ? BLUE : CLEAR)) === '2580 ff0000 1000000', 'a side that is mostly clear is clear: one stray sample is dropped')
+})
+
+test('a cell is judged on its own 8 x 8 samples and cells run left to right, then down, as little-endian u32 triplets', () => {
+  const two = samples(2, 1, (x) => (x < 8 ? RED : BLUE))
+  assert(cellsOf(two, 2, 1).join(' | ') === '2588 ff0000 1000000 | 2588 ff 1000000', 'each cell its own color')
+  const down = samples(1, 2, (_x, y) => (y < 8 ? RED : BLUE))
+  assert(cellsOf(down, 1, 2).join(' | ') === '2588 ff0000 1000000 | 2588 ff 1000000', 'then the next row')
+  const bytes = base64ToBytes(rasterCells(samples(1, 1, () => [10, 200, 30, 255]), 1, 1))
+  assert(bytes.join() === '136,37,0,0,30,200,10,0,0,0,0,1', 'code point, foreground, background, each little-endian')
+  assert(rasterCells(two, 2, 1).length === 32 && base64ToBytes(rasterCells(two, 2, 1)).length === 24, 'twelve bytes a cell')
+})
+
+test('the cells use at most 1024 distinct color pairs, and only block glyphs, whatever the picture', () => {
+  let seed = 7
+  const random = () => ((seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0) / 2 ** 32)
+  const color = () => [Math.floor(random() * 256), Math.floor(random() * 256), Math.floor(random() * 256), 255]
+  // Every cell a left half of one color and a right half of another: more pairs asked for than a Raster paints
+  const [cols, rows] = [50, 45]
+  const halves = Array.from({ length: cols * rows }, () => [color(), color()])
+  const asked = new Set(halves.map(([a, b]) => `${a}|${b}`)).size
+  assert(asked > 2000, `the picture asks for ${asked} pairs`)
+  const noisy = samples(cols, rows, (x, y) => halves[Math.floor(y / 8) * cols + Math.floor(x / 8)]![x % 8 < 4 ? 0 : 1]!)
+  const made = glyphCells(noisy, cols, rows)
+  assert(made.words.length === cols * rows * 3, 'a cell each')
+  assert(made.pairs <= 1024, `${made.pairs} color pairs`)
+  const pairs = new Set<string>()
+  const colors = new Set<number>()
+  for (let i = 0; i < made.words.length; i += 3) {
+    pairs.add(`${made.words[i + 1]}|${made.words[i + 2]}`)
+    colors.add(made.words[i + 1]!)
+    colors.add(made.words[i + 2]!)
   }
-  const red = [255, 0, 0, 255]
-  const blue = [0, 0, 255, 255]
-  const hex = (w: number[]) => w.map((x) => x.toString(16)).join(' ')
-  assert(hex(words([...red, ...blue], 1, 1)) === '2580 ff0000 ff', 'upper pixel is the foreground of the upper half block, lower the background')
-  assert(Array.from(base64ToBytes(rasterCells(Uint8Array.from([...red, ...blue]), 1, 1))).join() === '128,37,0,0,0,0,255,0,255,0,0,0', 'little-endian u32 triplets')
-  assert(hex(words([...red, 9, 9, 9, 0], 1, 1)) === '2580 ff0000 1000000', 'a clear lower pixel is the default background')
-  assert(hex(words([9, 9, 9, 127, ...blue], 1, 1)) === '2584 ff 1000000', 'a clear upper pixel makes a lower half block: an upper one would paint the text color there')
-  assert(hex(words([9, 9, 9, 128, ...blue], 1, 1)) === '2580 90909 ff', 'half opaque counts as a pixel')
-  assert(hex(words([1, 2, 3, 0, 4, 5, 6, 0], 1, 1)) === '20 1000000 1000000', 'nothing in either half: a blank')
-  assert(hex(words([...red, 0, 255, 0, 255, ...blue, 255, 255, 255, 255], 2, 1)) === '2580 ff0000 ff 2580 ff00 ffffff', 'rows of pixels pair up per column, cells run left to right')
-  assert(words(Array.from({ length: 4 * 4 }, (_, i) => (i % 4 === 3 ? 255 : i)), 1, 2).length === 6, 'a cell per two pixel rows')
+  assert(pairs.size === made.pairs, 'the count is the pairs the cells use')
+  assert(colors.size <= 160, `${colors.size} colors: every one snapped to the palette (160 at most for a picture this big)`)
+  assert(rasterCells(noisy, cols, rows).length === cols * rows * 16, 'and it packs to a Raster all the same')
+
+  // See-through blobs and fine noise: no foreground is the default but a blank's, and only the block glyphs show up
+  const blocks = new Set([0x20, 0x2580, 0x2588, 0x2590, 0x2594, 0x2595, ...Array.from({ length: 7 }, (_, i) => 0x2581 + i), ...Array.from({ length: 7 }, (_, i) => 0x2589 + i), ...Array.from({ length: 10 }, (_, i) => 0x2596 + i)])
+  const blobs = samples(30, 20, (x, y) => (((x >> 2) * 7 + (y >> 2) * 13) % 5 < 2 ? CLEAR : color()))
+  const words = glyphCells(blobs, 30, 20).words
+  let clear = 0
+  for (let i = 0; i < words.length; i += 3) {
+    assert(blocks.has(words[i]!), `U+${words[i]!.toString(16)} is a block glyph`)
+    assert(words[i] === 0x20 || words[i + 1] !== 0x01000000, `U+${words[i]!.toString(16)} at ${i / 3} has a real foreground color`)
+    if (words[i + 2] === 0x01000000) clear++
+  }
+  assert(clear > 20, 'the see-through parts stay the terminal default')
+  assert(glyphCells(blobs, 30, 20).pairs <= 1024, 'with see-through parts too')
 })
 
 test('base64 matches the standard encoding both ways, padding included', () => {

@@ -7,18 +7,17 @@ const props = { title: 'model-relay avatar', isFocused: false, bodyColumns: 24, 
 const config = { format: 2, port: 8950, avatars: { claude: 'pics/c.png', aaa: { image: 'pics/a.png', head: [4, 4, 6] } } }
 const provider = (args: string) => ({ command: 'provider', args, origin: { kind: 'composer' as const }, presentation: { isFullscreen: true, columns: 100 } })
 
-// White pixels, but see-through along the top pixel row and at the start of the second: the first cell has nothing in
-// either half, the cells after it only a lower pixel
+// White samples, but see-through over the first cell and over the upper half of every cell in the first row after it:
+// the first cell has nothing to draw, the cells after it only their lower half
 function seeThrough(w: number, h: number): Uint8Array {
   const rgba = new Uint8Array(w * h * 4).fill(255)
-  for (let x = 0; x < w; x++) rgba[x * 4 + 3] = 0
-  rgba[w * 4 + 3] = 0
+  for (let y = 0; y < 8; y++) for (let x = 0; x < w; x++) if (x < 8 || y < 4) rgba[(y * w + x) * 4 + 3] = 0
   return rgba
 }
 
 // What stands beneath the plugin: the config, a router that answers for this window, and an ffmpeg that writes the
-// pixels of the size its filter asks for
-function beneath(on: On, state: { session: string; config: unknown; opened: string[]; ffmpeg: string[][]; missing: boolean }) {
+// samples of the size its filter asks for
+function beneath(on: On, state: { session: string; config: unknown; opened: string[]; columns: (number | undefined)[]; ffmpeg: string[][]; missing: boolean }) {
   let box = { w: 0, h: 0 }
   on('env.get', () => ({ value: undefined }))
   on('settings.read', () => ({ value: { language: 'en' } }))
@@ -31,6 +30,7 @@ function beneath(on: On, state: { session: string; config: unknown; opened: stri
   on('session.start', (_$, e) => ({ cwd: e.cwd }))
   on('ui.open', (_$, e) => {
     state.opened.push(e.id)
+    state.columns.push(e.columns)
     return { value: { isPlaced: true } }
   })
   on('fs.write', () => ({ value: undefined }))
@@ -38,7 +38,7 @@ function beneath(on: On, state: { session: string; config: unknown; opened: stri
   on('process.run', (_$, e) => {
     if (e.argv[0] === 'ffmpeg') {
       state.ffmpeg.push([...e.argv])
-      const [, w, h] = /pad=(\d+):(\d+)/.exec(e.argv[e.argv.indexOf('-vf') + 1] ?? '') ?? []
+      const [, w, h] = /scale=(\d+):(\d+):flags=area,unsharp/.exec(e.argv[e.argv.indexOf('-vf') + 1] ?? '') ?? []
       box = { w: Number(w), h: Number(h) }
       return { value: { exitCode: state.missing ? 1 : 0, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
     }
@@ -50,13 +50,14 @@ function beneath(on: On, state: { session: string; config: unknown; opened: stri
   })
 }
 
-const newState = () => ({ session: 'claude', config: structuredClone(config) as unknown, opened: [] as string[], ffmpeg: [] as string[][], missing: false })
+const newState = () => ({ session: 'claude', config: structuredClone(config) as unknown, opened: [] as string[], columns: [] as (number | undefined)[], ffmpeg: [] as string[][], missing: false })
 
 test('the pane draws the picture of the model this window talks to, and swaps it when the window switches', async ($, on) => {
   const state = newState()
   beneath(on, state)
   await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
   expect(state.opened).toEqual(['model-relay-avatar'])
+  expect(state.columns).toEqual([80]) // a wide dock: the engine keeps it to 45% of the terminal
 
   const ui = await $.ui.mount({ ...PANE, props })
   const raster = await ui.find({ key: 'avatar' })
@@ -66,26 +67,35 @@ test('the pane draws the picture of the model this window talks to, and swaps it
   // 24 x 6 cells, a triplet of u32 each
   const cells = new DataView(base64ToBytes(String(raster?.props.cells)).buffer)
   expect(cells.byteLength).toBe(24 * 6 * 12)
-  // nothing in the first cell (a blank), only the lower pixel in the next (a lower half block), both in the row below
-  expect([0, 12, 24 * 12].map((at) => cells.getUint32(at, true))).toEqual([0x20, 0x2584, 0x2580])
+  // nothing in the first cell (a blank), only the lower half in the next (a lower half block), all of it in the row below
+  expect([0, 12, 24 * 12].map((at) => cells.getUint32(at, true))).toEqual([0x20, 0x2584, 0x2588])
+  expect([16, 20].map((at) => cells.getUint32(at, true))).toEqual([0xffffff, 0x01000000]) // white on the terminal's own background
   expect((await ui.find({ type: 'Text', text: 'Claude' }))?.text).toBe('Claude')
   expect(await ui.find({ key: 'avatar:mode' })).toBeUndefined()
   expect(state.ffmpeg).toHaveLength(1)
   expect(state.ffmpeg[0]?.[state.ffmpeg[0].indexOf('-i') + 1]).toBe('/.claude/pics/c.png')
-  expect(state.ffmpeg[0]?.[state.ffmpeg[0].indexOf('-vf') + 1]).toContain('scale=24:12:')
+  // Claude has no head square: the whole picture, 10 x 20 pixels a cell, then 8 x 8 samples a cell
+  expect(state.ffmpeg[0]?.[state.ffmpeg[0].indexOf('-vf') + 1]).toMatch(/^scale=240:120:.*,scale=192:48:flags=area,unsharp/)
 
-  // /provider aaa: this window now talks to aaa, whose entry has a head square, so a row goes to the mode switch
+  // /provider aaa: this window now talks to aaa, whose entry has a head square, so a row goes to the mode switch; it
+  // starts on the head
   state.session = 'aaa'
   await $.command.run(provider('aaa'))
   expect((await ui.find({ type: 'Text', text: 'aaa · aaa-9' }))?.text).toBe('aaa · aaa-9')
   expect((await ui.find({ key: 'avatar' }))?.props.rows).toBe(5)
   expect(state.ffmpeg).toHaveLength(2)
   expect(state.ffmpeg[1]?.[state.ffmpeg[1].indexOf('-i') + 1]).toBe('/.claude/pics/a.png')
+  expect(state.ffmpeg[1]?.[state.ffmpeg[1].indexOf('-vf') + 1]).toMatch(/^crop=6:6:1:1,scale=240:100:/)
+  expect((await ui.find({ key: 'avatar:mode' }))?.props.label).toBe('Whole picture')
 
-  // the head square is the one in the config, fitted to the same box
+  // the button shows the whole picture, the same box without the crop, and back to the head
   await ui.press({ key: 'avatar:mode' })
   expect(state.ffmpeg).toHaveLength(3)
-  expect(state.ffmpeg[2]?.[state.ffmpeg[2].indexOf('-vf') + 1]).toMatch(/^crop=6:6:1:1,scale=24:10:/)
+  expect(state.ffmpeg[2]?.[state.ffmpeg[2].indexOf('-vf') + 1]).toMatch(/^scale=240:100:/)
+  expect((await ui.find({ key: 'avatar:mode' }))?.props.label).toBe('Head only')
+  await ui.press({ key: 'avatar:mode' })
+  expect(state.ffmpeg).toHaveLength(4)
+  expect(state.ffmpeg[3]?.[state.ffmpeg[3].indexOf('-vf') + 1]).toMatch(/^crop=6:6:1:1,scale=240:100:/)
   expect((await ui.find({ key: 'avatar:mode' }))?.props.label).toBe('Whole picture')
 
   // nothing changed since: no more conversions however often the pane draws
@@ -93,7 +103,7 @@ test('the pane draws the picture of the model this window talks to, and swaps it
   await ui.unmount()
   const again = await $.ui.mount({ ...PANE, props })
   expect(await again.find({ key: 'avatar' })).toBeDefined()
-  expect(state.ffmpeg).toHaveLength(3)
+  expect(state.ffmpeg).toHaveLength(4)
   await again.unmount()
 })
 
@@ -145,4 +155,17 @@ test('a config with no avatars opens no pane at the start of the session; /provi
   expect((await $.command.run(provider('avatar'))).text).toBe('Avatar pane closed.')
   expect(closed).toEqual(['model-relay-avatar'])
   expect(state.opened).toHaveLength(2)
+})
+
+test('the engine takes every glyph the cells can hold', async ($, on) => {
+  // The block glyphs glyphCells chooses from, and the ones that stand in for them when a see-through part has to be the background
+  const glyphs = [0x20, ...Array.from({ length: 16 }, (_, i) => 0x2580 + i), 0x2590, 0x2594, 0x2595, ...Array.from({ length: 10 }, (_, i) => 0x2596 + i)]
+  const words = new Uint32Array(glyphs.flatMap((cp) => [cp, 0xff8000, 0x01000000]))
+  on('ui.render', { component: 'Pane', requestId: 'glyph-check' }, ($$, e) => {
+    const ui = $$.ui.resolve(e)
+    return 'Raster' in ui ? <ui.Raster key="check" columns={glyphs.length} rows={1} cells={bytesToBase64(new Uint8Array(words.buffer))} /> : <ui.Box />
+  })
+  const ui = await $.ui.mount({ ...PANE, requestId: 'glyph-check', props })
+  expect((await ui.find({ key: 'check' }))?.type).toBe('Raster')
+  await ui.unmount()
 })

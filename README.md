@@ -240,7 +240,7 @@ Each window writes its relay state to `~/.claude/model-relay-status/<session id>
 
 ### Show the model's picture in a pane
 
-Add `avatars` and the plugin draws the picture of the model this window is talking to in a side pane, swapping it when you switch with `/provider <name>`, when a Claude limit hands the window to a provider, and when it goes back to Claude. It is drawn with colored half-block characters, so it also works in terminals without an image protocol, such as Windows Terminal. It needs `ffmpeg` on `PATH`.
+Add `avatars` and the plugin draws the picture of the model this window is talking to in a side pane, swapping it when you switch with `/provider <name>`, when a Claude limit hands the window to a provider, and when it goes back to Claude. It is drawn with colored block characters (eighths and quarters of a cell), picked per cell to follow the picture's shapes, so it also works in terminals without an image protocol, such as Windows Terminal. It needs `ffmpeg` on `PATH`.
 
 ```json
 "avatars": {
@@ -250,8 +250,8 @@ Add `avatars` and the plugin draws the picture of the model this window is talki
 ```
 
 - A key is `claude` or a provider's name. A value is an image path, relative to the config directory unless it starts from a root, or `{ "image", "head" }`. `head` is the square that holds the head: `[centerX, centerY, size]` in the image's own pixels.
-- With `head` set, a button in the pane switches between the whole picture, fitted into the pane, and the head square. A persona with no entry shows its name and the key to add.
-- The pane opens at the start of a session when `avatars` is set and the terminal is wide enough, and `/provider avatar` opens and closes it at any width. Close and reopen it after you change an image file.
+- With `head` set, the pane starts on the head square and a button switches to the whole picture, fitted into the pane, and back; without it the whole picture is shown. A persona with no entry shows its name and the key to add.
+- The pane opens at the start of a session when `avatars` is set and the terminal is wide enough, and `/provider avatar` opens and closes it at any width. It asks for a dock 80 columns wide, which Claude Code keeps to 45% of the terminal; the wider it is, the finer the picture. Close and reopen it after you change an image file.
 - Each conversion writes its pixels to `model-relay-avatars/.cache/<session id>.rgba` in the config directory and empties the file when it is done; the folder is safe to delete.
 - The repository ships no pictures; use only images you may use.
 

@@ -444,18 +444,19 @@ export function avatarLabel(name: string, providers: Record<string, string>): st
   return has(providers, name) ? `${name} · ${providers[name]}` : name
 }
 
-// What the avatar pane is asked to show: the persona, the person's mode preference, and the pane body the picture goes in
-// (null until the pane has drawn once). The view's own mode is what was made, which is full for a persona with no head square.
+// What the avatar pane is asked to show: the persona, the person's mode preference (the head square, which a persona with
+// none shows whole), and the pane body the picture goes in (null until the pane has drawn once). The view's own mode is
+// what was made.
 export type AvatarBody = { placement: 'dock' | 'inline'; columns: number; rows: number }
 export type AvatarAim = { name: string; label: string; mode: AvatarMode; body: AvatarBody | null }
 export type AvatarWant = Omit<AvatarView, 'cells' | 'error'>
 
-export const AVATAR_START: AvatarAim = { name: 'claude', label: 'Claude', mode: 'full', body: null }
+export const AVATAR_START: AvatarAim = { name: 'claude', label: 'Claude', mode: 'head', body: null }
 export const AVATAR_EMPTY: AvatarView = { name: '', label: '', entry: null, mode: 'full', cols: 0, rows: 0, cells: null, error: null }
 
 // The picture's box in cells: as wide as the pane's body and as tall as it leaves after the rows under the picture (the
-// label, and the mode switch when there is a head square). A Raster cell is one pixel wide and two tall, so the box is
-// cols x 2*rows pixels. Inline above the prompt it stays short, to leave the transcript its room. 0 x 0 when nothing fits.
+// label, and the mode switch when there is a head square). The picture is fitted inside it at its true shape, a cell being
+// taken as 10 x 20 pixels. Inline above the prompt it stays short, to leave the transcript its room. 0 x 0 when nothing fits.
 export const AVATAR_MAX_COLS = 160
 export const AVATAR_MAX_ROWS = 100
 export const AVATAR_INLINE_ROWS = 12
@@ -488,15 +489,21 @@ export function avatarSource(configDir: string, image: string): string {
 // One scratch file per window, so two windows converting at once never share an output
 export const avatarScratch = (configDir: string, sid: string): string => `${configDir}/model-relay-avatars/.cache/${sid.replace(/[^A-Za-z0-9_-]/g, '_') || 'window'}.rgba`
 
-// The video filter that makes the box's pixels: the head square first when asked for, then the image fitted inside the
-// box, never cropped, with transparent padding
+const SAMPLES = 8 // samples across and down one cell: what its glyph and colors are judged on
+
+// The video filter that makes the box's samples: the head square first when asked for, then the image fitted inside the
+// box at its true shape, never cropped, with transparent padding (a cell is taken to be 10 x 20 screen pixels), then
+// scaled to the 8 x 8 samples each cell is judged on, sharpened a little and given a little more color
 export function avatarFilter(mode: AvatarMode, head: [number, number, number] | null, cols: number, rows: number): string {
-  const [w, h] = [cols, rows * 2]
+  const [w, h] = [cols * 10, rows * 20]
   const crop = mode === 'head' && head ? `crop=${head[2]}:${head[2]}:${Math.max(0, Math.round(head[0] - head[2] / 2))}:${Math.max(0, Math.round(head[1] - head[2] / 2))},` : ''
-  return `${crop}scale=${w}:${h}:force_original_aspect_ratio=decrease,format=rgba,pad=${w}:${h}:(ow-iw)/2:(oh-ih)/2:color=0x00000000`
+  return `${crop}scale=${w}:${h}:force_original_aspect_ratio=decrease:flags=area,format=rgba,pad=${w}:${h}:(ow-iw)/2:(oh-ih)/2:color=0x00000000,scale=${cols * SAMPLES}:${rows * SAMPLES}:flags=area,unsharp=3:3:0.6,eq=saturation=1.12:contrast=1.04`
 }
 
-// ffmpeg writes one raw RGBA frame of cols x 2*rows pixels to `out`
+// The bytes of the raw RGBA frame the filter makes
+export const avatarBytes = (cols: number, rows: number): number => cols * SAMPLES * rows * SAMPLES * 4
+
+// ffmpeg writes one raw RGBA frame of cols*8 x rows*8 samples to `out`
 export function avatarArgv(input: string, out: string, mode: AvatarMode, head: [number, number, number] | null, cols: number, rows: number): string[] {
   return ['ffmpeg', '-v', 'error', '-y', '-i', input, '-vf', avatarFilter(mode, head, cols, rows), '-frames:v', '1', '-f', 'rawvideo', '-pix_fmt', 'rgba', out]
 }
@@ -533,23 +540,229 @@ export function base64ToBytes(text: string): Uint8Array {
 
 const CELL_DEFAULT = 0x01000000
 
-// RGBA pixels (cols wide, 2*rows tall) as a Raster's cells: each cell is two pixels, the upper as the foreground of ▀
-// and the lower as its background. A pixel under half opaque is the terminal's default color; since the foreground of a
-// ▀ whose upper half is transparent would paint the terminal's text color, that cell is a ▄ carrying the lower pixel, and
-// one with neither pixel is a space.
-export function rasterCells(rgba: Uint8Array, cols: number, rows: number): string {
-  const view = new DataView(new ArrayBuffer(cols * rows * 12))
-  const pixel = (x: number, y: number): number | null => {
-    const i = (y * cols + x) * 4
-    return (rgba[i + 3] ?? 0) < 128 ? null : ((rgba[i] ?? 0) << 16) | ((rgba[i + 1] ?? 0) << 8) | (rgba[i + 2] ?? 0)
+// A cell's 8 x 8 samples are summed as rows, columns and quarters (ROW + y, COL + x, QUARTER + q, left to right and top to
+// bottom): every glyph paints a union of these as its foreground, so what it paints and what it leaves come from a few sums
+// rather than from the 64 samples again
+const [ROW, COL, QUARTER] = [0, SAMPLES, 2 * SAMPLES]
+const GROUPS = 2 * SAMPLES + 4
+// Per group: samples, opaque samples (alpha 128 and up), the sums of r, g, b over the opaque ones, the sums of their squares
+const [N, SOLID, SUM, SQ, STAT] = [0, 1, 2, 5, 8]
+
+const range = (from: number, to: number): number[] => Array.from({ length: to - from }, (_, i) => from + i)
+
+// A glyph a cell may be drawn with, and the groups it paints as its foreground. `flip` is the glyph that paints the rest
+// instead, for a cell whose see-through part has to be the background: the terminal's default foreground is its text color,
+// so a glyph never carries it. A shape with no such glyph is left out for such a cell.
+type Shape = { cp: number; flip: number | null; parts: number[] }
+
+// Block shapes only: the full block, lower and left eighths, the quadrants. No triangles and no shades: both read as grain.
+const SHAPES: Shape[] = [
+  { cp: 0x2588, flip: 0x20, parts: range(ROW, ROW + SAMPLES) },
+  ...[1, 2, 3, 4, 5, 6, 7].map((k) => ({ cp: 0x2580 + k, flip: k === 4 ? 0x2580 : k === 7 ? 0x2594 : null, parts: range(ROW + SAMPLES - k, ROW + SAMPLES) })),
+  ...[1, 2, 3, 4, 5, 6, 7].map((k) => ({ cp: 0x2590 - k, flip: k === 4 ? 0x2590 : k === 7 ? 0x2595 : null, parts: range(COL, COL + k) })),
+  { cp: 0x2598, flip: 0x259f, parts: [QUARTER] },
+  { cp: 0x259d, flip: 0x2599, parts: [QUARTER + 1] },
+  { cp: 0x2596, flip: 0x259c, parts: [QUARTER + 2] },
+  { cp: 0x2597, flip: 0x259b, parts: [QUARTER + 3] },
+  { cp: 0x259a, flip: 0x259e, parts: [QUARTER, QUARTER + 3] },
+  { cp: 0x259e, flip: 0x259a, parts: [QUARTER + 1, QUARTER + 2] },
+]
+
+// A Raster paints 1024 distinct color pairs exactly and the rest as their nearest, so the palette is the largest of these
+// whose cells use at most that many (31 colors and the default make 32 x 32, which never goes over)
+const PALETTE_SIZES = [192, 160, 128, 96, 72, 56, 44, 31]
+const MAX_PAIRS = 1024
+// A box with more cells than this starts the search at 160 colors, to bound the work
+const BIG_BOX_CELLS = 2200
+const WEIGHTS = [0.3, 0.59, 0.11]
+// A sample that is painted over, or left without a color, counts as this much error (half of 255 squared)
+const HALF_ERR = 65025 * 0.5
+// A shape has to beat the best so far by this much: a flat cell fits every shape equally, up to rounding, and stays the
+// full block (one color pair) instead of one of the others at random
+const TIE_ERR = 1e-3
+
+// Median cut over the opaque samples (every fourth pixel): the palette after each of `sizes` splits, as flat r, g, b
+// lists. The splits run once, since a smaller palette is the same cut stopped earlier.
+function medianCut(rgba: Uint8Array, sizes: number[]): Map<number, number[]> {
+  const rgb: number[] = []
+  for (let i = 0; i < rgba.length; i += 16) if ((rgba[i + 3] ?? 0) >= 128) rgb.push(rgba[i]!, rgba[i + 1]!, rgba[i + 2]!)
+  type Box = { items: number[]; span: number; channel: number }
+  const measure = (items: number[]): Box => {
+    let span = -1
+    let channel = 0
+    if (items.length >= 2) {
+      for (let c = 0; c < 3; c++) {
+        let [lo, hi] = [255, 0]
+        for (const i of items) {
+          const v = rgb[i * 3 + c]!
+          if (v < lo) lo = v
+          if (v > hi) hi = v
+        }
+        if (hi - lo > span) [span, channel] = [hi - lo, c]
+      }
+    }
+    return { items, span, channel }
   }
-  for (let y = 0; y < rows; y++) {
-    for (let x = 0; x < cols; x++) {
-      const [up, down] = [pixel(x, 2 * y), pixel(x, 2 * y + 1)]
-      const cell = up !== null ? [0x2580, up, down ?? CELL_DEFAULT] : down !== null ? [0x2584, down, CELL_DEFAULT] : [0x20, CELL_DEFAULT, CELL_DEFAULT]
-      cell.forEach((word, k) => view.setUint32((y * cols + x) * 12 + k * 4, word, true))
+  const mean = (boxes: Box[]): number[] =>
+    boxes.filter((b) => b.items.length).flatMap((b) => [0, 1, 2].map((c) => b.items.reduce((s, i) => s + rgb[i * 3 + c]!, 0) / b.items.length))
+  const out = new Map<number, number[]>()
+  const boxes = [measure(Array.from({ length: rgb.length / 3 }, (_, i) => i))]
+  for (const n of [...sizes].sort((a, b) => a - b)) {
+    while (boxes.length < n) {
+      let pick = -1
+      boxes.forEach((b, i) => {
+        if (b.span >= 0 && (pick < 0 || b.span > boxes[pick]!.span)) pick = i
+      })
+      if (pick < 0) break
+      const { items, channel } = boxes[pick]!
+      const sorted = [...items].sort((p, q) => rgb[p * 3 + channel]! - rgb[q * 3 + channel]!)
+      boxes.splice(pick, 1, measure(sorted.slice(0, sorted.length >> 1)), measure(sorted.slice(sorted.length >> 1)))
+    }
+    out.set(n, mean(boxes))
+  }
+  return out
+}
+
+type Snap = (r: number, g: number, b: number) => number[]
+
+// The cells as u32 triplets [code point, foreground, background], and how many distinct color pairs they use
+type Painted = { words: Uint32Array; pairs: number }
+
+// What one side of a glyph costs, from the sums of its samples: the error it leaves, and the color to paint it in
+// `colors[at]`. A side mostly see-through is the terminal's default color; the rest take the palette's color nearest their
+// mean. Without a `snap` the color is the mean itself, and the error the least any color leaves: a floor under the real one.
+function judge(v: Float64Array, snap: Snap | null, colors: number[], at: number): number {
+  const total = v[N]!
+  const solid = v[SOLID]!
+  if (solid * 2 < total || total === 0) {
+    colors[at] = CELL_DEFAULT
+    return solid * HALF_ERR
+  }
+  let r = v[SUM]! / solid
+  let g = v[SUM + 1]! / solid
+  let b = v[SUM + 2]! / solid
+  if (snap) {
+    const near = snap(r, g, b)
+    r = near[0]!
+    g = near[1]!
+    b = near[2]!
+  }
+  colors[at] = (Math.round(r) << 16) | (Math.round(g) << 8) | Math.round(b)
+  let err = (total - solid) * HALF_ERR
+  err += WEIGHTS[0]! * (v[SQ]! - 2 * r * v[SUM]! + solid * r * r)
+  err += WEIGHTS[1]! * (v[SQ + 1]! - 2 * g * v[SUM + 1]! + solid * g * g)
+  err += WEIGHTS[2]! * (v[SQ + 2]! - 2 * b * v[SUM + 2]! + solid * b * b)
+  return err
+}
+
+const [whole, painted, rest] = [new Float64Array(STAT), new Float64Array(STAT), new Float64Array(STAT)]
+const picked = [0, 0]
+
+// The glyph and the two colors with the least error for one cell, from its groups' sums: [code point, foreground, background]
+function bestCell(groups: Float64Array, snap: Snap): [number, number, number] {
+  whole.fill(0)
+  for (let g = ROW; g < ROW + SAMPLES; g++) for (let j = 0; j < STAT; j++) whole[j]! += groups[g * STAT + j]!
+  let best = Infinity
+  let cell: [number, number, number] = [0x20, CELL_DEFAULT, CELL_DEFAULT]
+  for (const { cp, flip, parts } of SHAPES) {
+    painted.fill(0)
+    for (const g of parts) for (let j = 0; j < STAT; j++) painted[j]! += groups[g * STAT + j]!
+    for (let j = 0; j < STAT; j++) rest[j] = whole[j]! - painted[j]!
+    // A shape that cannot beat the best even with the exact mean for colors is not worth finding its palette colors
+    if (judge(rest, null, picked, 0) + judge(painted, null, picked, 1) >= best - TIE_ERR) continue
+    const err = judge(rest, snap, picked, 0) + judge(painted, snap, picked, 1)
+    if (err >= best - TIE_ERR) continue
+    const bg = picked[0]!
+    const fg = picked[1]!
+    if (fg !== CELL_DEFAULT) [best, cell] = [err, [cp, fg, bg]]
+    else if (bg === CELL_DEFAULT) [best, cell] = [err, [0x20, CELL_DEFAULT, CELL_DEFAULT]]
+    else if (flip !== null) [best, cell] = [err, [flip, bg, CELL_DEFAULT]]
+  }
+  return cell
+}
+
+function paintCells(rgba: Uint8Array, cols: number, rows: number, palette: number[]): Painted {
+  const snap: Snap = (r, g, b) => {
+    let best = Infinity
+    let near = -1
+    for (let i = 0; i < palette.length; i += 3) {
+      let d = palette[i]! - r
+      d = WEIGHTS[0]! * (d * d)
+      if (d >= best) continue
+      let e = palette[i + 1]! - g
+      d += WEIGHTS[1]! * (e * e)
+      if (d >= best) continue
+      e = palette[i + 2]! - b
+      d += WEIGHTS[2]! * (e * e)
+      if (d < best) {
+        best = d
+        near = i
+      }
+    }
+    return near < 0 ? [r, g, b] : [palette[near]!, palette[near + 1]!, palette[near + 2]!]
+  }
+  const words = new Uint32Array(cols * rows * 3)
+  const pairs = new Set<number>()
+  const groups = new Float64Array(GROUPS * STAT)
+  // The sample at byte `i` of the frame, opaque or not, counted into a group
+  const add = (group: number, i: number, solid: number): void => {
+    const at = group * STAT
+    const r = solid * rgba[i]!
+    const g = solid * rgba[i + 1]!
+    const b = solid * rgba[i + 2]!
+    groups[at + N]!++
+    groups[at + SOLID]! += solid
+    groups[at + SUM]! += r
+    groups[at + SUM + 1]! += g
+    groups[at + SUM + 2]! += b
+    groups[at + SQ]! += r * r
+    groups[at + SQ + 1]! += g * g
+    groups[at + SQ + 2]! += b * b
+  }
+  const width = cols * SAMPLES
+  for (let cy = 0; cy < rows; cy++) {
+    for (let cx = 0; cx < cols; cx++) {
+      groups.fill(0)
+      for (let y = 0; y < SAMPLES; y++) {
+        for (let x = 0; x < SAMPLES; x++) {
+          const i = ((cy * SAMPLES + y) * width + cx * SAMPLES + x) * 4
+          const solid = (rgba[i + 3] ?? 0) >= 128 ? 1 : 0
+          const quarter = (y >= SAMPLES / 2 ? 2 : 0) + (x >= SAMPLES / 2 ? 1 : 0)
+          add(ROW + y, i, solid)
+          add(COL + x, i, solid)
+          add(QUARTER + quarter, i, solid)
+        }
+      }
+      const [cp, fg, bg] = bestCell(groups, snap)
+      words.set([cp, fg, bg], (cy * cols + cx) * 3)
+      pairs.add(fg * 0x2000000 + bg)
     }
   }
+  return { words, pairs: pairs.size }
+}
+
+// RGBA samples (cols*8 wide, rows*8 tall) as cells: per cell the block glyph and two colors that match its 8 x 8 samples
+// best, every color snapped to a median-cut palette of the largest size whose cells use at most 1024 distinct color pairs
+export function glyphCells(rgba: Uint8Array, cols: number, rows: number): Painted {
+  const sizes = cols * rows > BIG_BOX_CELLS ? PALETTE_SIZES.filter((n) => n <= 160) : PALETTE_SIZES
+  const palettes = medianCut(rgba, sizes)
+  let made: Painted = { words: new Uint32Array(0), pairs: 0 }
+  let tried = -1
+  for (const n of sizes) {
+    const palette = palettes.get(n)!
+    if (palette.length === tried) continue // the cut ran out of colors: this is the palette just tried
+    tried = palette.length
+    made = paintCells(rgba, cols, rows, palette)
+    if (made.pairs <= MAX_PAIRS) break
+  }
+  return made
+}
+
+// The cells of glyphCells as a Raster takes them: little-endian u32 triplets [code point, foreground, background], base64
+export function rasterCells(rgba: Uint8Array, cols: number, rows: number): string {
+  const { words } = glyphCells(rgba, cols, rows)
+  const view = new DataView(new ArrayBuffer(words.length * 4))
+  words.forEach((word, i) => view.setUint32(i * 4, word, true))
   return bytesToBase64(new Uint8Array(view.buffer))
 }
 
