@@ -410,6 +410,36 @@ test('a provider gets tool search it can use: the search renamed, loaded tools k
   assert.deepStrictEqual(L.rewriteBody(plain, {}), { body: plain, restoreToolSearch: false }, 'a request without tool search is sent as it came')
 })
 
+// A session whose MCP server reconnected (captured 2026-10-24 from a cc-agent agent switched to glm): Claude Code
+// announces the server's tools in system messages, tool_addition when it connects and tool_removal when it goes,
+// instead of in tools[]. Anthropic applies them; z.ai ignores them, so the model never saw those tools.
+const toolChanges = () => {
+  const def = (name) => ({ type: 'tool_addition', tool: { type: 'tool_definition', definition: { name, description: name, input_schema: { type: 'object', properties: {} } } } })
+  const gone = (name) => ({ type: 'tool_removal', tool: { type: 'tool_reference', name } })
+  return {
+    model: 'claude-sonnet-5-5',
+    tools: [{ name: 'Read', input_schema: { type: 'object' } }, { name: 'ToolSearch', input_schema: { type: 'object' } }],
+    messages: [
+      { role: 'user', content: 'start' },
+      { role: 'system', content: [{ type: 'text', text: 'The following tools just became available' }, def('mcp__x__reply'), def('mcp__x__old')] },
+      { role: 'assistant', content: [{ type: 'text', text: 'ok' }] },
+      { role: 'system', content: [{ type: 'text', text: 'These tools are no longer available' }, gone('mcp__x__reply'), gone('mcp__x__old')] },
+      { role: 'system', content: [def('mcp__x__reply')] },
+      { role: 'user', content: 'answer with reply' },
+    ],
+  }
+}
+
+test('tools Claude Code adds or removes in system messages reach a provider in tools[], as they stand now', () => {
+  const j = JSON.parse(L.rewriteBody(Buffer.from(JSON.stringify(toolChanges())), { model: 'glm-5.3' }).body.toString())
+  assert.deepStrictEqual(j.tools.map((t) => t.name), ['Read', 'load_deferred_tools', 'mcp__x__reply'], 'added after its last removal: present; removed: gone')
+  const blocks = j.messages.flatMap((m) => (Array.isArray(m.content) ? m.content : []))
+  assert.ok(!blocks.some((b) => b.type === 'tool_addition' || b.type === 'tool_removal'), 'no block the provider cannot read is left')
+  assert.deepStrictEqual(j.messages.map((m) => m.role), ['user', 'system', 'assistant', 'system', 'user'], 'a system message left empty goes; one with text stays')
+  const removedFromStatic = { ...toolChanges(), messages: [{ role: 'system', content: [{ type: 'tool_removal', tool: { type: 'tool_reference', name: 'Read' } }] }, { role: 'user', content: 'hi' }] }
+  assert.deepStrictEqual(JSON.parse(L.rewriteBody(Buffer.from(JSON.stringify(removedFromStatic)), {}).body.toString()).tools.map((t) => t.name), ['load_deferred_tools'], 'a removal applies to tools[] too')
+})
+
 test("the provider's calls to the renamed search reach Claude Code as ToolSearch, across chunk and UTF-8 splits", async () => {
   const sse = 'event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"t2","name": "load_deferred_tools","input":{}}}\n\nevent: content_block_delta\ndata: {"delta":{"text":"說明 load_deferred_tools"}}\n\n'
   const bytes = Buffer.from(sse)
