@@ -8,10 +8,12 @@ const fs = require('fs')
 const path = require('path')
 const net = require('net')
 const tls = require('tls')
+const crypto = require('crypto')
 const { pipeline } = require('stream')
 const L = require('./logic')
 const PKI = require('./pki')
 const P = require('./ping')
+const K = require('./keychain')
 
 // This process is itself the HTTPS proxy: it must never send its own traffic, or its children's, through a proxy
 // setting inherited from Claude Code, which would loop back into it.
@@ -49,26 +51,52 @@ const STATUS_DIR = path.join(dir, 'model-relay-status')
 // The file is re-read on every request so edits apply at once. A read that fails (an editor mid-save, a typo) keeps
 // the last good config instead of failing requests; "doctor" is what tells a person the file is broken.
 let lastGoodCfg = null
-// env:VAR tokens that did not resolve in THIS process (a router started before the key was exported never sees it)
+// env:VAR tokens that did not resolve in THIS process (a router started before the key was exported never sees it),
+// and keychain: items it could not read
 let unresolved = []
 
+// keychain: tokens are read in the background, started by the first config parse that names them (cfg0 below, a request
+// or a /__health), and kept; a failed item is read again only after model-relay.json has changed, never on a timer (see
+// K.cachedReader). A request never waits on the keychain: until an item's read lands its providers are skipped. Never put
+// in process.env, a log line or an error text.
+let cfgStamp = '' // the state of model-relay.json at the last readCfg: mtime and size
+const keychain = K.cachedReader(K.readSecretAsync, (line) => log(line), () => cfgStamp)
 const HOME = process.env.USERPROFILE || process.env.HOME || ''
-// Set only by a test that preloads code into this process (node --require): lets account windows be routed while
-// claudeUrl is a local stand-in for Anthropic. No config key or environment variable can set it.
-const parseOpts = { anyClaudeUrl: globalThis.__modelRelayAnyClaudeUrl === true }
+// Set only by a test that preloads code into this process (node --require): lets a kind "anthropic" provider use a
+// local stand-in for Anthropic. No config key or environment variable can set it. relayDir and home: whose account is
+// the relay's own (an accounts entry whose configDir is this dir), which is never reserved as anybody's fallback.
+const parseOpts = { keychain: keychain.get, anyClaudeUrl: globalThis.__modelRelayAnyClaudeUrl === true, relayDir: dir, home: HOME }
+const where = { relayDir: dir, home: HOME }
 
 // Windows of a second account in mode "switch" (the launcher wrapper's relaunch, or a window started on that account's
 // config dir with MODEL_RELAY_CONFIG_DIR): sid -> { account, registeredAt }, set by POST /__account. In memory only, never
 // in the state file; emptied whenever the config's mode is not "switch"; the oldest entry goes past the cap.
 const accountSessions = new Map()
 const ACCOUNT_SESSIONS_MAX = 256
-// When each account answered its own usage limit plus failover.cooldownMs, account -> ms, for an account whose windows
-// hit it. In memory only: after a restart the first request tries the account again.
+// When each account answered its own usage limit plus failover.cooldownMs, account -> ms: an account whose windows hit it,
+// a fallback account and a failover.chain account (rc-keep, api-only) that answered it alike. Until then A's windows go to
+// the next account of its list, a fallback account is skipped, and so is a chain account (toAnthropicAccount: the next
+// link takes the request). In memory only: after a restart the first request tries the account again.
 const accountLimitedUntil = new Map()
 const limitedUntil = (name) => accountLimitedUntil.get(name) || 0
+// The session id a window's requests carry on an account in place of its own: "<sid>\n<account>" -> a random
+// UUID made on first use, so all of one window's requests there share one id and the fallback account never sees the
+// window's. In memory only (a restart makes a new one), capped as accountSessions; logged in short form only.
+const fallbackSids = new Map()
+function fallbackSid(sid, account) {
+  const key = `${sid}\n${account}`
+  let id = fallbackSids.get(key)
+  if (!id) {
+    if (fallbackSids.size >= ACCOUNT_SESSIONS_MAX) fallbackSids.delete(fallbackSids.keys().next().value)
+    id = crypto.randomUUID()
+    fallbackSids.set(key, id)
+    log(`session ${short(sid)} is session ${short(id)} on ${account}`)
+  }
+  return id
+}
 // An account's login file (L.loginFile: <home>/.claude.json for the default dir, else <configDir>/.claude.json), its
-// oauthAccount accountUuid only (never logged), lower case, or null when it cannot be read: whose usage limit a 429 is.
-// Read again when the file's mtime changes.
+// oauthAccount accountUuid and organizationUuid only (never logged), lower case, or null when it cannot be read: whose
+// usage limit a 429 is, and whether two accounts share an organization. Read again when the file's mtime changes.
 const logins = new Map() // file -> { mtimeMs, ids }
 function loginIdsOf(cfg, account) {
   const given = cfg && cfg.accountView ? cfg.accountView.dirs.get(account) : undefined
@@ -78,16 +106,75 @@ const ownAccountUuid = (cfg, account) => (loginIdsOf(cfg, account) || {}).accoun
 // The relay dir's own login (main's), or null when it cannot be read
 const relayAccountUuid = () => (L.loginIds(L.loginFile(path.resolve(dir), HOME), logins) || {}).accountUuid || null
 
+// The fallback accounts of `account` that may serve it now, in order, as providers: loaded as fallbackOnly and passing
+// the org rule (L.fallbackRefusal), re-checked on every call. tell: log a refused one (names and a fixed text only), once
+// per reason until it changes or the account is usable again, on request paths
+const skipsTold = new Map() // "<account>\n<fallback account>" -> the reason last logged
+function usableTargets(cfg, account, tell = false) {
+  return L.accountFallbacks(cfg, account).filter(({ provider, allowCrossOrg }) => {
+    const why = L.fallbackRefusal(account, provider, allowCrossOrg, (n) => loginIdsOf(cfg, n))
+    const key = `${account}\n${provider.name}`
+    if (tell && !why) skipsTold.delete(key)
+    if (tell && why && skipsTold.get(key) !== why) {
+      skipsTold.set(key, why)
+      log(`account ${account}: ${provider.name} skipped: ${why}`)
+    }
+    return !why
+  }).map((x) => x.provider)
+}
+// The next fallback account for this request: usable, not at its own usage limit, not tried yet (tried: names)
+const nextTarget = (cfg, account, tried, tell = false) => usableTargets(cfg, account, tell).find((p) => !tried.includes(p.name) && Date.now() >= limitedUntil(p.name)) || null
+
+// opts.walk for a request served from `account`'s list: called with the fallback account that just could not serve it and
+// the names tried so far, and gives the next usable one, or null. Always A's list, the config read again, the original
+// body each hop (toProvider's caller keeps it). deliver has marked an account that answered its usage limit already;
+// refused: that account's body could not be spliced, which says nothing of its limit
+const walkFor = (account) => (target, tried, refused = false) => {
+  const cfgNow = readCfg()
+  const next = cfgNow ? nextTarget(cfgNow, account, tried, true) : null
+  log(`account ${target.name} ${refused ? 'could not serve a request' : 'hit its usage limit'} as ${account}'s fallback: ${next ? `${next.name} goes on with the request` : `no other fallback account of ${account} is usable now`}`)
+  return next
+}
+
+// The account view (the relay's own account by realpath, the fallback lists by scan) of the config text last read. Every
+// request reads the config several times, and the view is the same until the text, or something that decides what a path
+// in it is, changes: each account folder and the login file in it (and the default login file, <home>/.claude.json) are
+// stat'ed for their mtimes (a folder that appears, or a symlink that is pointed elsewhere, changes the realpath the view
+// was made from), and that is all it costs per read; no realpath.
+let viewCache = null // { text, stamp, view }
+const mtimeOf = (p) => {
+  try {
+    return fs.statSync(p).mtimeMs
+  } catch {
+    return 0
+  }
+}
+const loginStamp = (view) => [mtimeOf(path.join(HOME, '.claude.json')), ...[...view.dirs.values()].map((given) => {
+  const d = L.expandHome(given, HOME)
+  return `${mtimeOf(d)}:${mtimeOf(path.join(d, '.claude.json'))}`
+})].join('|')
+function accountViewOf(raw, text) {
+  const stamp = viewCache && viewCache.text === text ? loginStamp(viewCache.view) : null
+  if (stamp !== null && stamp === viewCache.stamp) return viewCache.view
+  const view = L.accountView(raw, parseOpts.anyClaudeUrl, where)
+  viewCache = { text, stamp: loginStamp(view), view }
+  return view
+}
+
 const readCfg = () => {
   unresolved = [] // a file that cannot be read or parsed must not be blamed on an env var
   try {
-    const raw = JSON.parse(fs.readFileSync(CFG_FILE, 'utf8'))
-    unresolved = L.unresolvedEnv(raw)
+    const st = fs.statSync(CFG_FILE)
+    cfgStamp = `${st.mtimeMs}:${st.size}`
+    const text = fs.readFileSync(CFG_FILE, 'utf8')
+    const raw = JSON.parse(text)
+    const view = accountViewOf(raw, text)
+    // An item still being read is not reported: it is not missing, and its hint would be gone a moment later
+    unresolved = L.unresolvedEnv(raw, process.env, keychain.get, parseOpts.anyClaudeUrl, { ...where, view }).filter(keychain.reportable)
     // A file that reads fine but has no usable provider (keys not exported yet) still lets Claude through, and is what a
-    // later unreadable file falls back to
-    const view = L.accountView(raw, parseOpts.anyClaudeUrl)
+    // later unreadable file falls back to: never an older file's providers (a Claude account a mode change dropped)
     if (view.mode !== 'switch') accountSessions.clear()
-    lastGoodCfg = Object.assign(L.parseCfg(raw) || L.bareCfg(raw), { accountView: view })
+    lastGoodCfg = Object.assign(L.parseCfg(raw, process.env, { ...parseOpts, view }) || L.bareCfg(raw), { accountView: view })
     return lastGoodCfg
   } catch {
     return lastGoodCfg
@@ -187,10 +274,11 @@ const logReq = (entry) => {
   } catch {}
 }
 
+const errorBody = (message) => JSON.stringify({ type: 'error', error: { type: 'api_error', message: `model-relay router: ${message}` } })
 const apiError = (res, status, message) => {
   if (res.headersSent) return res.end()
   res.writeHead(status, { 'content-type': 'application/json' })
-  res.end(JSON.stringify({ type: 'error', error: { type: 'api_error', message: `model-relay router: ${message}` } }))
+  res.end(errorBody(message))
 }
 
 const json = (res, obj) => {
@@ -242,16 +330,28 @@ async function pingOne(provider) {
   return pingStats[provider.name]
 }
 
-// tried: providers this request already gave up on, so a fallback never loops back to one of them
-function toProvider(provider, req, res, body, rewrite, sid, attempt = 0, tried = []) {
+// true when the request asked for Message Threads, which no provider holds; it has been answered with Anthropic's refusal
+function refusedThreads(provider, req, res, sid) {
   const threadRefusal = L.threadBetaRefusal(req.headers)
-  if (threadRefusal) {
-    logReq({ to: `${provider.name}-thread-refused`, sid: short(sid) })
-    if (res.headersSent) return res.end()
+  if (!threadRefusal) return false
+  logReq({ to: `${provider.name}-thread-refused`, sid: short(sid) })
+  if (res.headersSent) res.end()
+  else {
     res.writeHead(400, { 'content-type': 'application/json' })
-    return res.end(JSON.stringify({ type: 'error', error: { type: 'invalid_request_error', message: threadRefusal } }))
+    res.end(JSON.stringify({ type: 'error', error: { type: 'invalid_request_error', message: threadRefusal } }))
   }
-  const t0 = Date.now()
+  return true
+}
+
+// tried: providers this request already gave up on, so a fallback never loops back to one of them. opts.noChain: this
+// provider answers the request or the caller gets its error; nobody else is asked (set here for a fallbackOnly account,
+// and carried through every retry)
+function toProvider(provider, req, res, body, rewrite, sid, attempt = 0, tried = [], opts = {}) {
+  if (provider.fallbackOnly) opts = { ...opts, noChain: true }
+  // The one branch for a Claude account: the first failover, a pinned session, the cooldown, a fallback and every retry
+  // all reach a provider through here
+  if (L.isAccount(provider)) return toAnthropicAccount(provider, req, res, body, sid, attempt, tried, opts)
+  if (refusedThreads(provider, req, res, sid)) return
   let out = body
   let restoreToolSearch = false
   if (body.length) {
@@ -268,13 +368,82 @@ function toProvider(provider, req, res, body, rewrite, sid, attempt = 0, tried =
   const headers = P.authHeaders(provider, req.headers)
   // The answer is read to rename the search back, so it has to come uncompressed
   if (restoreToolSearch) headers['accept-encoding'] = 'identity'
+  deliver(provider, req, res, body, out, headers, { rewrite, sid, attempt, tried, restoreToolSearch, opts })
+}
+
+// A second Claude subscription (rc-keep, api-only): Claude Code's own request with that account's token, nothing else
+// changed but the account_uuid and device_id in metadata.user_id and the address in the injected email sentence
+// (L.spliceAccount); any other mention of your account in the conversation is not scrubbed.
+// req.headers is never changed, so a later fallback starts from the caller's headers.
+// Every account also gets the window's replacement session id (fallbackSid), in metadata.user_id inside the same splice
+// and in x-claude-code-session-id: a chain account in rc-keep and api-only, as a fallback account. A request with no
+// session header has no id to replace, and goes on with the one in its body.
+function toAnthropicAccount(provider, req, res, body, sid, attempt, tried, opts = {}) {
+  if (refusedThreads(provider, req, res, sid)) return
+  // Only a model call is the account's; anything else (GET /v1/models from a pinned session) goes to Anthropic as it
+  // came, with the caller's own credentials
+  const asCallerSent = () => send(provider.url, req, res, body, { ...req.headers }, (ur) => {
+    res.writeHead(ur.statusCode, ur.headers)
+    relay(ur, res)
+  }, (e) => apiError(res, 502, `Anthropic unreachable: ${e.message}`))
+  if (!L.isRoutedRequest(req.method, req.url)) return asCallerSent()
+  // A chain account that answered its own usage limit less than failover.cooldownMs ago is not asked again: the next link
+  // of the chain takes the request (decide, a pin by hand and nextFallback all arrive here). With no other link it is
+  // asked anyway, and answers its limit again.
+  if (!provider.fallbackOnly && !opts.noChain && Date.now() < limitedUntil(provider.name)) {
+    const cfgNow = readCfg()
+    const next = cfgNow && cfgNow.failoverEnabled ? L.nextFallback(cfgNow, provider.name, tried, L.requestModel(body)) : null
+    if (next) {
+      log(`provider "${provider.name}" is at its usage limit until its cooldown ends; "${next.name}" takes this request`)
+      return toProvider(next, req, res, body, true, sid, 0, [...tried, provider.name])
+    }
+  }
+  const session = sid ? { from: sid, to: fallbackSid(sid, provider.name) } : null
+  const { body: out, why } = body.length ? L.spliceAccount(body, provider, session) : { body, why: null }
+  if (why) {
+    // A body whose metadata ids or injected email sentence cannot be replaced exactly never goes out with this account's
+    // token: the next link takes it, or the caller gets an error. It is never resent on your own account behind your back.
+    log(`provider "${provider.name}" not used for this request: ${why}`)
+    // A fallback account of a list: the next account of that list; when the list is out, the relay's own account goes on
+    // with main's failover (opts.exhausted), and any other window gets the error. The window's own account is at its
+    // usage limit, so "back to your own account" is no way out for it.
+    if (opts.walk) {
+      const next = opts.walk(provider, [...tried, provider.name], true)
+      if (next) return toProvider(next, req, res, body, true, sid, 0, [...tried, provider.name], { walk: opts.walk, exhausted: opts.exhausted })
+      const text = `account "${provider.name}" could not serve this request: ${why}; nothing was sent with that account, and this window's own account is at its usage limit. Continue in ${provider.name}'s own login (/provider switch, then /exit, when it is the account accountFallback.account names; otherwise start Claude Code with CLAUDE_CONFIG_DIR set to its folder and --continue), or wait for the limit to reset; details in model-relay.log`
+      return opts.exhausted ? opts.exhausted(502, errorBody(text), { 'content-type': 'application/json' }) : apiError(res, 502, text)
+    }
+    const cfgNow = readCfg()
+    const next = !opts.noChain && cfgNow && cfgNow.failoverEnabled ? L.nextFallback(cfgNow, provider.name, tried, L.requestModel(body)) : null
+    return next ? toProvider(next, req, res, body, true, sid, 0, [...tried, provider.name]) : apiError(res, 502, `account "${provider.name}" could not serve this request: ${why}; nothing was sent with that account. /provider claude (or waiting out the cooldown) continues on your own account; details in model-relay.log`)
+  }
+  // A fresh object with exactly one authorization, the account's; the caller's authorization and x-api-key are dropped
+  const headers = P.authHeaders(provider, req.headers)
+  headers['anthropic-beta'] = L.withOAuthBeta(headers['anthropic-beta'])
+  if (session) headers['x-claude-code-session-id'] = session.to
+  deliver(provider, req, res, body, out, headers, { rewrite: true, sid, attempt, tried, restoreToolSearch: false, usageLimitMovesOn: true, opts })
+}
+
+// Sends `out` with `headers`, then streams a success back, or retries this provider, or hands the original `body` to
+// the next provider. usageLimitMovesOn: a usage-limit 429 is not retried here (the account stays out for hours) and
+// moves on to the next link whatever retry.failover says. opts.noChain (see toProvider): nobody takes over.
+function deliver(provider, req, res, body, out, headers, { rewrite, sid, attempt, tried, restoreToolSearch, usageLimitMovesOn = false, opts = {} }) {
+  const t0 = Date.now()
   // Per-provider switch: retryCfg === null means this provider never retries
   const retryCfg = provider.retryCfg !== undefined ? provider.retryCfg : null
 
-  // Retries exhausted on this provider: hand the ORIGINAL body to the failover provider when one exists
-  const giveUp = (status, text, upstreamHeaders) => {
+  // Retries exhausted on this provider: hand the ORIGINAL body to the failover provider when one exists. A fallback
+  // account's own usage limit (opts.walk) goes to the next account of the list instead, and when none is left to
+  // opts.exhausted (the relay's own account: main's failover) or back to the caller
+  const giveUp = (status, text, upstreamHeaders, limited = false) => {
+    if (limited && opts.walk) {
+      const next = opts.walk(provider, [...tried, provider.name])
+      if (next) return toProvider(next, req, res, body, true, sid, 0, [...tried, provider.name], { walk: opts.walk, exhausted: opts.exhausted })
+      if (opts.exhausted) return opts.exhausted(status, text, upstreamHeaders)
+    }
     const cfgNow = readCfg()
-    const next = retryCfg && retryCfg.failover && cfgNow && cfgNow.failoverEnabled ? L.nextFallback(cfgNow, provider.name, tried) : null
+    const allowed = limited || (retryCfg && retryCfg.failover)
+    const next = !opts.noChain && allowed && cfgNow && cfgNow.failoverEnabled ? L.nextFallback(cfgNow, provider.name, tried, L.requestModel(body)) : null
     if (next) {
       log(`provider "${provider.name}" kept failing (last ${status}); falling back to "${next.name}" for this request`)
       return toProvider(next, req, res, body, true, sid, 0, [...tried, provider.name])
@@ -293,7 +462,7 @@ function toProvider(provider, req, res, body, rewrite, sid, attempt = 0, tried =
     const wait = L.retryWaitMs(status, upstreamHeaders, attempt, retryCfg)
     if (wait === null) return false
     log(`provider "${provider.name}" answered ${status}; retry ${attempt + 1}${retryCfg.attempts ? '/' + retryCfg.attempts : ' (unlimited)'} in ${wait}ms`)
-    setTimeout(() => toProvider(provider, req, res, body, rewrite, sid, attempt + 1, tried), wait)
+    setTimeout(() => toProvider(provider, req, res, body, rewrite, sid, attempt + 1, tried, opts), wait)
     return true
   }
 
@@ -322,6 +491,16 @@ function toProvider(provider, req, res, body, rewrite, sid, attempt = 0, tried =
     ur.on('end', () => {
       const text = Buffer.concat(chunks)
       logReq({ to: `${provider.name}-fail`, sid: short(sid), status, bytes: text.length, attempt })
+      if (usageLimitMovesOn && status === 429) {
+        const encoded = ur.headers['content-encoding'] && ur.headers['content-encoding'] !== 'identity'
+        if (L.isUsageLimit(429, ur.headers, encoded ? '' : text.toString('utf8'))) {
+          providerStats[provider.name] = { status, ms: Date.now() - t0, at: Date.now() }
+          log(`provider "${provider.name}" hit its usage limit; not retried`)
+          // a Claude account out of usage is not asked again until failover.cooldownMs has passed (toAnthropicAccount, nextTarget)
+          if (L.isAccount(provider)) accountLimitedUntil.set(provider.name, Date.now() + ((readCfg() || {}).cooldownMs || 600000))
+          return giveUp(status, text, ur.headers, true)
+        }
+      }
       if (maybeRetry(status, ur.headers, null)) return
       giveUp(status, text, ur.headers)
     })
@@ -353,18 +532,60 @@ function toClaude(cfg, req, res, body, trial, sid) {
       // A compressed body is passed back byte for byte; only a plain one can be read for the usage-limit wording
       const encoded = ur.headers['content-encoding'] && ur.headers['content-encoding'] !== 'identity'
       const text = encoded ? '' : raw.toString('utf8')
-      const foProvider = cfg.failoverProvider ? cfg.providers[cfg.failoverProvider] : null
       const limited = L.isUsageLimit(429, ur.headers, text)
-      if (limited) claudeLimitedAt = Date.now()
-      if (cfg.failoverEnabled && foProvider && limited) {
-        setState(L.onLimited(state, cfg, Date.now()), `claude usage limit${trial ? ' (still)' : ''}: using ${foProvider.name} (${foProvider.model})`)
-        stick(sid, foProvider.name, 'usage limit')
-        return toProvider(foProvider, req, res, body, true, sid)
-      }
-      res.writeHead(ur.statusCode, ur.headers)
-      res.end(raw)
+      // the relay's own account's list comes first, for a request of that account only; main's failover after it
+      const self = limited ? selfFallback(req, res, body, sid) : null
+      if (self) return toProvider(self.next, req, res, body, true, sid, 0, [], { walk: walkFor(self.account), exhausted: () => mainLimit(cfg, req, res, body, trial, sid, limited, ur.statusCode, ur.headers, raw) })
+      mainLimit(cfg, req, res, body, trial, sid, limited, ur.statusCode, ur.headers, raw)
     })
   }, (e) => apiError(res, 502, `Anthropic unreachable: ${e.message}`))
+}
+
+// Claude's 429 as main's failover takes it, as at c1b1fef: a usage limit sets claudeLimitedAt and hands the ORIGINAL body
+// to the chain's first link (onLimited, stick); anything else, or no link, goes back to the caller as it came
+function mainLimit(cfg, req, res, body, trial, sid, limited, status, headers, raw) {
+  const foProvider = cfg.failoverProvider ? cfg.providers[cfg.failoverProvider] : null
+  if (limited) claudeLimitedAt = Date.now()
+  if (cfg.failoverEnabled && foProvider && limited) {
+    setState(L.onLimited(state, cfg, Date.now()), `claude usage limit${trial ? ' (still)' : ''}: using ${foProvider.name} (${L.modelLabel(foProvider)})`)
+    // A Claude account is never stuck to: the session stays unpinned, so the trial brings it back to Claude
+    if (!L.isAccount(foProvider)) stick(sid, foProvider.name, 'usage limit')
+    return toProvider(foProvider, req, res, body, true, sid)
+  }
+  res.writeHead(status, headers)
+  res.end(raw)
+}
+
+// The relay's own account (an accounts entry whose configDir is this dir) with a fallback list: main's windows are its
+// windows, never registered. { account, next } when a usage limit Claude just answered for a request of main's window
+// goes on with that list, else null (main's failover takes it as before). Only a model call not yet answered, and only
+// for a body carrying that account's own account_uuid from its login file: any other body, or an unreadable login, takes
+// today's path. The account then counts as limited for failover.cooldownMs, whether or not a fallback is usable.
+function selfFallback(req, res, body, sid) {
+  if (res.headersSent || !L.isRoutedRequest(req.method, req.url)) return null
+  const cfgNow = readCfg()
+  const self = cfgNow && cfgNow.accountView ? cfgNow.accountView.self : null
+  if (!self || !L.accountFallbacks(cfgNow, self).length) return null
+  const own = ownAccountUuid(cfgNow, self)
+  if (!own || L.bodyAccountUuid(body) !== own) {
+    log(`account ${self} (the relay's own): a usage limit for a request that is not that account's own (or its login could not be read); main's failover takes it`)
+    return null
+  }
+  accountLimitedUntil.set(self, Date.now() + cfgNow.cooldownMs)
+  const next = nextTarget(cfgNow, self, [], true)
+  log(`account ${self} (the relay's own) hit its usage limit: ${next ? `main's windows use ${next.name} for ${Math.round(cfgNow.cooldownMs / 60000)} min (session ${short(sid)})` : 'no fallback account is usable now; main\'s failover takes it'}`)
+  return next ? { account: self, next } : null
+}
+
+// While the relay's own account is at its usage limit: the fallback account a request of main's window routed to Claude
+// goes to directly, or null. The same ownership rule as selfFallback (no own uuid, or another one: today's path).
+function selfDirect(cfg, body) {
+  const self = cfg.accountView ? cfg.accountView.self : null
+  if (!self || Date.now() >= limitedUntil(self)) return null
+  const own = ownAccountUuid(cfg, self)
+  if (!own || L.bodyAccountUuid(body) !== own) return null
+  const next = nextTarget(cfg, self, [], true)
+  return next ? { account: self, next } : null
 }
 
 // The registration of sid as a second account's window, checked against the config as it is now: mode "switch",
@@ -382,8 +603,8 @@ function accountOf(cfg, sid) {
 
 // Claude for a second account's window: the caller's request and credentials as they came, and Claude's answer as it
 // comes, a 429 included. No onLimited, onClaudeOk, stick or claudeLimitedAt: main's failover state never sees it.
-// limitSid: the window's sid; a 429 is read (fallbackAfterLimit) to note that its account is at its usage limit
-// (/__health accountLimited), and is then passed back byte for byte.
+// limitSid: the window's sid; a 429 is read (fallbackAfterLimit) to move it to a fallback account, or, with none to go to,
+// to note that its account is at its usage limit (/__health accountLimited), and is then passed back byte for byte.
 function toClaudeAsSent(cfg, req, res, body, limitSid = null) {
   send(cfg.claudeUrl, req, res, body, { ...req.headers }, (ur) => {
     if (!limitSid || ur.statusCode !== 429) {
@@ -396,7 +617,8 @@ function toClaudeAsSent(cfg, req, res, body, limitSid = null) {
       const raw = Buffer.concat(chunks)
       // as in toClaude: a compressed body is passed back byte for byte, and only a plain one is read for the wording
       const encoded = ur.headers['content-encoding'] && ur.headers['content-encoding'] !== 'identity'
-      fallbackAfterLimit(req, res, body, limitSid, ur.headers, encoded ? '' : raw.toString('utf8'))
+      const go = fallbackAfterLimit(req, res, body, limitSid, ur.headers, encoded ? '' : raw.toString('utf8'))
+      if (go) return toProvider(go.next, req, res, body, true, limitSid, 0, [], { walk: walkFor(go.account) })
       res.writeHead(ur.statusCode, ur.headers)
       res.end(raw)
     })
@@ -415,20 +637,38 @@ function otherLogin(cfg, body) {
   return Boolean(own) && theirs !== own
 }
 
-// Notes that an account window's account is at its usage limit, for /__health (accountLimited); its 429 is passed back
-// by the caller. Only a usage limit, only a model call not yet answered, only while the config (read again now) still has
+// { account, next }: the fallback account to resend an account window's request to after its 429, or null to pass the
+// 429 back. Only a usage limit, only a model call not yet answered, only while the config (read again now) still has
 // the sid registered, and only for a body that carries that account's own account_uuid: a sid registered for the wrong
-// account never marks the real one limited. The account then counts as limited for failover.cooldownMs.
+// account never marks the real one limited. The account then counts as limited for failover.cooldownMs; next is the
+// first usable account of its list not at its own limit. An account with no list at all is marked the same way and its
+// 429 passed back: /__health then says accountLimited, so its window can tell the person what to do.
 function fallbackAfterLimit(req, res, body, sid, headers, text) {
-  if (!L.isUsageLimit(429, headers, text) || res.headersSent || !L.isRoutedRequest(req.method, req.url)) return
+  if (!L.isUsageLimit(429, headers, text) || res.headersSent || !L.isRoutedRequest(req.method, req.url)) return null
   const cfgNow = readCfg()
   const reg = accountOf(cfgNow, sid)
-  if (!reg) return
+  if (!reg) return null
+  const first = L.accountFallbacks(cfgNow, reg.account)[0] || null
   const own = ownAccountUuid(cfgNow, reg.account)
-  if (!own || L.bodyAccountUuid(body) !== own) return
+  if (!own || L.bodyAccountUuid(body) !== own) {
+    if (first) log(`account ${reg.account}: a usage limit for a request that is not that account's own (or its .claude.json could not be read); passed back, ${first.provider.name} not used`)
+    return null
+  }
   accountLimitedUntil.set(reg.account, Date.now() + cfgNow.cooldownMs)
-  log(`account ${reg.account} hit its usage limit; passed back (session ${short(sid)})`)
+  if (!first) {
+    log(`account ${reg.account} hit its usage limit: it has no fallback list; passed back (session ${short(sid)})`)
+    return null
+  }
+  const next = nextTarget(cfgNow, reg.account, [], true)
+  log(next
+    ? `account ${reg.account} hit its usage limit: its windows use ${next.name} for ${Math.round(cfgNow.cooldownMs / 60000)} min (session ${short(sid)})`
+    : `account ${reg.account} hit its usage limit: no fallback account of it is usable now; passed back (session ${short(sid)})`)
+  return next ? { account: reg.account, next } : null
 }
+
+// A fallbackOnly provider serves only a registered window whose account's list names it and lets it (the org rule);
+// never an unregistered sid, so main's windows reach the relay's own account's list only through selfFallback/selfDirect
+const mayUse = (cfg, p, reg) => !p.fallbackOnly || Boolean(reg && usableTargets(cfg, reg.account).includes(p))
 
 function control(req, res, body) {
   const u = new URL(req.url, 'http://x')
@@ -437,11 +677,27 @@ function control(req, res, body) {
     const sid = u.searchParams.get('sid') || ''
     const reg = accountOf(cfg, sid)
     // For an account's window, where its requests go (a pin from before its registration does not count)
-    const accountRoute = reg ? L.accountRoute(state, cfg, null, sid, reg) : null
+    const accountRoute = reg ? L.accountRoute(state, cfg, null, sid, reg, Date.now(), limitedUntil, usableTargets(cfg, reg.account).map((p) => p.name)) : null
+    // a main window while the relay's own account is at its usage limit: the fallback account its requests go to (a name
+    // only; that account stays hidden from main's windows everywhere else)
+    const self = !reg && cfg && cfg.accountView ? cfg.accountView.self : null
+    const selfServing = self && Date.now() < limitedUntil(self) ? nextTarget(cfg, self, []) : null
+    // only while decide sends this session to Claude (a pin, or failover's own provider, sends it elsewhere, and then the
+    // relay's own account's list does not serve it: dispatch takes it only for a request routed to Claude)
+    const selfIsClaude = (cfg, sid) => !cfg || L.parseRoute(L.decide(state, cfg, null, sid, Date.now()), cfg).kind === 'claude'
     const providers = {}
+    const kinds = {} // providers that are not a model id: name -> kind ("anthropic")
+    // a fallbackOnly account is listed, and its stats shown, only to a window that may use it
+    const hidden = (k) => Boolean(cfg && cfg.providers[k] && !mayUse(cfg, cfg.providers[k], reg))
     if (cfg) {
-      for (const [k, p] of Object.entries(cfg.providers)) providers[k] = p.model
+      for (const [k, p] of Object.entries(cfg.providers)) {
+        if (hidden(k)) continue
+        providers[k] = L.modelLabel(p)
+        if (p.kind) kinds[k] = p.kind
+      }
     }
+    const pinned = L.getSessionProvider(state, cfg, sid)
+    const session = (reg && !accountRoute.route) || hidden(pinned) ? 'claude' : pinned
     return json(res, {
       ok: true,
       pid: process.pid,
@@ -458,15 +714,19 @@ function control(req, res, body) {
       aliases: cfg ? L.detectAliases(cfg) : {},
       config: cfg ? { failoverEnabled: cfg.failoverEnabled, retryEnabled: cfg.retry.enabled, proxyEnabled: cfg.proxy.enabled, cooldownMs: cfg.cooldownMs } : null,
       providers,
+      kinds,
       unresolved,
-      stats: providerStats,
+      stats: Object.fromEntries(Object.entries(providerStats).filter(([k]) => !hidden(k))),
       ping: pingStats,
       seenModels,
       sessionsOnCustom: Object.keys(state.sticky || {}).length,
-      session: reg && !accountRoute.route ? 'claude' : L.getSessionProvider(state, cfg, sid),
+      session,
       ...(reg ? { account: reg.account } : {}),
-      // the account is at its usage limit and nobody is left to take its window
-      ...(reg && Date.now() < limitedUntil(reg.account) ? { accountLimited: true } : {}),
+      // the account is at its usage limit, and this window's requests go to its fallback account
+      ...(accountRoute && accountRoute.account ? { accountServing: accountRoute.account } : {}),
+      // the account is at its usage limit and nobody is left to take its window: no list, or every account of it limited
+      ...(reg && Date.now() < limitedUntil(reg.account) && !(accountRoute && accountRoute.account) ? { accountLimited: true } : {}),
+      ...(selfServing && selfIsClaude(cfg, sid) ? { selfServing: selfServing.name } : {}),
       proxy: { enabled: Boolean(cfg && cfg.proxy.enabled), certificate: Boolean(mitmServer()), ...proxyStats },
     })
   }
@@ -478,8 +738,10 @@ function control(req, res, body) {
     } catch {}
     on = typeof on === 'string' ? on.trim().toLowerCase() : ''
     if (typeof sid !== 'string' || !sid || !on) return apiError(res, 400, 'need {sid, on: "<provider>" | "claude"} as strings')
-    if (on !== 'claude' && !cfg?.providers?.[on]) {
-      const avail = cfg ? Object.keys(cfg.providers).join(', ') : 'none'
+    const reg = accountOf(cfg, sid)
+    if (on !== 'claude' && (!cfg?.providers?.[on] || !mayUse(cfg, cfg.providers[on], reg))) {
+      const avail = cfg ? Object.keys(cfg.providers).filter((k) => mayUse(cfg, cfg.providers[k], reg)).join(', ') : 'none'
+      if (cfg?.providers?.[on]) return apiError(res, 400, `provider "${on}" is the fallback of another account's windows; this session cannot use it (configured: ${avail})`)
       return apiError(res, 400, `unknown provider "${on}" (configured: ${avail})`)
     }
     setState(L.setSticky(state, sid, on, Date.now()), `session ${short(sid)} set to ${on} by hand`)
@@ -505,6 +767,7 @@ function control(req, res, body) {
     }
     const name = account.trim().toLowerCase()
     if (!L.SAFE_NAME.test(name) || !view.names.has(name)) return apiError(res, 400, 'that account is not in accounts')
+    if (name === view.self) return apiError(res, 400, 'that account is the relay\'s own; its windows are your own windows and are not registered')
     accountSessions.delete(sid)
     if (accountSessions.size >= ACCOUNT_SESSIONS_MAX) accountSessions.delete(accountSessions.keys().next().value)
     // since: when the window's hook first saw this sid registered, kept across a router restart so its /provider pin
@@ -524,7 +787,8 @@ function control(req, res, body) {
     try {
       target = String(JSON.parse(body.toString('utf8')).provider || '').trim().toLowerCase()
     } catch {}
-    const list = target && cfg.providers[target] ? [cfg.providers[target]] : Object.values(cfg.providers)
+    // A Claude account is never tested: a test request would spend that subscription for nothing
+    const list = (target && cfg.providers[target] ? [cfg.providers[target]] : Object.values(cfg.providers)).filter((p) => !L.isAccount(p))
     Promise.all(list.map(pingOne)).then(
       () => json(res, { ok: true, ping: pingStats, stats: providerStats }),
       (e) => apiError(res, 500, `the test failed: ${e.message}`),
@@ -590,16 +854,38 @@ function dispatch(req, res, tunneled) {
     // MODEL_RELAY_CONFIG_DIR): its usage-limit 429 is not main's, and it takes provider models only, no pins.
     const reg = accountOf(cfg, sid)
     const foreign = !reg && otherLogin(cfg, body)
-    const viaAccount = reg ? L.accountRoute(state, cfg, model, sid, reg) : foreign ? L.accountRoute(state, cfg, model, sid, { registeredAt: Infinity }) : null
-    if (viaAccount && viaAccount.claude) {
+    const viaAccount = reg ? L.accountRoute(state, cfg, model, sid, reg, Date.now(), limitedUntil, usableTargets(cfg, reg.account, Date.now() < limitedUntil(reg.account)).map((p) => p.name)) : foreign ? L.accountRoute(state, cfg, model, sid, { registeredAt: Infinity }) : null
+    const asAccount = () => {
       logReq({ sid: short(sid), model, nMsgs, route: reg ? `account-${reg.account}` : 'other-login', ...(tunneled ? { via: 'proxy' } : {}) })
       return toClaudeAsSent(cfg, req, res, body, reg ? sid : null)
     }
+    if (viaAccount && viaAccount.claude) return asAccount()
+    if (viaAccount && viaAccount.account) {
+      // the account is at its usage limit: straight to its first fallback account not at its own; only the rest of the
+      // account's list takes over from it, nobody else
+      logReq({ sid: short(sid), model, nMsgs, route: `account-${reg.account}-fallback-${viaAccount.account}`, ...(tunneled ? { via: 'proxy' } : {}) })
+      return toProvider(cfg.providers[viaAccount.account], req, res, body, true, sid, 0, [], { walk: walkFor(reg.account) })
+    }
     const route = viaAccount ? viaAccount.route : L.decide(state, cfg, model, sid, Date.now())
-    logReq({ sid: short(sid), model, nMsgs, route, ...(tunneled ? { via: 'proxy' } : {}) })
     const parsed = L.parseRoute(route, cfg)
+    // a pin to a fallbackOnly account from any other session (made in rc-keep, or before the config changed) is ignored:
+    // that session takes its own path as if unpinned
+    if (parsed.kind === 'provider' && parsed.provider && !mayUse(cfg, parsed.provider, reg)) {
+      if (reg) return asAccount()
+      logReq({ sid: short(sid), model, nMsgs, route: 'claude', ...(tunneled ? { via: 'proxy' } : {}) })
+      return toClaude(cfg, req, res, body, false, sid)
+    }
+    // a main window's request for Claude while the relay's own account is at its usage limit: straight to that account's
+    // fallback, for its own requests only; when the list runs out, main's failover takes it (mainLimit)
+    const direct = !reg && parsed.kind === 'claude' && L.isRoutedRequest(req.method, req.url) ? selfDirect(cfg, body) : null
+    if (direct) {
+      logReq({ sid: short(sid), model, nMsgs, route: `account-${direct.account}-fallback-${direct.next.name}`, ...(tunneled ? { via: 'proxy' } : {}) })
+      return toProvider(direct.next, req, res, body, true, sid, 0, [], { walk: walkFor(direct.account), exhausted: (status, text, headers) => mainLimit(readCfg() || cfg, req, res, body, parsed.trial, sid, true, status, headers, text) })
+    }
+    logReq({ sid: short(sid), model, nMsgs, route, ...(tunneled ? { via: 'proxy' } : {}) })
     if (parsed.kind === 'provider' && parsed.provider) {
-      if (parsed.rewrite && state.failoverSince && L.getSessionProvider(state, cfg, sid) === 'claude') {
+      // as in toClaude: the cooldown on a Claude account pins nobody; a /provider pin to it is made by hand only
+      if (parsed.rewrite && state.failoverSince && L.getSessionProvider(state, cfg, sid) === 'claude' && !L.isAccount(parsed.provider)) {
         stick(sid, parsed.name, 'claude still out')
       }
       return toProvider(parsed.provider, req, res, body, parsed.rewrite, sid)

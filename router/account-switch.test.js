@@ -1,7 +1,7 @@
 'use strict'
 // Mode "switch": a window of the second account (registered by sid with POST /__account) keeps the relay for provider
 // models and its own /provider pins, while its Claude requests go to Claude as sent, never through main's failover.
-// The router runs with a preload that only lets claudeUrl be a local stand-in for Anthropic.
+// The router runs with a preload that only lets claudeUrl be a local stand-in (no keychain is involved in this mode).
 require('./test-env')
 const test = require('node:test')
 const assert = require('node:assert')
@@ -168,11 +168,11 @@ const limitedMain = () => {
   return (q) => (q.auth === `Bearer ${MAIN}` && n++ >= 0 && q.url.startsWith('/v1/messages') ? USAGE_LIMIT : OK('claude'))
 }
 
-test('A9: mode off or an unknown mode with accounts configured refuse /__account and route as with no account at all', async (t) => {
+test('A9: mode off and rc-keep with accounts configured refuse /__account and route as with no account at all', async (t) => {
   const none = await relay(t, { anthropic: limitedMain(), account: false })
   const refusedNone = await none.register(S)
   const base = await sequence(none, S)
-  for (const mode of ['off', 'unknown']) {
+  for (const mode of ['off', 'rc-keep']) {
     const r = await relay(t, { anthropic: limitedMain(), top: { accountFallback: { mode, account: 'second' } } })
     const x = await r.register(S)
     assert.strictEqual(x.status, 400, mode)
