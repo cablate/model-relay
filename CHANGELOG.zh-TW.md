@@ -6,6 +6,26 @@
 
 ## [未發布]
 
+### 新增
+
+- **`accountFallback.mode` 決定視窗可不可以移到第二個 Claude 帳號：** 預設的 `"off"` 完全不用，轉發站的行為與 0.7.5 相同。`"switch"` 把視窗移到另一個帳號自己的登入（`/provider switch`），並向轉發站登記它，轉發站會讓那個視窗的 Claude 請求不經過你的備援。用 `setup.mjs set accountFallback.mode <off|switch>` 設定，並用 `setup.mjs set accountFallback.account <name>` 指定 `"switch"` 把視窗移去的帳號。README 的「使用多個 Claude 帳號」一節引用了 Anthropic 條款裡關於一般使用的那句話；額度一用完就在帳號之間移動工作，不一定是它們所說的一般使用，請先讀過。詳見 README。
+- **`setup.mjs account-add <name>`：** 為另一個帳號建立私人的登入資料夾（`~/.claude-<name>` 或 `--dir`），把你共用的設定、代理、外掛與對話紀錄連結進去，寫入 `accounts.<name>.configDir`，並依你的作業系統列出只有你能做的步驟與完整指令（先 `set accountFallback.mode switch`，接著登入、指定帳號、`launcher`，以及一則引用使用條款的說明）。不是新的或空的、屬於它自己的資料夾一律拒絕，也從不碰 shell 設定檔。你的設定資料夾沒有 `projects`、`settings.json` 或 `plugins` 時，它會對每一項警告，並說明沒有它時新帳號的視窗缺了什麼。
+- **`doctor` 會說明帳號模式現在做什麼：** `accountFallback.mode` 為 `"switch"` 時，它會印一行 `Accounts:`，指出 `/provider switch` 把視窗移去的帳號；並對每個帳號列出它讀的登入檔、有沒有帳號、兩個帳號共用同一個登入、預設資料夾裡過時的登入檔副本，以及會讓第二個帳號的視窗不用自己登入送出請求的 `settings.json` 鍵（只列鍵名）。帳號還沒登入或登入的是你自己的帳號時它會警告，切換目標的 `projects/` 不是你的時候也會（並附上 `ln -s` 指令）；只用帳號、沒有設任何供應商時顯示 `Config OK`；印出 `✗` 時，最後會再多一行說明。
+- **`/provider switch` 與啟動器包裝程式**（`"switch"` 模式）：設定資料夾沒有 `model-relay.json` 或模式為 off 時，`tools/launch.mjs` 一切原樣轉交；否則給視窗一個 ID 供 `/provider switch` 使用，`/exit` 之後以第二個帳號自己的登入接續這段對話一次，只沿用 `--model`、`--permission-mode` 與 `--effort`。那個視窗繼續經過你的轉發站；只有在你的 `claudeUrl` 不是 Anthropic、你的 `settings.json` 沒有連到轉發站的設定，或你的 `model-relay.json` 已經不在時，包裝程式才會讓它不經過轉發站。帳號的資料夾不存在、就是這個視窗自己的資料夾、或 `projects/` 資料夾不同時，`/provider switch` 在 `/exit` 之前就拒絕，並附上修法（`ln -s` 指令，或 `New-Item -ItemType SymbolicLink`）；其他情況則印出手動接續的指令，它移除的認證變數和包裝程式相同。`setup.mjs launcher` 把 `model-relay-launch.mjs` 寫進你的設定資料夾，並印出 zsh 與 bash 的別名和 PowerShell 的函式；在 `"switch"` 模式下，外掛每次對話開始時都會更新這個檔案，所以別名在外掛更新後仍然有效。在 Windows 上，包裝程式只從 `PATH` 啟動 `claude.exe`；npm 安裝的 `claude.cmd` 不支援，啟動失敗時的訊息會這麼說。`"switch"` 時，你的帳號額度用完視窗會提示一次。詳見 README。
+- **第二個帳號的視窗繼續經過轉發站**（`"switch"` 模式）：包裝程式重新啟動的視窗，或以那個帳號的設定資料夾啟動、並用 `MODEL_RELAY_CONFIG_DIR` 指向你的設定資料夾的視窗，會使用你的設定與轉發站。它的 Claude 請求以它自己的登入送往 Anthropic，不經過你的備援；供應商、`model-relay:<name>` 子代理、別名與它自己的 `/provider` 固定都和你的視窗一樣能用。它的狀態列、狀態檔、面板與 `/provider status` 都顯示那個帳號（狀態檔是 `claude/<account>`），絕不顯示你的備援；帳號額度用完時，會有一則提示說明該怎麼做。詳見 README。
+- **`/provider setup` 認得帳號指令：** 它會指向 `account-add` 與 `launcher`，而且在改 `accountFallback.mode` 之前會先問你。
+- **帳號視窗保留自己的固定，沒登記的視窗也不會觸發你的備援**（`"switch"` 模式）：外掛會送出它第一次看到登記的時間，所以轉發站重新啟動後，在那個視窗手動做的 `/provider` 固定不會再被丟掉。從未登記的視窗送出的請求，若帳號讀得到、且和你的轉發站資料夾自己的登入不同，就原樣送給 Claude，額度用完的回應不會觸發你的備援。`account-add` 與 `doctor` 印出的登入指令，以及 README 的做法，現在都帶 `MODEL_RELAY_CONFIG_DIR`，讓那個視窗完成登記。
+
+### 變更
+
+- **路由器保留最後一份讀得進來的設定，不論有沒有供應商：** 之後的 `model-relay.json` 讀不了（例如寫到一半）時，以前會回到最後一份有可用供應商的設定；現在保留最後一份讀得進來的，所以只有帳號、沒有供應商的設定，在那一刻仍保有它的帳號。差別只出現在路由器的環境裡有某個金鑰變數沒設（因此沒有可用供應商），之後檔案又讀不了：路由器這時沒有供應商，不再回到更早的那一份。
+- **`switch` 成為保留的供應商名稱：** `/provider switch` 現在是一個指令，比供應商名稱優先比對，所以 `add` 與 `account-add` 會拒絕名為 `switch` 的供應商。已經叫這個名字的供應商仍照它的模型與 `failover.chain` 路由，但不能再用 `/provider switch` 選它：請在 `model-relay.json` 裡改名，包括 `providers`、`failover.chain` 與每份指到它的 `fallback` 清單。見 UPGRADING.md。
+- **`/provider switch` 的邊角更穩：** `claudeUrl` 不是 Anthropic 時，不再印出手動接續的指令（那會讓視窗未經登記就走你的轉發站），改為提示用啟動器包裝程式；`accountFallback.account` 不是單純名稱時，在寫交接檔之前就拒絕，並附上設定單純名稱的指令；包裝程式重新啟動時會印出沒有沿用的選項名稱；對話開始時也不再等待啟動器檔案更新。
+
+### 修正
+
+- **`setup.mjs` 拒絕 `__proto__` 這個名稱：** `add __proto__`（以及 `account-add __proto__`）以前會說供應商已存好，其實什麼都沒寫進檔案：這個名稱會換掉 JSON 物件的原型，而不是新增一個鍵。
+
 ## [0.7.5] - 2026-10-24
 
 切到供應商的視窗，又能叫用對話中途重新連上的 MCP 工具；另有實驗性的面板，可以顯示你正在對話的模型頭像。

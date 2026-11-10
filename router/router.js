@@ -28,6 +28,9 @@ const VERSION = (() => {
     return ''
   }
 })()
+// When this router last saw Claude's usage-limit 429, whatever failover did with it (an empty chain included). Not
+// saved: /__health reports it so a window in accountFallback mode "switch" can say the main account is out.
+let claudeLimitedAt = 0
 // Model and passthrough requests not answered yet, and open blind tunnels and WebSocket upgrades (Remote Control, a
 // git push through HTTPS_PROXY); `setup.mjs restart --if-idle` waits until both are zero
 let inflight = 0
@@ -48,15 +51,44 @@ const STATUS_DIR = path.join(dir, 'model-relay-status')
 let lastGoodCfg = null
 // env:VAR tokens that did not resolve in THIS process (a router started before the key was exported never sees it)
 let unresolved = []
+
+const HOME = process.env.USERPROFILE || process.env.HOME || ''
+// Set only by a test that preloads code into this process (node --require): lets account windows be routed while
+// claudeUrl is a local stand-in for Anthropic. No config key or environment variable can set it.
+const parseOpts = { anyClaudeUrl: globalThis.__modelRelayAnyClaudeUrl === true }
+
+// Windows of a second account in mode "switch" (the launcher wrapper's relaunch, or a window started on that account's
+// config dir with MODEL_RELAY_CONFIG_DIR): sid -> { account, registeredAt }, set by POST /__account. In memory only, never
+// in the state file; emptied whenever the config's mode is not "switch"; the oldest entry goes past the cap.
+const accountSessions = new Map()
+const ACCOUNT_SESSIONS_MAX = 256
+// When each account answered its own usage limit plus failover.cooldownMs, account -> ms, for an account whose windows
+// hit it. In memory only: after a restart the first request tries the account again.
+const accountLimitedUntil = new Map()
+const limitedUntil = (name) => accountLimitedUntil.get(name) || 0
+// An account's login file (L.loginFile: <home>/.claude.json for the default dir, else <configDir>/.claude.json), its
+// oauthAccount accountUuid only (never logged), lower case, or null when it cannot be read: whose usage limit a 429 is.
+// Read again when the file's mtime changes.
+const logins = new Map() // file -> { mtimeMs, ids }
+function loginIdsOf(cfg, account) {
+  const given = cfg && cfg.accountView ? cfg.accountView.dirs.get(account) : undefined
+  return given ? L.loginIds(L.loginFile(L.expandHome(given, HOME), HOME), logins) : null
+}
+const ownAccountUuid = (cfg, account) => (loginIdsOf(cfg, account) || {}).accountUuid || null
+// The relay dir's own login (main's), or null when it cannot be read
+const relayAccountUuid = () => (L.loginIds(L.loginFile(path.resolve(dir), HOME), logins) || {}).accountUuid || null
+
 const readCfg = () => {
   unresolved = [] // a file that cannot be read or parsed must not be blamed on an env var
   try {
     const raw = JSON.parse(fs.readFileSync(CFG_FILE, 'utf8'))
     unresolved = L.unresolvedEnv(raw)
-    const parsed = L.parseCfg(raw)
-    if (parsed) lastGoodCfg = parsed
-    // A file that reads fine but has no usable provider (keys not exported yet) still lets Claude through
-    return parsed || L.bareCfg(raw)
+    // A file that reads fine but has no usable provider (keys not exported yet) still lets Claude through, and is what a
+    // later unreadable file falls back to
+    const view = L.accountView(raw, parseOpts.anyClaudeUrl)
+    if (view.mode !== 'switch') accountSessions.clear()
+    lastGoodCfg = Object.assign(L.parseCfg(raw) || L.bareCfg(raw), { accountView: view })
+    return lastGoodCfg
   } catch {
     return lastGoodCfg
   }
@@ -322,7 +354,9 @@ function toClaude(cfg, req, res, body, trial, sid) {
       const encoded = ur.headers['content-encoding'] && ur.headers['content-encoding'] !== 'identity'
       const text = encoded ? '' : raw.toString('utf8')
       const foProvider = cfg.failoverProvider ? cfg.providers[cfg.failoverProvider] : null
-      if (cfg.failoverEnabled && foProvider && L.isUsageLimit(429, ur.headers, text)) {
+      const limited = L.isUsageLimit(429, ur.headers, text)
+      if (limited) claudeLimitedAt = Date.now()
+      if (cfg.failoverEnabled && foProvider && limited) {
         setState(L.onLimited(state, cfg, Date.now()), `claude usage limit${trial ? ' (still)' : ''}: using ${foProvider.name} (${foProvider.model})`)
         stick(sid, foProvider.name, 'usage limit')
         return toProvider(foProvider, req, res, body, true, sid)
@@ -333,11 +367,77 @@ function toClaude(cfg, req, res, body, trial, sid) {
   }, (e) => apiError(res, 502, `Anthropic unreachable: ${e.message}`))
 }
 
+// The registration of sid as a second account's window, checked against the config as it is now: mode "switch",
+// claudeUrl at Anthropic, the account still in accounts. A registration the config no longer allows is dropped, and the
+// sid takes the normal path again.
+function accountOf(cfg, sid) {
+  const reg = sid ? accountSessions.get(sid) : undefined
+  if (!reg) return undefined
+  const view = cfg && cfg.accountView
+  if (view && view.mode === 'switch' && view.claudeIsAnthropic && view.names.has(reg.account)) return reg
+  accountSessions.delete(sid)
+  log(`session ${short(sid)} is no longer an account window (the config no longer allows it)`)
+  return undefined
+}
+
+// Claude for a second account's window: the caller's request and credentials as they came, and Claude's answer as it
+// comes, a 429 included. No onLimited, onClaudeOk, stick or claudeLimitedAt: main's failover state never sees it.
+// limitSid: the window's sid; a 429 is read (fallbackAfterLimit) to note that its account is at its usage limit
+// (/__health accountLimited), and is then passed back byte for byte.
+function toClaudeAsSent(cfg, req, res, body, limitSid = null) {
+  send(cfg.claudeUrl, req, res, body, { ...req.headers }, (ur) => {
+    if (!limitSid || ur.statusCode !== 429) {
+      res.writeHead(ur.statusCode, ur.headers)
+      return relay(ur, res)
+    }
+    const chunks = []
+    ur.on('data', (c) => chunks.push(c))
+    ur.on('end', () => {
+      const raw = Buffer.concat(chunks)
+      // as in toClaude: a compressed body is passed back byte for byte, and only a plain one is read for the wording
+      const encoded = ur.headers['content-encoding'] && ur.headers['content-encoding'] !== 'identity'
+      fallbackAfterLimit(req, res, body, limitSid, ur.headers, encoded ? '' : raw.toString('utf8'))
+      res.writeHead(ur.statusCode, ur.headers)
+      res.end(raw)
+    })
+  }, (e) => apiError(res, 502, `Anthropic unreachable: ${e.message}`))
+}
+
+// An unregistered window's request in a mode that uses a second account (every mode but "off"; claudeUrl at Anthropic)
+// whose body names an account_uuid that is not the relay dir's own login: another account's window, whatever it is
+// called. false when either uuid cannot be read, so the request takes the path it always took.
+const OTHER_LOGIN_MODES = L.ACCOUNT_MODES.filter((m) => m !== 'off')
+function otherLogin(cfg, body) {
+  const view = cfg.accountView
+  if (!view || !OTHER_LOGIN_MODES.includes(view.mode) || !view.claudeIsAnthropic) return false
+  const theirs = L.bodyAccountUuid(body)
+  const own = theirs && relayAccountUuid()
+  return Boolean(own) && theirs !== own
+}
+
+// Notes that an account window's account is at its usage limit, for /__health (accountLimited); its 429 is passed back
+// by the caller. Only a usage limit, only a model call not yet answered, only while the config (read again now) still has
+// the sid registered, and only for a body that carries that account's own account_uuid: a sid registered for the wrong
+// account never marks the real one limited. The account then counts as limited for failover.cooldownMs.
+function fallbackAfterLimit(req, res, body, sid, headers, text) {
+  if (!L.isUsageLimit(429, headers, text) || res.headersSent || !L.isRoutedRequest(req.method, req.url)) return
+  const cfgNow = readCfg()
+  const reg = accountOf(cfgNow, sid)
+  if (!reg) return
+  const own = ownAccountUuid(cfgNow, reg.account)
+  if (!own || L.bodyAccountUuid(body) !== own) return
+  accountLimitedUntil.set(reg.account, Date.now() + cfgNow.cooldownMs)
+  log(`account ${reg.account} hit its usage limit; passed back (session ${short(sid)})`)
+}
+
 function control(req, res, body) {
   const u = new URL(req.url, 'http://x')
   const cfg = readCfg()
   if (u.pathname === '/__health') {
     const sid = u.searchParams.get('sid') || ''
+    const reg = accountOf(cfg, sid)
+    // For an account's window, where its requests go (a pin from before its registration does not count)
+    const accountRoute = reg ? L.accountRoute(state, cfg, null, sid, reg) : null
     const providers = {}
     if (cfg) {
       for (const [k, p] of Object.entries(cfg.providers)) providers[k] = p.model
@@ -352,17 +452,21 @@ function control(req, res, body) {
       tunnels,
       failoverSince: state.failoverSince,
       nextClaudeTry: state.nextClaudeTry,
+      claudeLimitedAt,
       failoverProvider: cfg ? cfg.failoverProvider : null,
       failoverChain: cfg ? cfg.failoverChain : [],
       aliases: cfg ? L.detectAliases(cfg) : {},
-      config: cfg ? { failoverEnabled: cfg.failoverEnabled, retryEnabled: cfg.retry.enabled, proxyEnabled: cfg.proxy.enabled } : null,
+      config: cfg ? { failoverEnabled: cfg.failoverEnabled, retryEnabled: cfg.retry.enabled, proxyEnabled: cfg.proxy.enabled, cooldownMs: cfg.cooldownMs } : null,
       providers,
       unresolved,
       stats: providerStats,
       ping: pingStats,
       seenModels,
       sessionsOnCustom: Object.keys(state.sticky || {}).length,
-      session: L.getSessionProvider(state, cfg, sid),
+      session: reg && !accountRoute.route ? 'claude' : L.getSessionProvider(state, cfg, sid),
+      ...(reg ? { account: reg.account } : {}),
+      // the account is at its usage limit and nobody is left to take its window
+      ...(reg && Date.now() < limitedUntil(reg.account) ? { accountLimited: true } : {}),
       proxy: { enabled: Boolean(cfg && cfg.proxy.enabled), certificate: Boolean(mitmServer()), ...proxyStats },
     })
   }
@@ -380,6 +484,35 @@ function control(req, res, body) {
     }
     setState(L.setSticky(state, sid, on, Date.now()), `session ${short(sid)} set to ${on} by hand`)
     return json(res, { ok: true, session: on })
+  }
+  // {sid, account}: this sid is a window of that second account, whose Claude requests skip main's failover;
+  // {sid, account: null} ends that. Only in mode "switch", only with claudeUrl at Anthropic, and only for an account
+  // named in accounts. Every refusal is a fixed text that echoes nothing it was sent.
+  if (u.pathname === '/__account' && req.method === 'POST') {
+    let sid
+    let account
+    let since
+    try {
+      ;({ sid, account, since } = JSON.parse(body.toString('utf8')))
+    } catch {}
+    const view = cfg && cfg.accountView
+    if (!view || view.mode !== 'switch') return apiError(res, 400, 'accountFallback.mode is not "switch"; no account window is registered')
+    if (!view.claudeIsAnthropic) return apiError(res, 400, 'account windows are routed only while claudeUrl is https://api.anthropic.com')
+    if (typeof sid !== 'string' || !L.UUID_RE.test(sid) || (account !== null && typeof account !== 'string')) return apiError(res, 400, 'need {sid: "<session uuid>", account: "<name in accounts>" | null}')
+    if (account === null) {
+      if (accountSessions.delete(sid)) log(`session ${short(sid)} is no longer an account window`)
+      return json(res, { ok: true, account: null })
+    }
+    const name = account.trim().toLowerCase()
+    if (!L.SAFE_NAME.test(name) || !view.names.has(name)) return apiError(res, 400, 'that account is not in accounts')
+    accountSessions.delete(sid)
+    if (accountSessions.size >= ACCOUNT_SESSIONS_MAX) accountSessions.delete(accountSessions.keys().next().value)
+    // since: when the window's hook first saw this sid registered, kept across a router restart so its /provider pin
+    // (made after that) still counts; a time not a number, or in the future, is now
+    const now = Date.now()
+    accountSessions.set(sid, { account: name, registeredAt: typeof since === 'number' && since > 0 && since <= now ? since : now })
+    log(`session ${short(sid)} registered as a window of account ${name}`)
+    return json(res, { ok: true, account: name })
   }
   if (u.pathname === '/__probe' && req.method === 'POST') {
     setState({ ...state, nextClaudeTry: 0 }, 'manual probe requested: next new session will try Claude')
@@ -452,7 +585,17 @@ function dispatch(req, res, tunneled) {
       } catch {}
     }
     sawModel(model)
-    const route = L.decide(state, cfg, model, sid, Date.now())
+    // A second account's window: never decide's cooldown or trial, never main's failover state. So is a window that
+    // never registered but carries another login than the relay dir's own (one opened on an account's folder without
+    // MODEL_RELAY_CONFIG_DIR): its usage-limit 429 is not main's, and it takes provider models only, no pins.
+    const reg = accountOf(cfg, sid)
+    const foreign = !reg && otherLogin(cfg, body)
+    const viaAccount = reg ? L.accountRoute(state, cfg, model, sid, reg) : foreign ? L.accountRoute(state, cfg, model, sid, { registeredAt: Infinity }) : null
+    if (viaAccount && viaAccount.claude) {
+      logReq({ sid: short(sid), model, nMsgs, route: reg ? `account-${reg.account}` : 'other-login', ...(tunneled ? { via: 'proxy' } : {}) })
+      return toClaudeAsSent(cfg, req, res, body, reg ? sid : null)
+    }
+    const route = viaAccount ? viaAccount.route : L.decide(state, cfg, model, sid, Date.now())
     logReq({ sid: short(sid), model, nMsgs, route, ...(tunneled ? { via: 'proxy' } : {}) })
     const parsed = L.parseRoute(route, cfg)
     if (parsed.kind === 'provider' && parsed.provider) {

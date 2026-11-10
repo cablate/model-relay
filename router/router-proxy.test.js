@@ -1,6 +1,7 @@
 'use strict'
 // End to end: a real router process, a fake Anthropic, a fake provider, and a client that does what Claude Code does
 // with HTTPS_PROXY — CONNECT, then TLS to api.anthropic.com trusting only the relay's CA.
+require('./test-env')
 const test = require('node:test')
 const assert = require('node:assert')
 const fs = require('node:fs')

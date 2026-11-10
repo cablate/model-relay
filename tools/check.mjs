@@ -1,6 +1,10 @@
 #!/usr/bin/env node
 // Runs all repository checks: syntax check, router tests, hook logic tests, the neutral-names gate, and the bilingual docs check.
 
+// Run from a second account's window, the relay's variables would point the setup CLI under test at the real relay dir,
+// and 48 tests failed for that reason alone (2026-11-10): router/test-env.js takes them out of this process, so every
+// child below inherits an environment without them
+import '../router/test-env.js'
 import { execFileSync } from 'node:child_process'
 import { readdirSync } from 'node:fs'
 import path from 'node:path'

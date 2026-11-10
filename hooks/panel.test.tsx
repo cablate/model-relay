@@ -1,4 +1,6 @@
 import { expect, test } from 'claude-code/testing'
+import { buildPanelData, parseHealth } from './logic'
+import { panelTree } from './panel'
 
 // A config and a router that answers, beneath the plugin: the hook reads the one and asks the other
 const routerHealth = {
@@ -73,4 +75,38 @@ test('/provider opens the panel in one line; the panel offers this window\'s rou
   expect(sw.text).toContain('aaa-9')
   expect(written.at(-1)?.path.replace(/\\/g, '/')).toContain('/.claude/model-relay-status/s1')
   expect(written.at(-1)?.text).toBe('pinned\taaa-9\n')
+})
+
+// The panel of an account window and of a main window, drawn from router answers
+const accountHealth = (extra: object) => parseHealth(JSON.stringify({
+  ok: true, session: 'claude', providers: { aaa: 'aaa-9' }, aliases: {}, failoverChain: ['aaa'],
+  config: { failoverEnabled: true, retryEnabled: true, proxyEnabled: false }, proxy: { enabled: false, certificate: false }, ...extra,
+}))!
+
+test('B6: the panel of an account window shows Claude under its account name, says when it is at its usage limit, and hides your failover', async ($, on) => {
+  let view: Parameters<typeof panelTree>[1]
+  const ui = { open: true, confirmingClaude: false, pinging: false, showSettings: true }
+  const act = { switchTo: () => undefined, askClaude: () => undefined, ping: () => undefined, probe: () => undefined, settings: () => undefined, toggle: () => undefined, askProxy: () => undefined, close: () => undefined }
+  on('ui.render', { component: 'AbovePrompt' }, ($, e) => panelTree($.ui.resolve(e), view, act))
+  const draw = async (data: ReturnType<typeof buildPanelData>) => {
+    view = { ...data, ...ui, columns: 100 }
+    return $.ui.mount({ plugin: 'model-relay', surface: 'terminal', component: 'AbovePrompt', props })
+  }
+  // team-1's window, while your own account is in its failover cooldown
+  const a = await draw(buildPanelData(accountHealth({ account: 'team-1', failoverSince: 5, failoverProvider: 'aaa' }), 8950, false, 'en', 0, false, 'team-1'))
+  expect(await a.find({ type: 'Text', text: 'Claude (team-1)' })).toBeDefined()
+  expect(await a.find({ type: 'Text', text: 'Anthropic Claude' })).toBeUndefined()
+  expect(await a.find({ type: 'Text', text: /Claude limit reached/ })).toBeUndefined()
+  expect(await a.find({ key: 'switch:failover' })).toBeUndefined()
+  expect(await a.find({ key: 'switch:retry' })).toBeDefined()
+  await a.unmount()
+  // team-1's window at its own usage limit
+  const stuck = await draw(buildPanelData(accountHealth({ account: 'team-1', accountLimited: true }), 8950, false, 'en', 0, false, 'team-1'))
+  expect(await stuck.find({ type: 'Text', text: 'team-1 is at its usage limit' })).toBeDefined()
+  await stuck.unmount()
+  // a main window as before
+  const m = await draw(buildPanelData(accountHealth({}), 8950, false, 'en', 0))
+  expect(await m.find({ type: 'Text', text: 'Anthropic Claude' })).toBeDefined()
+  expect(await m.find({ key: 'switch:failover' })).toBeDefined()
+  await m.unmount()
 })

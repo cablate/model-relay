@@ -1,6 +1,7 @@
 'use strict'
 // Install-flow guards: setup wires the configured port, `set port` rewires, two routers on one port are told apart by
 // config directory, and setup refuses to work against someone else's router. Every port is ephemeral and set through a temp config.
+require('./test-env')
 const test = require('node:test')
 const assert = require('node:assert')
 const fs = require('node:fs')

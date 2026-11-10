@@ -1,6 +1,7 @@
 'use strict'
 // Streamed answers: an upstream that drops mid-stream must not leave the caller hanging, and a caller that gives up
 // must stop the upstream generation.
+require('./test-env')
 const test = require('node:test')
 const assert = require('node:assert')
 const fs = require('node:fs')

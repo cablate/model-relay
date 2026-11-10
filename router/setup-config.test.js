@@ -1,5 +1,6 @@
 'use strict'
 // The config-editing commands of tools/setup.mjs: migrate, set, providers, remove, and the doctor lint.
+require('./test-env')
 const test = require('node:test')
 const assert = require('node:assert')
 const fs = require('node:fs')

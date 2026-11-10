@@ -1,6 +1,7 @@
 'use strict'
 // `setup.mjs proxy` against a throwaway config directory: it must change settings.json only on --go,
 // keep everything else in the file, refuse to touch settings it does not own, and be reversible.
+require('./test-env')
 const test = require('node:test')
 const assert = require('node:assert')
 const fs = require('node:fs')

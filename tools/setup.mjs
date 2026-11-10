@@ -6,8 +6,11 @@
 //   node tools/setup.mjs add <name> --model <m> --token <token|env:VAR> (--preset <p> | --url <u>)
 //   node tools/setup.mjs providers                                    list providers, routes, aliases, failover and retry
 //   node tools/setup.mjs alias [haiku|sonnet|opus|subagent] [target]  inspect or point a Claude model alias at a provider (or back to claude)
-//   node tools/setup.mjs set <key> <value>                            failover.enabled|chain|cooldownMs, retry.enabled|failover|..., providers.<name>.fallback|retry|matchModels
+//   node tools/setup.mjs set <key> <value>                            failover.enabled|chain|cooldownMs, retry.enabled|failover|..., accountFallback.mode|account, providers.<name>.fallback|retry|matchModels
 //   node tools/setup.mjs remove <name> [--go]
+//   node tools/setup.mjs handoff <wrapper id> <session id>                for /provider switch: hand the launcher wrapper this session
+//   node tools/setup.mjs launcher                                     write <config dir>/model-relay-launch.mjs and print the alias for it
+//   node tools/setup.mjs account-add <name> [--dir <path>] [--link <entry>]...  make a login dir for another account and its accounts entry
 //   node tools/setup.mjs migrate [--go]                               bring an older config to format 2 (same behaviour, tokens untouched)
 //   node tools/setup.mjs doctor [--fix] [--ping] [--json]   (alias: check)
 //   node tools/setup.mjs restart [--if-stale] [--if-idle]             run the router shipped with this copy of the tool
@@ -32,7 +35,11 @@ const M = require('../router/migrate.js')
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const home = process.env.USERPROFILE || process.env.HOME || ''
-const cfgDir = process.env.CLAUDE_CONFIG_DIR || path.join(home, '.claude')
+// The relay's config dir, the one place it is decided: MODEL_RELAY_CONFIG_DIR (a second account's window pointed at
+// main's dir) when it is absolute and exists, else CLAUDE_CONFIG_DIR, else ~/.claude
+const relayDirGiven = process.env.MODEL_RELAY_CONFIG_DIR || ''
+const relayDir = path.isAbsolute(relayDirGiven) && fs.existsSync(relayDirGiven) ? relayDirGiven : '' // '' when it does not count
+const cfgDir = relayDir || process.env.CLAUDE_CONFIG_DIR || path.join(home, '.claude')
 const relayCfgPath = path.join(cfgDir, 'model-relay.json')
 const settingsPath = path.join(cfgDir, 'settings.json')
 const BACKUP = 'model-relay-backup'
@@ -48,10 +55,64 @@ const getOpt = (f) => {
   return i >= 0 && i + 1 < args.length ? args[i + 1] : null
 }
 
+// The OS the printed commands are for. A test preload stands in for an OS through globalThis.__modelRelayTestPlatform.
+const platform = globalThis.__modelRelayTestPlatform || process.platform
+// One word of a printed command, quoted for the shell it is pasted into (PowerShell on Windows, else POSIX sh); a
+// <placeholder> is left as it is, for the person to fill in
+const shWord = (s) => (/^[A-Za-z0-9_./:=@%+,-]+$/.test(s) ? s : `'${s.replace(/'/g, `'\\''`)}'`)
+const psWord = (s) => (/^[A-Za-z0-9_./\\:-]+$/.test(s) && !s.startsWith('-') ? s : `'${s.replace(/'/g, "''")}'`)
+const word = (s) => (/[<>]/.test(s) ? s : platform === 'win32' ? psWord(s) : shWord(s))
+// This CLI as a command to paste anywhere: node and this file's absolute path
+const cliCmd = (...words) => ['node', ...[path.join(root, 'tools', 'setup.mjs'), ...words].map(word)].join(' ')
+// The account's own Claude Code, started in its folder and pointed at this relay (MODEL_RELAY_CONFIG_DIR), so the plugin
+// registers that window with the router: without it a window's usage-limit 429 would count as the main account's. In
+// PowerShell $env: stays set, so a window of its own
+const loginCmd = (dir, rest = '') => platform === 'win32'
+  ? `$env:CLAUDE_CONFIG_DIR=${psWord(dir)}; $env:MODEL_RELAY_CONFIG_DIR=${psWord(path.resolve(cfgDir))}; claude${rest}   (in a new PowerShell window: the variables stay set in it)`
+  : `CLAUDE_CONFIG_DIR=${shWord(dir)} MODEL_RELAY_CONFIG_DIR=${shWord(path.resolve(cfgDir))} claude${rest}`
+// A name for an account: a plain word (L.SAFE_NAME), since the commands that take one print it back and write it to the config
+const plainName = (n) => L.SAFE_NAME.test(n) && n.length <= 64
+
+// settings.json keys that make Claude Code send with something other than its own login; an account dir that links this
+// settings.json would carry them too. Key names only, never a value.
+const loginOverrides = () => {
+  let s = {}
+  try {
+    s = readSettings()
+  } catch {}
+  const env = isObj(s?.env) ? s.env : {}
+  return [...['ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN', 'CLAUDE_CODE_OAUTH_TOKEN'].filter((k) => env[k] !== undefined).map((k) => `env.${k}`), ...(s?.apiKeyHelper !== undefined ? ['apiKeyHelper'] : [])]
+}
+const overrideText = (keys) => `${settingsPath} sets ${keys.join(', ')}: an account dir that links this settings.json sends with that instead of its own login`
+
 // The running router re-reads these files on every request, so never leave one half written
 function writeFileAtomic(file, text) {
   const tmp = `${file}.tmp-${process.pid}`
   fs.writeFileSync(tmp, text)
+  renameOver(tmp, file)
+}
+
+// A private file written whole: text goes to tmp, a fresh name opened exclusively and never through a symlink (O_EXCL,
+// O_NOFOLLOW) with mode 0600, which is then renamed over file, so a reader sees the old file or the new one and a link
+// planted at either name is never followed. tmp is removed on any failure, and the error is thrown.
+function writeExclusive(tmp, file, text) {
+  const flags = fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | (fs.constants.O_NOFOLLOW || 0)
+  try {
+    const fd = fs.openSync(tmp, flags, 0o600)
+    try {
+      fs.writeSync(fd, text)
+    } finally {
+      fs.closeSync(fd)
+    }
+    renameOver(tmp, file) // retried while Windows holds the target open, as for the config
+  } catch (e) {
+    fs.rmSync(tmp, { force: true })
+    throw e
+  }
+}
+
+// Moves a finished temp file over its target; tmp is removed when that keeps failing
+function renameOver(tmp, file) {
   for (let i = 0; ; i++) {
     try {
       fs.renameSync(tmp, file)
@@ -162,6 +223,18 @@ function ensureSettingsWiring(port, fix) {
   return { ok: true, msg: `Updated settings.json env.ANTHROPIC_BASE_URL=${expectedUrl}` }
 }
 
+// "/provider switch" is a command word of the plugin, so no provider can take that name; and "__proto__" is no own key of
+// a plain object: written as one it would replace the object's prototype and vanish from the saved file
+function refuseReservedName(name) {
+  if (name === '__proto__') {
+    console.error('"__proto__" cannot be a name in model-relay.json; pick another name. Nothing was changed.')
+    process.exit(2)
+  }
+  if (name !== 'switch') return
+  console.error('"switch" is the name of a /provider command, so a provider cannot be called that; pick another name. Nothing was changed.')
+  process.exit(2)
+}
+
 // A new config: format 2, no provider yet, port 8950
 const starterConfig = () => ({ format: 2, port: 8950, failover: { enabled: true, chain: [], cooldownMs: 600000 }, providers: {} })
 
@@ -200,6 +273,7 @@ if (cmd === 'add') {
     console.error(usage)
     process.exit(2)
   }
+  refuseReservedName(name)
   if (presetKey && !Object.hasOwn(L.PRESETS, presetKey)) {
     console.error(`Unknown preset "${presetKey}" (built-in: ${Object.keys(L.PRESETS).join(', ')}). Use --url for any other Anthropic-compatible address.`)
     process.exit(2)
@@ -352,6 +426,15 @@ const SETTABLE = {
   'retry.attempts': { parse: count, hint: 'retries per provider (0 = until it answers)' },
   'retry.delayMs': { parse: wholeNumber(0), hint: 'first wait between retries, e.g. 2s' },
   'retry.maxDelayMs': { parse: wholeNumber(0), hint: 'longest single wait, e.g. 30s' },
+  'accountFallback.mode': {
+    parse: (v) => {
+      if (!L.ACCOUNT_MODES.includes(v)) throw new Error(`expected ${L.ACCOUNT_MODES.join(', ')}`)
+      return v
+    },
+    hint: `${L.ACCOUNT_MODES.join('|')} — how a second Claude account is used (README: more than one Claude account)`,
+  },
+  // checked against accounts below, where the config is read; "none" removes it
+  'accountFallback.account': { parse: (v) => (v === 'none' ? undefined : v.trim().toLowerCase()), hint: 'name|none — the account /provider switch moves a window to (an accounts entry with a configDir)' },
 }
 const PROVIDER_KEYS = {
   fallback: { parse: (v) => (v === 'none' ? false : v === 'default' ? undefined : names(v)), hint: 'none | default | a,b — who takes over from this provider' },
@@ -512,6 +595,11 @@ if (cmd === 'set') {
       if (unknown.length) throw new Error(`unknown provider ${unknown.join(', ')} (have: ${have.join(', ')})`)
     }
     if (pk && !have.includes(pk[1].toLowerCase())) throw new Error(`no provider named ${pk[1]} (have: ${have.join(', ')})`)
+    // a fixed text: the value given may be anything, a pasted secret included
+    if (key === 'accountFallback.account' && next !== undefined) {
+      const view = L.accountView(config)
+      if (!L.SAFE_NAME.test(next) || !view.names.has(next)) throw new Error('not the name of an account in accounts (with a configDir); make one with account-add <name>')
+    }
   } catch (e) {
     console.error(`${key}: ${e.message}`)
     process.exit(2)
@@ -603,6 +691,173 @@ if (cmd === 'providers') {
     console.log(`  ● ${key.padEnd(10)} ${p.model}  ${p.url}`)
     console.log(`    routes: ${p.matchRegexes.map((r) => r.source).join(' | ') || '(only its own model name)'}   token: ${tokenSrc}   retry: ${retryDesc}   hands over to: ${to}`)
   }
+  process.exit(0)
+}
+
+// A login dir for another Claude account: <dir> (default ~/.claude-<name>) made 0700, with symlinks back into the relay
+// dir for what that window shares with yours, then accounts.<name>.configDir written (last, with a backup). It refuses
+// rather than reuse anything that is not an empty dir of its own, never touches a shell profile or another
+// dir, and prints the steps only a person can do (the login, then the settings that move a window to it).
+const ACCOUNT_LINKS = ['settings.json', 'CLAUDE.md', 'agents', 'commands', 'skills', 'hooks', 'plugins', 'projects', 'output-styles']
+// Never linked, whatever --link says: logins, the relay's own files, and state each login keeps for itself
+const NEVER_LINKED = /^(ide|history\.jsonl|shell-snapshots|session-env|backups|model-relay.*|\.claude\.json|\.config\.json|\.credentials.*)$/i
+if (cmd === 'account-add') {
+  const usage = 'Usage: node tools/setup.mjs account-add <name> [--dir <absolute path or ~/path>] [--link <entry of the relay dir>]...'
+  const name = (args[1] || '').trim().toLowerCase()
+  refuseReservedName(name)
+  if (!name || name.startsWith('--') || name === 'claude' || !plainName(name)) {
+    console.error(`${usage}\n<name> is a lower-case word (letters, digits, ".", "_", "-"). Nothing was changed.`)
+    process.exit(2)
+  }
+  const stop = (text, code = 1) => {
+    console.error(`${text}. Nothing was changed.`)
+    process.exit(code)
+  }
+  const { file, raw: config } = loadRaw()
+  const accounts = isObj(config.accounts) ? config.accounts : {}
+  if (Object.keys(accounts).some((k) => k.trim().toLowerCase() === name)) stop(`accounts.${name} already exists`)
+  const given = getOpt('--dir') ?? `~/.claude-${name}`
+  if (!(path.isAbsolute(given) || given.startsWith('~/')) || given.includes('\0')) stop('--dir must be an absolute path or start with ~/', 2)
+  const dir = L.expandHome(given, home)
+  // Where a path really points, though its last parts do not exist yet (L.realDir), compared without regard to case on Windows
+  const real = (p) => L.realDir(p)
+  const key = (p) => (process.platform === 'win32' ? p.toLowerCase() : p)
+  const within = (a, b) => {
+    const [x, y] = [key(a), key(b)]
+    return x === y || x.startsWith(y.endsWith(path.sep) ? y : y + path.sep)
+  }
+  const target = real(dir)
+  const others = [['the relay dir', cfgDir], ...Object.entries(accounts).filter(([, v]) => isObj(v) && typeof v.configDir === 'string' && v.configDir.trim()).map(([k, v]) => [`the dir of accounts.${k.trim().toLowerCase()}`, L.expandHome(v.configDir.trim(), home)])]
+  for (const [what, d] of others) if (within(target, real(d)) || within(real(d), target)) stop(`${dir} is, holds or lies inside ${what}`)
+  let st = null
+  try {
+    st = fs.lstatSync(dir)
+  } catch {}
+  if (st && st.isSymbolicLink()) stop(`${dir} is a symlink`)
+  if (st && !st.isDirectory()) stop(`${dir} exists and is not a folder`)
+  if (st && fs.readdirSync(dir).length) stop(`${dir} exists and is not empty`)
+  if (!st && !fs.existsSync(path.dirname(dir))) stop(`${path.dirname(dir)} does not exist`)
+  // What to link: the default entries the relay dir has, then each --link (a plain name of an entry it has)
+  const extra = args.flatMap((a, i) => (a === '--link' ? [args[i + 1] ?? ''] : []))
+  for (const n of extra) {
+    if (!n || n.startsWith('.') || n === '..' || /[\\/\0]/.test(n) || path.basename(n) !== n || NEVER_LINKED.test(n)) stop(`--link ${JSON.stringify(n)} is refused: only a plain name in the relay dir, never a login file, the relay's own files, ide, history.jsonl, shell-snapshots, session-env or backups`, 2)
+    if (!fs.existsSync(path.join(cfgDir, n))) stop(`--link ${n}: the relay dir ${cfgDir} has no such entry`, 2)
+  }
+  const links = [...new Set([...ACCOUNT_LINKS.filter((n) => fs.existsSync(path.join(cfgDir, n))), ...extra])]
+  const made = []
+  try {
+    if (st) fs.chmodSync(dir, 0o700)
+    else {
+      fs.mkdirSync(dir, { mode: 0o700 }) // not recursive: its parent must already be there
+      made.push(`the folder ${dir}`)
+      fs.chmodSync(dir, 0o700)
+    }
+    for (const n of links) {
+      fs.symlinkSync(path.join(cfgDir, n), path.join(dir, n)) // no force: an entry already there stops it
+      made.push(`the link ${path.join(dir, n)}`)
+    }
+  } catch (e) {
+    console.error(`account-add stopped (${e.code || e.message}); model-relay.json was not changed. ${made.length ? `Already made: ${made.join(', ')}.` : 'Nothing was made.'}`)
+    process.exit(1)
+  }
+  config.accounts = { ...accounts, [name]: { configDir: given } }
+  saveRaw(file, config, BACKUP)
+  console.log(`✓ accounts.${name}.configDir is ${given}, in ${file} (the previous file is kept as ${path.basename(file)}.${BACKUP})`)
+  console.log(`  ${st ? 'Used the empty folder' : 'Made the folder'} ${dir} (0700)${links.length ? `, linking from the relay dir: ${links.join(', ')}` : ''}`)
+  // What the account's window loses for each of these that the relay dir does not have (so nothing was linked)
+  const unlinked = { projects: `/provider switch refuses until ${path.join(dir, 'projects')} and ${path.join(cfgDir, 'projects')} are one folder (doctor prints the command once yours exists)`, 'settings.json': `${name}'s window has no relay wiring from your settings.json`, plugins: `the plugin does not run in ${name}'s window, so it is never registered with the router` }
+  for (const [n, cost] of Object.entries(unlinked)) if (!links.includes(n)) console.log(`  ⚠ ${path.join(cfgDir, n)} does not exist, so it is not linked: ${cost}`)
+  const overrides = loginOverrides()
+  if (overrides.length) console.log(`  ⚠ ${overrideText(overrides)}`)
+  // The note fits what mode "switch" does: nothing of the window's own is replaced, but the terms still govern it
+  console.log(`  Terms: Anthropic's terms, not this project, decide what you may do with several accounts. Its Legal and compliance page says: "OAuth authentication is intended exclusively for purchasers of Claude Free, Pro, Max, Ultra, Team, and Enterprise subscription plans and is designed to support ordinary use of Claude Code and other native Anthropic applications." Moving a window to ${name} (mode "switch") uses ${name}'s own login and replaces nothing in what the window sends, but moving work between accounts whenever a limit is reached may not be what the terms mean by ordinary use; that risk is yours.`)
+  const inDir = (rest) => loginCmd(dir, rest)
+  console.log([
+    'Next, by hand:',
+    `  1. ${cliCmd('set', 'accountFallback.mode', 'switch')}   (first: the plugin registers a window only in this mode, and the login window of step 2 should be registered)`,
+    `  2. ${inDir('')}, then /login as that account`,
+    `  3. ${cliCmd('set', 'accountFallback.account', name)}`,
+    `  4. ${cliCmd('launcher')}   (prints the command to start Claude Code with in place of claude)`,
+  ].join(LF))
+  process.exit(0)
+}
+
+// /provider switch, in a window the launcher wrapper started: <config dir>/model-relay-handoff/<wrapper id>.json =
+// {"sid": "<session id>"}, read by the wrapper once this window exits. The folder is 0700 and never a symlink; the file
+// is written 0600 under a fresh name opened exclusively (O_EXCL, O_NOFOLLOW), then renamed over the old one, so the
+// wrapper reads a whole file or none. Both ids must be UUIDs, so neither can name another path.
+if (cmd === 'handoff') {
+  const [id, sid] = [args[1], args[2]]
+  const isUuid = (v) => typeof v === 'string' && L.UUID_RE.test(v)
+  if (!isUuid(id) || !isUuid(sid)) {
+    console.error('Usage: node tools/setup.mjs handoff <wrapper id> <session id> (both UUIDs). Nothing was written.')
+    process.exit(2)
+  }
+  const dir = path.join(cfgDir, 'model-relay-handoff')
+  const fail = (text) => {
+    console.error(`${text}. Nothing was written.`)
+    process.exit(1)
+  }
+  let isDir = false
+  try {
+    fs.mkdirSync(dir, { recursive: true, mode: 0o700 })
+    isDir = fs.lstatSync(dir).isDirectory()
+    if (isDir && process.platform !== 'win32') fs.chmodSync(dir, 0o700)
+  } catch {
+    fail(`${dir} could not be created or made private`)
+  }
+  if (!isDir) fail(`${dir} is not a folder (a symlink is refused)`)
+  const file = path.join(dir, `${id.toLowerCase()}.json`)
+  const tmp = path.join(dir, `.${id.toLowerCase()}.${process.pid}.${Date.now()}.tmp`)
+  try {
+    writeExclusive(tmp, file, JSON.stringify({ sid: sid.toLowerCase() }) + LF)
+  } catch {
+    fail(`${file} could not be written`)
+  }
+  console.log(`✓ Handed this session to the launcher wrapper (${file})`)
+  process.exit(0)
+}
+
+// launcher: <config dir>/model-relay-launch.mjs, a few lines that run tools/launch.mjs of this copy of the plugin (root,
+// from this file's own location), so one alias in place of claude keeps working across plugin updates: the plugin runs
+// this command at every session start, which points the file at the version running. This is the one place that file
+// is written (writeExclusive: 0600, never through a link); a symlink at its path is refused, and a file that already
+// holds the same text with mode 0600 is left alone. It reads no config and prints the command and the aliases.
+if (cmd === 'launcher') {
+  const { launcherSource } = await import('./launch.mjs')
+  const file = path.join(cfgDir, 'model-relay-launch.mjs')
+  const text = launcherSource(root)
+  const fail = (t) => {
+    console.error(`${t}. Nothing was written.`)
+    process.exit(1)
+  }
+  let st = null
+  try {
+    st = fs.lstatSync(file)
+  } catch {}
+  if (st && st.isSymbolicLink()) fail(`${file} is a symlink; remove it, then run launcher again`)
+  if (st && !st.isFile()) fail(`${file} is not a regular file`)
+  const same = Boolean(st) && fs.readFileSync(file, 'utf8') === text && (process.platform === 'win32' || (st.mode & 0o777) === 0o600)
+  if (!same) {
+    try {
+      fs.mkdirSync(cfgDir, { recursive: true })
+      writeExclusive(path.join(cfgDir, `.model-relay-launch.${process.pid}.${Date.now()}.tmp`), file, text)
+    } catch {
+      fail(`${file} could not be written`)
+    }
+  }
+  const run = `node ${shWord(file)}`
+  console.log(same ? `${file} already runs ${path.join(root, 'tools', 'launch.mjs')}` : `✓ wrote ${file}, which runs ${path.join(root, 'tools', 'launch.mjs')}`)
+  console.log([
+    'Start Claude Code with this in place of claude, from your project folder (claude starts there, through the launcher wrapper):',
+    `  ${run} [claude options]`,
+    'zsh or bash (in ~/.zshrc or ~/.bashrc):',
+    `  alias claude=${shWord(run)}`,
+    'PowerShell (in $PROFILE):',
+    `  function claude { node '${file.replace(/'/g, "''")}' @args }`,
+    'Use an alias or a function like these, never a script named claude on PATH: the wrapper starts claude from PATH and would start itself.',
+    'While accountFallback.mode is not "off", each Claude Code session start points this file at the plugin version running, so the alias survives plugin updates.',
+  ].join(LF))
   process.exit(0)
 }
 
@@ -961,6 +1216,48 @@ if (cmd === 'proxy') {
   process.exit(2)
 }
 
+// doctor, mode switch: each account's login file (path only, and whether it names an account), and the logins that
+// cannot be told apart. Names, paths and fixed texts only: never a uuid or an email.
+async function accountReport(raw, say, find, error) {
+  const view = L.accountView(raw)
+  const names = [...view.names].filter((n) => L.SAFE_NAME.test(n))
+  const fileOf = (n) => L.loginFile(L.expandHome(view.dirs.get(n), home), home)
+  const byFile = new Map()
+  const byUuid = new Map()
+  const mine = L.loginIds(L.loginFile(cfgDir, home)) // your own login: the account a window leaves when it switches
+  for (const n of names) {
+    const file = fileOf(n)
+    const got = L.loginIds(file)
+    say(`  Login of ${n}: ${file} (${got ? (got.accountUuid ? 'an accountUuid found' : 'no accountUuid in it') : 'not readable'})`)
+    const key = L.realDir(file)
+    byFile.set(key, [...(byFile.get(key) || []), n])
+    if (got && got.accountUuid) byUuid.set(got.accountUuid, [...(byUuid.get(got.accountUuid) || []), n])
+    const dir = L.expandHome(view.dirs.get(n), home)
+    if (!(got && got.accountUuid)) find('account-not-logged-in', `${n} is not logged in yet: run ${loginCmd(dir)}, then /login there`, { account: n })
+    else if (mine && mine.accountUuid === got.accountUuid) find('account-is-yours', `${n} is logged in to your own account (the login of ${cfgDir}), so /provider switch would move a window to the account it is on; run ${loginCmd(dir)}, then /logout and /login as another account there`, { account: n })
+    if (fs.existsSync(path.join(dir, '.config.json'))) find('account-config-json', `${path.join(dir, '.config.json')} exists; the relay reads ${file} only for ${n}'s login. If ${n}'s windows show another account than that file names, move ${path.join(dir, '.config.json')} aside and /login there again`, { account: n })
+  }
+  for (const same of byFile.values()) if (same.length > 1) error('account-same-login', `accounts ${same.join(', ')} read one login file; each account needs a login of its own`)
+  for (const same of byUuid.values()) if (same.length > 1) error('account-same-login', `accounts ${same.join(', ')} are logged in to one account; each needs a login of its own`)
+  // the default dir keeps its login beside it; a stale copy inside it is not what Claude Code or the relay read
+  const outer = L.sameDir(cfgDir, path.join(home, '.claude')) ? L.loginIds(path.join(home, '.claude.json')) : null
+  const inner = outer ? L.loginIds(path.join(home, '.claude', '.claude.json')) : null
+  if (outer && inner && outer.accountUuid && inner.accountUuid && outer.accountUuid !== inner.accountUuid) {
+    find('account-stale-login', `${path.join(home, '.claude', '.claude.json')} names another account than ${path.join(home, '.claude.json')}; the relay and Claude Code read ${path.join(home, '.claude.json')} for ${cfgDir}`)
+  }
+  // /provider switch and the wrapper refuse unless the target's projects/ is yours, since --resume needs the transcript
+  const to = isObj(raw.accountFallback) && typeof raw.accountFallback.account === 'string' ? raw.accountFallback.account.trim().toLowerCase() : ''
+  if (names.includes(to)) {
+    const [from, at] = [path.join(cfgDir, 'projects'), path.join(L.expandHome(view.dirs.get(to), home), 'projects')]
+    if (!L.sameDir(at, from)) {
+      const { linkCommand } = await import('./launch.mjs')
+      find('account-projects', `${to}'s projects folder is not this config dir's, so /provider switch refuses (--resume could not find the conversation). Make ${at} a link to ${from} (move or remove ${at} first): ${linkCommand(from, at, platform === 'win32')}`, { account: to })
+    }
+  }
+  const overrides = loginOverrides()
+  if (overrides.length) find('account-login-override', overrideText(overrides))
+}
+
 if (cmd === 'rc') {
   refuseIfOutdated()
   const port = relayPort()
@@ -994,6 +1291,13 @@ if (cmd === 'rc') {
     findings.push({ id, level: 'warn', text, ...extra })
     say(`  ⚠ ${text}`)
   }
+  // a config the router reads in a way you did not mean: doctor ends with exit code 1
+  const error = (id, text, extra = {}) => {
+    findings.push({ id, level: 'error', text, ...extra })
+    say(`  ✗ ${text}`)
+    report.ok = false
+    process.exitCode = 1
+  }
   const report = { ok: true, config: null, port: null, providers: {}, failover: null, retry: null, settings: null, router: null, ping: null, findings }
   const fail = (text) => {
     if (json) console.log(JSON.stringify({ ...report, ok: false, error: text }, null, 2))
@@ -1024,9 +1328,11 @@ if (cmd === 'rc') {
   report.retry = { enabled: cfg.retry.enabled }
   // An older config is not judged: only a router of that older version, if one still runs, routes with it
   const notRead = 'not read (older config)'
+  // Accounts alone need no provider: with none configured and accounts to switch to, the empty list is not a problem
+  const accountsOnly = !outdated && !names.length && (!isObj(raw.providers) || !Object.keys(raw.providers).length) && L.accountMode(raw) === 'switch' && L.accountView(raw).names.size > 0
   say(outdated
     ? `Config from an older version (${active}): this version reads its port only, so until "migrate --go" only an older router still running routes with it; with none running, every request goes to Claude`
-    : names.length ? `Config OK (${active})` : `Config read (${active}), but no provider is usable yet; every request goes to Claude`)
+    : names.length ? `Config OK (${active})` : accountsOnly ? `Config OK (${active}); no provider is configured, which accounts alone do not need, so every request goes to Claude` : `Config read (${active}), but no provider is usable yet; every request goes to Claude`)
   say(`  Port: ${cfg.port}`)
   say(`  Providers: ${outdated ? notRead : names.length ? names.map((k) => `${k} -> ${cfg.providers[k].model}`).join(', ') : 'none usable'}`)
   // fix: the arguments to run this CLI with, so the caller supplies its own path to it
@@ -1036,10 +1342,21 @@ if (cmd === 'rc') {
       ? `provider ${u.provider} is skipped: its key variable ${u.env} is unset in this shell. Set it permanently for your OS, then restart Claude Code so the router starts with it`
       : `provider ${u.provider} is skipped: its token "env:" names no variable`, { provider: u.provider, env: u.env || null })
   }
-  if (!shape && !outdated) find('no-provider', 'no provider has an address, a model and a token yet; add one with "add <name> --preset <p> --model <id> --token env:<VAR>"', { fix: 'add <name> --preset <preset> --model <model id> --token env:<VAR>' })
+  if (!outdated && isObj(raw.accountFallback) && raw.accountFallback.mode !== undefined && !L.ACCOUNT_MODES.includes(raw.accountFallback.mode)) {
+    find('account-mode', `accountFallback.mode is not one of ${L.ACCOUNT_MODES.join(', ')}, so it counts as "off": no second account is used`)
+  }
+  if (!shape && !outdated && !accountsOnly) find('no-provider', 'no provider has an address, a model and a token yet; add one with "add <name> --preset <p> --model <id> --token env:<VAR>"', { fix: 'add <name> --preset <preset> --model <model id> --token env:<VAR>' })
   say(outdated
     ? `  Failover, retry: ${notRead}`
     : `  Failover: ${cfg.failoverEnabled ? (cfg.failoverChain.length ? `${cfg.failoverChain.join(' → ')} (back to Claude after ${cfg.cooldownMs / 60000} min)` : 'on, but no chain') : 'disabled'}    Retry: ${cfg.retry.enabled ? 'on' : 'off'}`)
+  // What accountFallback.mode "switch" does now, in one line: where /provider switch moves a window. Names only; "off"
+  // prints nothing, as without this feature.
+  if (!outdated && L.accountMode(raw) === 'switch') {
+    const to = isObj(raw.accountFallback) && typeof raw.accountFallback.account === 'string' ? raw.accountFallback.account.trim().toLowerCase() : ''
+    const known = L.SAFE_NAME.test(to) && L.accountView(raw).dirs.has(to)
+    say(`  Accounts: mode "switch"; ${known ? `/provider switch moves a window to ${to}` : to ? 'accountFallback.account names no account in accounts (with a configDir), so /provider switch has nowhere to go' : 'accountFallback.account is not set, so /provider switch has nowhere to go'}`)
+    if (isObj(raw.accounts)) await accountReport(raw, say, find, error)
+  }
 
   let curSettings = {}
   try { curSettings = readSettings() } catch {}
@@ -1138,9 +1455,10 @@ if (cmd === 'rc') {
       say(`    ${r.verdict === 'ok' ? '✓' : '✗'} ${k.padEnd(10)} (${p.model}) -> ${pingWords(r, p)}`)
     }
   }
+  if (!json && !report.ok) console.log('Not OK after all: fix the ✗ lines above ("Config OK" only says the file was read).')
   if (json) console.log(JSON.stringify(report, null, 2))
   else if (wiring.fixable) console.log('The settings.json fix above is not applied yet: run "/provider doctor --fix" (or "node tools/setup.mjs doctor --fix").')
 } else {
-  console.error('Usage: node tools/setup.mjs [init|presets|add|providers|alias|set|remove|migrate|doctor|check|restart|proxy|rc] [--fix] [--ping] [--json] [--go]')
+  console.error('Usage: node tools/setup.mjs [init|presets|add|providers|alias|set|remove|migrate|doctor|check|restart|proxy|rc|account-add|handoff|launcher] [--fix] [--ping] [--json] [--go]')
   process.exit(2)
 }
