@@ -103,8 +103,11 @@ require('node:module').syncBuiltinESMExports()
   const log = path.join(root, 'starts.log')
   const planFile = path.join(root, 'plan.json')
   fs.writeFileSync(planFile, JSON.stringify(plan))
+  // The wrapper reads USERPROFILE before HOME, and a child of the runner on Windows has the runner's real one unless it is
+  // set to the scratch home, else ~/.claude-second is the runner's own folder. Elsewhere it is removed and HOME decides.
   const env = { ...process.env, HOME: home, CLAUDE_CONFIG_DIR: main, FAKE_LOG: log, FAKE_PLAN: planFile, FAKE_MAIN: main }
   for (const k of [...DROPPED, ...PROXY, 'NODE_EXTRA_CA_CERTS', 'USERPROFILE', 'MODEL_RELAY_WRAPPER_ID', 'MODEL_RELAY_CONFIG_DIR']) delete env[k]
+  if (win) env.USERPROFILE = home
   const starts = () => (fs.existsSync(log) ? fs.readFileSync(log, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l)) : [])
   // Starts the wrapper: { child, done } where done resolves { code, signal, stderr }
   const start = (args, extraEnv = {}) => {
