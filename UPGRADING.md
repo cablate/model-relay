@@ -4,7 +4,7 @@
 
 ## Upgrading from 0.7.5
 
-A provider can no longer be called `switch`: `/provider switch` is a command now, matched before provider names, and `add` and `account-add` refuse that name. If your `model-relay.json` already has a provider named `switch`, rename its key under `providers`, and its name in `failover.chain` and in every `fallback` list that names it. Until you do, it still routes by its model and `failover.chain`, but `/provider switch` no longer picks it. Nothing else needs your action: the second-account features stay off until you set `accountFallback.mode`.
+A provider can no longer be called `switch`: `/provider switch` is a command now, matched before provider names, and `add`, `account-add`, `account-sync` and `account-token` refuse that name. If your `model-relay.json` already has a provider named `switch`, rename its key under `providers`, and its name in `failover.chain` and in every `fallback` list that names it. Until you do, it still routes by its model and `failover.chain`, but `/provider switch` no longer picks it. Nothing else needs your action: the second-account features stay off until you set `accountFallback.mode`.
 
 ## Upgrading from 0.6 or earlier
 

@@ -4,7 +4,7 @@
 
 ## 從 0.7.5 升級
 
-供應商不能再取名為 `switch`：`/provider switch` 現在是一個指令，比供應商名稱優先比對，所以 `add` 與 `account-add` 會拒絕這個名稱。如果你的 `model-relay.json` 已經有名為 `switch` 的供應商，請把 `providers` 底下的鍵改名，並同步改掉 `failover.chain` 與每份指到它的 `fallback` 清單裡的名稱。在你改名之前，它仍照它的模型與 `failover.chain` 路由，但 `/provider switch` 不會再選它。其他不需要你動手：第二個帳號的功能在你設定 `accountFallback.mode` 之前都是關閉的。
+供應商不能再取名為 `switch`：`/provider switch` 現在是一個指令，比供應商名稱優先比對，所以 `add`、`account-add`、`account-sync` 與 `account-token` 會拒絕這個名稱。如果你的 `model-relay.json` 已經有名為 `switch` 的供應商，請把 `providers` 底下的鍵改名，並同步改掉 `failover.chain` 與每份指到它的 `fallback` 清單裡的名稱。在你改名之前，它仍照它的模型與 `failover.chain` 路由，但 `/provider switch` 不會再選它。其他不需要你動手：第二個帳號的功能在你設定 `accountFallback.mode` 之前都是關閉的。
 
 ## 從 0.6 或更早的版本升級
 
