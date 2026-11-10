@@ -1,5 +1,6 @@
 'use strict'
 // Inputs that used to take the router down or leave a caller waiting forever, and how a model name finds its provider.
+require('./test-env')
 const test = require('node:test')
 const assert = require('node:assert')
 const fs = require('node:fs')

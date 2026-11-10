@@ -1,5 +1,6 @@
 'use strict'
 // The failover chain, the cooldown and the retry switch: pure logic plus end-to-end chain tests.
+require('./test-env')
 const test = require('node:test')
 const assert = require('node:assert')
 const fs = require('node:fs')

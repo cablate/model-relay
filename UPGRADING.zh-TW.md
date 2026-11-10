@@ -2,6 +2,10 @@
 
 [English](UPGRADING.md)
 
+## 從 0.7.5 升級
+
+供應商不能再取名為 `switch`：`/provider switch` 現在是一個指令，比供應商名稱優先比對，所以 `add`、`account-add`、`account-sync` 與 `account-token` 會拒絕這個名稱。如果你的 `model-relay.json` 已經有名為 `switch` 的供應商，請把 `providers` 底下的鍵改名，並同步改掉 `failover.chain` 與每份指到它的 `fallback` 清單裡的名稱。在你改名之前，它仍照它的模型與 `failover.chain` 路由，但 `/provider switch` 不會再選它。其他不需要你動手：第二個帳號的功能在你設定 `accountFallback.mode` 之前都是關閉的。
+
 ## 從 0.6 或更早的版本升級
 
 更新外掛不會改你的檔案，但這一版不再讀取舊設定：檔名為 `custom-agent.json` 的檔案，或沒有 `"format": 2` 的 `model-relay.json`。在你執行 `migrate --go` 之前，外掛不會為它啟動或替換轉發站。還在執行的 0.6 轉發站會照舊用舊檔案路由；沒有轉發站回應時，這個對話直接連 Claude。外掛會用提示、面板，以及開啟 `statusBar` 時的狀態列告訴你這件事，`doctor` 會列出一項 `outdated`。舊檔名（`custom-agent-state.json`、`custom-agent-router.log`、`custom-agent-requests.log`）同樣不會被讀取。

@@ -2,6 +2,10 @@
 
 [繁體中文](UPGRADING.zh-TW.md)
 
+## Upgrading from 0.7.5
+
+A provider can no longer be called `switch`: `/provider switch` is a command now, matched before provider names, and `add`, `account-add`, `account-sync` and `account-token` refuse that name. If your `model-relay.json` already has a provider named `switch`, rename its key under `providers`, and its name in `failover.chain` and in every `fallback` list that names it. Until you do, it still routes by its model and `failover.chain`, but `/provider switch` no longer picks it. Nothing else needs your action: the second-account features stay off until you set `accountFallback.mode`.
+
 ## Upgrading from 0.6 or earlier
 
 Updating the plugin does not edit your files, but this version no longer reads an older config: a file named `custom-agent.json`, or a `model-relay.json` without `"format": 2`. Until you run `migrate --go`, the plugin starts and replaces no router for it. A 0.6 router that is still running keeps routing with the older file; if none answers, the session talks to Claude directly. The plugin says so in a notice, in the panel and, with `statusBar` on, in the status line, and `doctor` lists one finding, `outdated`. The old file names (`custom-agent-state.json`, `custom-agent-router.log`, `custom-agent-requests.log`) are not read either.

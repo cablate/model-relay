@@ -1,5 +1,18 @@
 import { test } from 'claude-code/testing'
 import {
+  RESUME_UNSET,
+  accountLimitedText,
+  accountNames,
+  accountRefusedText,
+  claudeAs,
+  dirKey,
+  routeLabel,
+  sessionAnswer,
+  sessionRefusedText,
+  switchRefusal,
+  accountServingText,
+  selfServingText,
+  agentProviders,
   AVATAR_EMPTY,
   AVATAR_INLINE_ROWS,
   AVATAR_START,
@@ -57,6 +70,16 @@ import {
   switchedText,
   toggleArgv,
   wireKey,
+  apiOnlyToastText,
+  accountAnswer,
+  accountArgv,
+  isUuid,
+  limitToastText,
+  manualSwitchText,
+  parseFallback,
+  switchPlan,
+  wantsApiOnlyToast,
+  wantsLimitToast,
 } from './logic'
 
 function assert(cond: boolean, msg: string): void {
@@ -72,7 +95,7 @@ test('the hook reads only the port, the node path and the status bar switch from
   assert(parseLocal({ port: 80 })!.port === 8950, 'privileged port refused')
   assert(parseLocal({ port: 9001, nodePath: 'C:/n/node.exe' })!.nodePath === 'C:/n/node.exe', 'node path kept')
   assert(parseLocal({})!.statusBar === false && parseLocal({ statusBar: true })!.statusBar === true && parseLocal({ statusBar: 'yes' })!.statusBar === false, 'status bar is opt-in, true only')
-  assert(Object.keys(parseLocal({ port: 9001 })!).sort().join() === 'avatarPane,avatars,nodePath,outdated,port,statusBar', 'nothing about providers')
+  assert(Object.keys(parseLocal({ port: 9001 })!).sort().join() === 'avatarPane,avatars,fallback,nodePath,outdated,port,statusBar', 'nothing about providers')
   assert(parseLocal({})!.avatarPane === false && parseLocal({ avatarPane: true })!.avatarPane === true && parseLocal({ avatarPane: 'on' })!.avatarPane === false, 'the avatar pane is opt-in, true only')
   assert(parseLocal({ format: 2 })!.outdated === false, 'format 2 is read')
   assert(parseLocal({ providers: {} })!.outdated && parseLocal({ format: '2' })!.outdated, 'no "format": 2 is an older config')
@@ -141,6 +164,7 @@ test('a switch answers in one line, and the command list waits for /provider hel
     const one = switchedText('aaa', 'aaa-9', lang)
     assert(!one.includes('\n') && one.includes('aaa-9'), `a switch is one line naming the model (${lang})`)
     assert(!switchedText('claude', 'claude', lang).includes('\n'), `back to Claude is one line (${lang})`)
+    assert(switchedText('claude', 'claude', lang, 'team-1').includes('Claude (team-1)'), `an account window names its own login (${lang})`)
   }
   const h = health({ session: 'aaa', providers: { aaa: 'aaa-9', bbb: 'bbb-1' }, aliases: { haiku: 'bbb' }, failoverChain: ['bbb'], config: { failoverEnabled: true, retryEnabled: true, proxyEnabled: false }, ping: { aaa: { verdict: 'ok', status: 200, firstByteMs: 300, at: 1, detail: '' } } })
   const rep = providerReport(h, 0, 'en')
@@ -190,6 +214,42 @@ test('a test result is kept apart from the last request, and what the person sho
   const hints = healthHints(h, 'en')
   assert(hints.length === 1 && hints[0]!.includes('CCC_KEY'), 'skipped provider')
   assert(buildPanelData(h, 8950, false, 'zh', 0).hints.length === 1, 'the panel gets it too')
+})
+
+test('A12: a second Claude account is a /provider choice but gets no model-relay subagent', () => {
+  const h = health({
+    providers: { aaa: 'aaa-9', spare: 'anthropic-account' },
+    kinds: { SPARE: 'Anthropic' },
+    unresolved: [{ provider: 'late', keychain: 'svc/acct' }],
+  })
+  assert(JSON.stringify(h.kinds) === '{"spare":"anthropic"}', 'kinds read, lower case')
+  assert(h.providers.spare === 'anthropic-account', 'the account stays in the picker list')
+  const agents = agentProviders(h.providers, h.kinds)
+  assert(JSON.stringify(Object.keys(agents)) === '["aaa"]', 'only real models get an agent')
+  assert(providerAgentSpecs(agents).every((s) => s.name !== 'spare'), 'no model-relay:spare agent')
+  assert(relayAgent('model-relay:spare', agents) === null, 'a spawn naming it is left alone')
+  assert(JSON.stringify(agentProviders(h.providers)) === JSON.stringify(h.providers), 'an older router without kinds: everything as before')
+  assert(providerReport(h, 0, 'en').includes('○ /provider spare    Claude (spare)'), 'the account is a row to switch to, as Claude under its name (B5)')
+  assert(!helpText(Object.keys(agents), 'en').includes('model-relay:spare'), 'help lists no subagent for it')
+  const help = helpText(Object.keys(agents), 'en', accountNames(h.providers, h.kinds))
+  assert(help.includes('/provider spare') && help.includes('Claude accounts') && !help.includes('model-relay:spare'), 'help names the account as a /provider choice')
+  assert(helpText(Object.keys(agents), 'zh', ['spare']).includes('Claude 帳號'), 'and in Chinese')
+  assert(!helpText(Object.keys(agents), 'en').includes('Claude accounts'), 'no line without one')
+  assert(JSON.stringify(accountNames(h.providers, h.kinds)) === '["spare"]', 'the account is named in /provider help')
+  const odd = health({ providers: { aaa: 'aaa-9', spare: 'anthropic-account', fut: 'x' }, kinds: { spare: 'anthropic', fut: 'future-kind' } })
+  assert(JSON.stringify(accountNames(odd.providers, odd.kinds)) === '["spare"]', 'a kind this hook does not know is not called an account')
+  assert(accountNames(h.providers).length === 0 && accountNames({ constructor: 'x' }, {}).length === 0, 'no kinds: no accounts')
+  const hints = healthHints(h, 'en')
+  assert(hints.length === 1 && hints[0]!.includes('keychain item svc/acct') && hints[0]!.includes('/provider restart') && hints[0]!.includes('any change to model-relay.json'), 'an unreadable keychain item is named, and the retry')
+  assert(healthHints(h, 'zh')[0]!.includes('鑰匙圈項目 svc/acct') && healthHints(h, 'zh')[0]!.includes('改動 model-relay.json'), 'and in Chinese')
+  const bare = healthHints(health({ unresolved: [{ provider: 'odd', keychain: '' }] }), 'en')
+  assert(bare.length === 1 && bare[0]!.includes('"keychain:" names no item') && !bare[0]!.includes('env:'), 'a bare keychain: token is a keychain hint, not an env one')
+  assert(healthHints(health({ unresolved: [{ provider: 'odd', keychain: '' }] }), 'zh')[0]!.includes('「keychain:」'), 'and in Chinese')
+  const mal = health({ unresolved: [{ provider: 'odd', keychain: 'nope', malformed: true }] })
+  assert(mal.unresolved[0]!.malformed === true, 'malformed is read')
+  const malHint = healthHints(mal, 'en')
+  assert(malHint.length === 1 && malHint[0]!.includes('reference is malformed') && !malHint[0]!.includes('model-relay.json'), 'a malformed reference gets its own hint, with no retry promise')
+  assert(healthHints(mal, 'zh')[0]!.includes('格式不對') && !healthHints(mal, 'zh')[0]!.includes('model-relay.json'), 'and in Chinese')
 })
 
 test('/provider setup hands Claude the CLI path and the safety rules', () => {
@@ -465,4 +525,329 @@ test('base64 matches the standard encoding both ways, padding included', () => {
     assert(base64ToBytes(bytesToBase64(bytes)).join() === bytes.join(), `${n} bytes survive the round trip`)
   }
   assert(base64ToBytes('TWE=').join() === '77,97' && base64ToBytes('TQ').join() === '77', 'padded or not')
+})
+
+// ---------- accountFallback: /provider switch and the account toasts ----------
+
+const WRAPPER = '0f1e2d3c-4b5a-4968-8776-5a4b3c2d1e0f'
+const SID = '11111111-2222-4333-8444-555555555555'
+const fb = (mode: string, extra: object = {}) => parseFallback({ accountFallback: { mode, account: 'Second' }, accounts: { ' second ': { configDir: '~/.claude-second' } }, ...extra })
+
+test('accountFallback is read for the mode, the account and its config dir; an unknown mode is off', () => {
+  const f = fb('switch')
+  assert(f.mode === 'switch' && f.account === 'second' && f.accountDir === '~/.claude-second', 'found as providers.<name> is: trimmed, any case')
+  assert(fb('rc_keep').mode === 'off' && parseFallback({}).mode === 'off' && parseFallback({ accountFallback: { mode: 3 } }).mode === 'off', 'off unless one of the four')
+  for (const m of ['off', 'switch', 'rc-keep', 'api-only']) assert(fb(m).mode === m, m)
+  assert(parseFallback(JSON.parse('{"accountFallback":{"mode":"switch","account":"constructor"},"accounts":{}}')).accountDir === '', 'an inherited name is no account')
+  assert(parseLocal({ format: 2, accountFallback: { mode: 'switch' } })!.fallback.mode === 'switch', 'parseLocal carries it')
+})
+
+test('the registration carries the time the window first saw it, only when there is one', () => {
+  const cfg = parseLocal({ format: 2, port: 5 })!
+  const body = (since?: number) => JSON.parse(accountArgv(cfg, SID, 'second', false, since)[accountArgv(cfg, SID, 'second', false, since).indexOf('-d') + 1])
+  assert(JSON.stringify(body()) === JSON.stringify({ sid: SID, account: 'second' }), 'no time: the body as it was')
+  assert(JSON.stringify(body(1700000000000)) === JSON.stringify({ sid: SID, account: 'second', since: 1700000000000 }), 'with the time')
+})
+
+test('A3: /provider switch writes a handoff only in mode switch, in a window the wrapper started, from a person at it', () => {
+  const base = { fallback: fb('switch'), arg: '', wrapperId: WRAPPER, interactive: true, typed: true, sid: SID, home: '/Users/me', relayDir: '/Users/me/.claude' }
+  const w = switchPlan(base, 'en')
+  assert(w.action === 'write' && w.wrapperId === WRAPPER && w.sid === SID, 'the handoff: the wrapper id names the file, the sid is its content')
+  assert(w.text.includes('/exit') && w.text.includes('second'), w.text)
+  assert(switchPlan({ ...base, arg: 'SECOND' }).action === 'write', 'the configured account, in any case')
+  const manual = `CLAUDE_CONFIG_DIR=/Users/me/.claude-second MODEL_RELAY_CONFIG_DIR=/Users/me/.claude claude --resume ${SID}`
+  for (const [why, o, reason] of [
+    ['no wrapper', { wrapperId: undefined }, 'not started by the launcher wrapper'],
+    ['a wrapper id that is no UUID', { wrapperId: '../../x' }, 'not started by the launcher wrapper'],
+    ['an empty wrapper id', { wrapperId: '' }, 'not started by the launcher wrapper'],
+    ['a -p run', { interactive: false, typed: false }, 'no person is at this session'],
+    ['a -p run, origin claimed typed', { interactive: false }, 'no person is at this session'],
+    ['an interactive window, a command no person sent', { typed: false }, 'it must be typed at the prompt'],
+  ] as const) {
+    const p = switchPlan({ ...base, ...o }, 'en')
+    assert(p.action === 'say' && p.text.includes(manual) && p.text.startsWith('Nothing was written') && p.text.includes(reason), `${why}: ${p.text}`)
+  }
+  assert(!switchPlan({ ...base, typed: false }, 'en').text.includes('no person'), 'an interactive window is not called empty')
+  for (const mode of ['off', 'rc-keep', 'api-only']) {
+    const p = switchPlan({ ...base, fallback: fb(mode) }, 'en')
+    assert(p.action === 'say' && p.text.includes(`needs accountFallback.mode "switch" (now "${mode}")`), mode)
+  }
+  assert(switchPlan({ ...base, arg: 'other' }).action === 'say', 'only the configured account')
+  assert(switchPlan({ ...base, fallback: { mode: 'switch', account: 'second', accountDir: '' } }).action === 'say', 'no config dir: nothing to switch to')
+  // a plugin path with a space is quoted, so the printed command pastes as it is
+  const spaced = switchPlan({ ...base, setup: '/p a/tools/setup.mjs', fallback: fb('off') }, 'en').text
+  assert(spaced.includes(`node '/p a/tools/setup.mjs' set accountFallback.mode switch`), 'sh-quoted path')
+  const spacedWin = switchPlan({ ...base, isWin: true, setup: 'C:\\Users\\J D\\setup.mjs', fallback: fb('off') }, 'en').text
+  assert(spacedWin.includes(`node 'C:\\Users\\J D\\setup.mjs' set`), 'PowerShell-quoted path')
+  // verifier: both refusals name the exact commands, with this plugin's setup.mjs
+  const setup = '/p/tools/setup.mjs'
+  for (const lang of ['en', 'zh'] as const) {
+    const wrongMode = switchPlan({ ...base, setup, fallback: fb('off') }, lang)
+    assert(wrongMode.action === 'say' && wrongMode.text.includes(`node ${setup} set accountFallback.mode switch`) && !wrongMode.text.includes('model-relay.json'), `${lang}: ${wrongMode.text}`)
+    const noAccount = switchPlan({ ...base, setup, fallback: { mode: 'switch', account: '', accountDir: '' } }, lang)
+    assert(noAccount.action === 'say' && noAccount.text.includes(`node ${setup} account-add <name>`) && noAccount.text.includes(`node ${setup} set accountFallback.account <name>`) && !noAccount.text.includes('model-relay.json'), `${lang}: ${noAccount.text}`)
+    const noDir = switchPlan({ ...base, setup, fallback: { mode: 'switch', account: 'second', accountDir: '' } }, lang)
+    assert(noDir.action === 'say' && noDir.text.includes(`node ${setup} account-add second`) && !noDir.text.includes('model-relay.json'), `${lang}: ${noDir.text}`)
+  }
+  assert(switchPlan({ ...base, sid: '--dangerously-skip-permissions' }).action === 'say', 'a session id that is no UUID is never handed over')
+  assert(switchPlan({ ...base, sid: '--dangerously-skip-permissions', wrapperId: undefined }, 'en').text.includes('no id to resume'), 'nor printed')
+  assert(switchPlan(base, 'zh').text.includes('/exit'), 'zh')
+})
+
+test('the manual command: same working directory, shared transcripts, quoted for the shell of this platform, ~ only at the start', () => {
+  const via = { dir: '/h/.claude', anthropic: true }
+  const en = manualSwitchText('a', "/x/it's dir", SID, '/h', 'no-wrapper', false, 'en', via)
+  assert(en.includes(`CLAUDE_CONFIG_DIR='/x/it'\\''s dir' MODEL_RELAY_CONFIG_DIR=/h/.claude claude --resume ${SID}`), 'quoted')
+  assert(en.includes('from this same working directory') && en.includes('shares this one\'s transcripts (projects/'), 'says what it needs, no more')
+  assert(manualSwitchText('a', '~/d', SID, '/h', 'no-wrapper', false, 'en', via).includes('CLAUDE_CONFIG_DIR=/h/d '), 'home')
+  assert(manualSwitchText('a', '/a~/d', SID, '/h', 'no-wrapper', false, 'en', via).includes("CLAUDE_CONFIG_DIR='/a~/d' "), 'a ~ elsewhere is not expanded (and quoted)')
+  const win = manualSwitchText('a', "~/it's", SID, 'C:\\Users\\me', 'no-wrapper', true, 'en', { dir: 'C:/Users/me/.claude', anthropic: true })
+  assert(win.includes(`$env:CLAUDE_CONFIG_DIR='C:/Users/me/it''s'; $env:MODEL_RELAY_CONFIG_DIR='C:/Users/me/.claude'; claude --resume ${SID}`), `PowerShell on Windows: ${win}`)
+  const zh = manualSwitchText('a', '~/d', SID, '/h', 'not-typed', false, 'zh', via)
+  assert(zh.includes('同一個工作資料夾') && zh.includes('projects/') && zh.includes('親自輸入'), zh)
+  assert(isUuid(WRAPPER) && !isUuid(`${WRAPPER}x`) && !isUuid(undefined), 'uuid')
+})
+
+test('A3: the limit toast fires in mode switch when the router saw Claude\'s usage limit within the cooldown; the api-only toast in windows the wrapper did not start', () => {
+  const now = 10_000_000
+  const at = (claudeLimitedAt: number, cooldownMs?: number) => health({ claudeLimitedAt, ...(cooldownMs ? { config: { failoverEnabled: true, retryEnabled: true, proxyEnabled: false, cooldownMs } } : {}) })
+  assert(at(now - 1000).claudeLimitedAt === now - 1000 && at(now, 60000).cooldownMs === 60000 && health({}).claudeLimitedAt === undefined, 'read from /__health')
+  assert(wantsLimitToast('switch', at(now - 1000), now), 'a limit just now')
+  assert(wantsLimitToast('switch', health({ claudeLimitedAt: now - 1000, failoverSince: 0, failoverChain: [] }), now), 'with an empty chain: no failover state at all')
+  assert(!wantsLimitToast('switch', at(now - 600_000), now) && wantsLimitToast('switch', at(now - 599_999), now), 'within the default cooldown')
+  assert(!wantsLimitToast('switch', at(now - 70_000, 60_000), now) && wantsLimitToast('switch', at(now - 50_000, 60_000), now), 'within the router\'s cooldown')
+  assert(!wantsLimitToast('switch', health({ failoverSince: now - 1000, nextClaudeTry: now + 1000 }), now), 'failover state alone is not it')
+  assert(!wantsLimitToast('switch', null, now) && !wantsLimitToast('switch', health({}), now), 'no router, or no limit seen')
+  for (const m of ['off', 'rc-keep', 'api-only'] as const) assert(!wantsLimitToast(m, at(now - 1000), now), m)
+  assert(limitToastText('en') === 'Your account reached its usage limit — /provider switch, then /exit' && limitToastText('zh').includes('/provider switch'), 'texts')
+  assert(wantsApiOnlyToast('api-only', undefined) && wantsApiOnlyToast('api-only', 'nope'), 'unwrapped')
+  assert(!wantsApiOnlyToast('api-only', WRAPPER) && !wantsApiOnlyToast('rc-keep', undefined) && !wantsApiOnlyToast('switch', undefined), 'wrapped, or another mode')
+  assert(apiOnlyToastText('en').includes('Remote Control stays on here') && apiOnlyToastText('zh').includes('Remote Control'), 'texts')
+  assert(helpText([], 'en', [], true).includes('/provider switch [<account>]') && helpText([], 'zh', [], true).includes('/provider switch'), 'listed in help in mode switch (B12)')
+})
+
+test('fix 7: the panel of an account window shows its own route, never main\'s failover; fix 5: a refusal is read from the status line', () => {
+  const h = health({ failoverSince: 5, nextClaudeTry: 9, failoverProvider: 'other', providers: { other: 'other-model' }, session: 'claude', account: 'other-org' })
+  const own = buildPanelData(h, 8950, false, 'en', 0, false, 'other-org')
+  assert(own.failoverSince === 0 && own.nextClaudeTry === 0 && own.failoverProvider === null, 'no failover in the account window')
+  assert(own.session === 'claude' && own.providers.other === 'other-model', 'its providers still listed')
+  const main = buildPanelData(h, 8950, false, 'en', 0)
+  assert(main.failoverSince === 5 && main.failoverProvider === 'other', 'main\'s window unchanged')
+  assert(accountAnswer(0, '{"ok":true}\n200').result === 'changed', '2xx')
+  const refused = accountAnswer(0, '{"type":"error","error":{"message":"model-relay router: that account is not in accounts"}}\n400')
+  assert(refused.result === 'refused' && 'why' in refused && refused.why === 'that account is not in accounts', JSON.stringify(refused))
+  assert(accountAnswer(7, '').result === 'failed' && accountAnswer(0, '{"ok":true}').result === 'failed', 'no answer, or no status: not a change')
+})
+
+test('fallback 11: a second Claude account in the status text and status file is named, never "anthropic-account"; accountServing likewise', () => {
+  const fc = (x: [string, string]) => x.join(' ')
+  const accts = { providers: { aaa: 'aaa-9', 'team-2': 'anthropic-account' }, kinds: { 'team-2': 'anthropic' }, failoverChain: [] }
+  // a pin to the account, in a main window (rc-keep) and in team-1's window (switch, its fallback)
+  const pinned = health({ ...accts, session: 'team-2' })
+  assert(statusText(pinned, false) === '主線：Claude（team-2）（這個視窗固定用它）', statusText(pinned, false))
+  assert(statusText(pinned, false, 'en') === 'Main: Claude (team-2) (pinned for this window)', statusText(pinned, false, 'en'))
+  assert(statusText(pinned, false, 'en', 'team-1') === 'Main: Claude (team-2) (pinned for this window)', 'the same in the account window')
+  assert(fc(statusFields(pinned, false)) === 'pinned claude/team-2' && fc(statusFields(pinned, false, false, 'team-1')) === 'pinned claude/team-2', 'status file: pinned')
+  // team-1 at its usage limit: the router serves the window with team-2
+  const serving = health({ ...accts, session: 'claude', account: 'team-1', accountServing: 'Team-2' })
+  assert(serving.accountServing === 'team-2', 'accountServing read, lower case')
+  assert(statusText(serving, false, 'en', 'team-1') === 'Main: Claude (team-2) (team-1 is at its usage limit)', statusText(serving, false, 'en', 'team-1'))
+  assert(statusText(serving, false, 'zh', 'team-1') === '主線：Claude（team-2）（team-1 額度用完）', statusText(serving, false, 'zh', 'team-1'))
+  assert(fc(statusFields(serving, false, false, 'team-1')) === 'claude claude/team-2', 'status file: serving')
+  const unlisted = health({ ...accts, providers: { aaa: 'aaa-9' }, session: 'claude', account: 'team-1', accountServing: 'team-2' })
+  assert(statusText(unlisted, false, 'en', 'team-1') === 'Main: Claude (team-1)' && fc(statusFields(unlisted, false, false, 'team-1')) === 'claude claude/team-1', 'a name the router does not list is not shown')
+  // the rc-keep failover to an account names it too
+  const fo = health({ providers: { spare: 'anthropic-account' }, kinds: { spare: 'anthropic' }, session: 'claude', failoverSince: 1, failoverProvider: 'spare', failoverChain: ['spare'] })
+  assert(statusText(fo, false, 'en') === 'Claude limit reached: routing to Claude (spare)', statusText(fo, false, 'en'))
+  assert(fc(statusFields(fo, false)) === 'failover claude/spare', 'status file: failover')
+  for (const x of [pinned, serving, fo]) for (const lang of ['zh', 'en'] as const) assert(!statusText(x, false, lang, x === serving ? 'team-1' : null).includes('anthropic-account'), 'never the label')
+  // an ordinary provider keeps its model id
+  assert(fc(statusFields(health({ ...accts, session: 'aaa' }), false)) === 'pinned aaa-9' && statusText(health({ ...accts, session: 'aaa' }), false, 'en') === 'Main: aaa-9 (pinned for this window)', 'a model id as before')
+  assert(accountServingText('team-1', 'team-2') === 'team-1 額度用完，這個視窗改用 team-2' && accountServingText('team-1', 'team-2', 'en') === 'team-1 reached its usage limit; this window uses team-2 now', 'the toast')
+})
+
+test('list 11 and 13: a main window names the account the relay\'s own account\'s limit moved it to (selfServing, a name only); an account window shows the current account of its list', () => {
+  const fc = (x: [string, string]) => x.join(' ')
+  // the router lists the fallback account nowhere else for a main window: the name alone is enough
+  const main = health({ providers: { aaa: 'aaa-9' }, session: 'claude', failoverChain: ['aaa'], selfServing: 'Team-2' })
+  assert(main.selfServing === 'team-2', 'read, lower case')
+  assert(statusText(main, false, 'en') === 'Main: Claude (team-2) (your account is at its usage limit)', statusText(main, false, 'en'))
+  assert(statusText(main, false) === '主線：Claude（team-2）（你的帳號額度用完）', statusText(main, false))
+  assert(fc(statusFields(main, false)) === 'claude claude/team-2', fc(statusFields(main, false)))
+  assert(selfServingText('team-2', 'en') === 'Your account reached its usage limit; this window uses team-2 now' && selfServingText('team-2') === '你的帳號額度用完，這個視窗改用 team-2', 'the toast')
+  // a pin still wins; anything that is not a plain name is dropped
+  assert(statusText(health({ providers: { aaa: 'aaa-9' }, session: 'aaa', failoverChain: [], selfServing: 'team-2' }), false, 'en') === 'Main: aaa-9 (pinned for this window)', 'a pin first')
+  for (const bad of ['../x', 'a b', '', 7, 'x\ty']) assert(health({ providers: {}, session: 'claude', failoverChain: [], selfServing: bad }).selfServing === undefined, String(bad))
+  // an account window walking its list: the router's accountServing is the account serving it now
+  const walk = health({ providers: { 'team-2': 'anthropic-account', 'team-3': 'anthropic-account' }, kinds: { 'team-2': 'anthropic', 'team-3': 'anthropic' }, session: 'claude', account: 'team-1', accountServing: 'team-3', failoverChain: [] })
+  assert(statusText(walk, false, 'en', 'team-1') === 'Main: Claude (team-3) (team-1 is at its usage limit)', statusText(walk, false, 'en', 'team-1'))
+  assert(fc(statusFields(walk, false, false, 'team-1')) === 'claude claude/team-3')
+})
+
+// ---------- guidance on the account paths ----------
+
+const accts = { providers: { aaa: 'aaa-9', 'team-2': 'anthropic-account' }, kinds: { 'team-2': 'anthropic' }, failoverChain: ['aaa'], switches: undefined }
+
+test('B2: /provider status in an account window shows that account, its own view, never your failover, and the account its limit moved it to', () => {
+  const h = health({ ...accts, session: 'claude', account: 'team-1', failoverSince: 5, nextClaudeTry: 9, failoverProvider: 'aaa', selfServing: 'team-3', accountServing: 'team-2', config: { failoverEnabled: true, retryEnabled: true, proxyEnabled: false } })
+  const text = providerReport(h, 0, 'en', 'team-1')
+  const lines = text.split('\n')
+  assert(lines[0] === 'Main: Claude (team-2) (team-1 is at its usage limit)', lines[0]!)
+  assert(!text.includes('limit reached') && !text.includes('retrying Claude') && !text.includes('429 failover') && !text.includes('team-3'), 'no failover suffix, no failover switch, no selfServing')
+  assert(text.includes('○ /provider claude   Claude (team-1) (switching back rebuilds the prompt cache)') && text.includes('● /provider team-2   Claude (team-2)  ← in use'), 'the account is the Claude row; the account serving it is the row in use')
+  const own = providerReport(health({ ...accts, session: 'claude', account: 'team-1' }), 0, 'en', 'team-1')
+  assert(own.split('\n')[0] === 'Main: Claude (team-1)' && own.includes('● /provider claude   Claude (team-1)  ← in use'), own)
+  const limited = providerReport(health({ ...accts, session: 'claude', account: 'team-1', accountLimited: true }), 0, 'en', 'team-1')
+  assert(limited.split('\n')[0] === 'Main: Claude (team-1) (team-1 is at its usage limit and has no fallback account to move to)', limited)
+  // a main window as before: its own failover, Anthropic Claude
+  const main = providerReport(health({ ...accts, session: 'claude', failoverSince: 5, nextClaudeTry: 9, failoverProvider: 'aaa' }), 0, 'en')
+  assert(main.includes('Claude limit reached: routing to aaa-9 (retrying Claude') && main.includes('● /provider claude   Anthropic Claude  ← in use'), 'main window: its own failover, Anthropic Claude')
+  assert(main.includes('429 failover'), 'main keeps its failover line')
+})
+
+test('B5: a second Claude account is Claude under its name in /provider rows, the switch reply and the panel data, never "anthropic-account"', () => {
+  const h = health({ ...accts, session: 'team-2' })
+  for (const lang of ['en', 'zh'] as const) {
+    assert(!providerReport(h, 0, lang).includes('anthropic-account') && !pingReport(h, lang).includes('anthropic-account'), `${lang}: rows`)
+  }
+  assert(pingReport(h, 'en').includes('/provider team-2   Claude (team-2)'), 'ping rows')
+  assert(routeLabel(h.providers, h.kinds!, 'team-2', 'en') === 'Claude (team-2)' && routeLabel(h.providers, h.kinds!, 'aaa', 'en') === 'aaa-9' && routeLabel(h.providers, h.kinds!, 'nope', 'en') === undefined, 'routeLabel')
+  assert(claudeAs('team-2', 'zh') === 'Claude（team-2）', 'zh label')
+  assert(JSON.stringify(buildPanelData(h, 8950, false, 'en', 0).kinds) === '{"team-2":"anthropic"}', 'the panel gets the kinds, to label its rows')
+})
+
+test('B6: the panel data of an account window carries its account, what serves it and no failover chain; a main window carries the relay\'s own account\'s fallback', () => {
+  const served = health({ ...accts, session: 'claude', account: 'team-1', accountServing: 'team-2', failoverSince: 5, failoverProvider: 'aaa' })
+  const a = buildPanelData(served, 8950, false, 'en', 0, false, 'team-1')
+  assert(a.account === 'team-1' && a.serving === 'team-2' && a.limited === false && a.failoverChain.length === 0 && a.failoverSince === 0, JSON.stringify([a.account, a.serving, a.limited, a.failoverChain]))
+  const stuck = buildPanelData(health({ ...accts, session: 'claude', account: 'team-1', accountLimited: true }), 8950, false, 'en', 0, false, 'team-1')
+  assert(stuck.limited === true && stuck.serving === null, 'at its limit with nobody to go to')
+  const main = buildPanelData(health({ ...accts, session: 'claude', selfServing: 'team-3' }), 8950, false, 'en', 0)
+  assert(main.account === null && main.serving === 'team-3' && main.limited === false && main.failoverChain.join() === 'aaa', 'a main window')
+  assert(buildPanelData(null, 8950, true, 'en', 0).serving === null, 'offline: none')
+})
+
+test('B12: /provider help lists /provider switch [<account>] only where it works, and always names the account commands', () => {
+  for (const lang of ['en', 'zh'] as const) {
+    assert(!helpText([], lang).includes('/provider switch'), `${lang}: not outside mode switch or in an account window`)
+    assert(helpText([], lang, [], true).includes('/provider switch [<account>]'), `${lang}: in a main window in mode switch`)
+    assert(helpText([], lang).includes('account-add') && helpText([], lang).includes('account-sync') && helpText([], lang).includes('launcher'), `${lang}: Accounts line`)
+  }
+})
+
+test('B13: the texts a person reads say your account, not "main"', () => {
+  for (const lang of ['en', 'zh'] as const) {
+    const texts = [limitToastText(lang), selfServingText('team-2', lang), accountServingText('team-1', 'team-2', lang), apiOnlyToastText(lang), accountRefusedText('team-1', 'x', lang), accountLimitedText('team-1', lang)]
+    for (const t of texts) assert(!/\bmain\b|主帳號/i.test(t), t)
+  }
+})
+
+test('B15: the router\'s 4xx reason reaches the person from /__session, as a refusal; no answer stays "did not respond"', () => {
+  const body = '{"type":"error","error":{"type":"api_error","message":"model-relay router: provider \\"spare\\" is the fallback of another account\'s windows; this session cannot use it (configured: aaa)"}}'
+  const refused = sessionAnswer(0, `${body}\n400`)
+  assert(refused.result === 'refused' && 'why' in refused && refused.why.startsWith('provider "spare" is the fallback of another account\'s windows'), JSON.stringify(refused))
+  assert(sessionRefusedText('x y', 'en') === 'The relay refused: x y. Nothing changed.' && sessionRefusedText('x y').includes('轉發站拒絕了：x y'), 'texts')
+  assert(sessionAnswer(0, '{"ok":true,"session":"aaa"}').result === 'changed' && sessionAnswer(0, '{"ok":true}\n200').result === 'changed', 'changed')
+  assert(sessionAnswer(7, '').result === 'failed' && sessionAnswer(0, '').result === 'failed', 'no answer')
+})
+
+test('B18: a zh refusal puts the router\'s English reason in its own parenthesis, after the zh sentence', () => {
+  const zh = accountRefusedText('team-1', 'that account is not in accounts', 'zh')
+  assert(zh === '轉發站沒有把這個視窗登記為 team-1 的視窗（轉發站回報：that account is not in accounts）。修好之前，它的 Claude 請求走你帳號的路徑。', zh)
+  assert(accountRefusedText('team-1', 'x', 'en') === "The relay did not take this window as team-1's: x. Its Claude requests take your account's path until that is fixed.", 'en as before')
+})
+
+test('B14 (hook half): an account window at its usage limit with nobody to go to is told what to do; the health field is read as a boolean only', () => {
+  assert(health({ accountLimited: true }).accountLimited === true && health({ accountLimited: 'yes' }).accountLimited === undefined && health({}).accountLimited === undefined, 'parseHealth')
+  const en = accountLimitedText('team-1', 'en')
+  assert(en.includes('team-1 reached its usage limit') && en.includes('accounts.team-1.fallback') && en.includes('continue in a window of your own account'), en)
+  assert(accountLimitedText('team-1').includes('額度用完') && accountLimitedText('team-1').includes('你自己帳號的視窗'), 'zh')
+})
+
+test('/provider switch refuses an account name the launcher wrapper would refuse, before any handoff, with the command that sets a plain one', () => {
+  const base = { arg: '', wrapperId: WRAPPER, interactive: true, typed: true, sid: SID, home: '/Users/me', relayDir: '/Users/me/.claude', setup: '/p/tools/setup.mjs' }
+  for (const account of ['bad name', '../x', 'a/b', '-x']) {
+    for (const lang of ['en', 'zh'] as const) {
+      const p = switchPlan({ ...base, fallback: { mode: 'switch', account, accountDir: '~/d', accounts: {}, claudeIsAnthropic: true } }, lang)
+      assert(p.action === 'say' && p.text.includes('node /p/tools/setup.mjs set accountFallback.account <name>') && p.text.includes(account), `${account}: ${JSON.stringify(p)}`)
+      const r = switchRefusal({ account, ownDir: '/h/.claude', accountDir: '/h/d', setup: '/p/tools/setup.mjs', real: { own: '/h/.claude', account: '/h/d', ownProjects: '/p', accountProjects: '/p' } }, lang)
+      assert(r !== null && r.includes('node /p/tools/setup.mjs set accountFallback.account <name>'), `${account}: ${r}`)
+    }
+  }
+  assert(switchPlan({ ...base, fallback: fb('switch') }).action === 'write', 'a plain name still writes')
+})
+
+test('B4: /provider switch is refused before the handoff is written when the account folder is missing, is this window\'s own, or its projects folder is another one', () => {
+  const base = { account: 'second', ownDir: '/h/.claude', accountDir: '/h/.claude-second' }
+  const ok = { own: '/h/.claude', account: '/h/.claude-second', ownProjects: '/h/.claude/projects', accountProjects: '/h/.claude/projects' }
+  assert(switchRefusal({ ...base, real: ok }, 'en') === null, 'a shared projects folder: nothing to refuse')
+  const missing = switchRefusal({ ...base, real: { ...ok, account: undefined } }, 'en')!
+  assert(missing.includes('/h/.claude-second (accounts.second.configDir) does not exist') && missing.includes('account-add') && missing.endsWith('Nothing was changed.'), missing)
+  const same = switchRefusal({ ...base, real: { ...ok, account: '/h/.claude' } }, 'en')!
+  assert(same.startsWith('accounts.second.configDir is this window\'s own config dir'), same)
+  const apart = switchRefusal({ ...base, real: { ...ok, accountProjects: '/h/.claude-second/projects' } }, 'en')!
+  assert(apart.includes('Make /h/.claude-second/projects a link to /h/.claude/projects (move or remove /h/.claude-second/projects first): ln -s /h/.claude/projects /h/.claude-second/projects. Nothing was changed.'), apart)
+  assert(switchRefusal({ ...base, real: { ...ok, accountProjects: undefined } }, 'en')!.includes('ln -s /h/.claude/projects'), 'no projects folder at all')
+  const ps = switchRefusal({ account: 'second', ownDir: 'C:/Users/me/.claude', accountDir: "C:/Users/me/it's", isWin: true, real: { ...ok, ownProjects: 'C:/A', accountProjects: 'C:/B' } }, 'en')!
+  assert(ps.includes("New-Item -ItemType SymbolicLink -Path 'C:/Users/me/it''s/projects' -Target 'C:/Users/me/.claude/projects'"), ps)
+  assert(switchRefusal({ ...base, real: { ...ok, account: '/H/.CLAUDE', own: '/h/.claude' }, isWin: true }, 'en')!.startsWith('accounts.second.configDir is this window'), 'Windows paths compare without case')
+  assert(dirKey('C:\\Users\\Me\\', true) === dirKey('c:/users/me', true) && dirKey('/H/x', false) !== dirKey('/h/x', false), 'dirKey: case, slashes and a trailing one only on Windows, a trailing one anywhere')
+  assert(switchRefusal({ ...base, real: { ...ok, accountProjects: '/x' } }, 'zh')!.includes('沒有做任何變更'), 'zh')
+})
+
+test('B9: the api-only toast says why the window matters and which command starts the right one', () => {
+  const en = apiOnlyToastText('en')
+  assert(en.includes('Remote Control stays on here') && en.includes('"api-only" turns off') && en.includes('setup.mjs launcher'), en)
+  assert(apiOnlyToastText('zh').includes('setup.mjs launcher') && apiOnlyToastText('zh').includes('沒有關閉'), 'zh')
+})
+
+test('B8 (hook half): off macOS a keychain item the relay cannot read is answered with what to write instead', () => {
+  const h = health({ unresolved: [{ provider: 'late', keychain: 'svc/acct' }] })
+  assert(healthHints(h, 'en', false, true)[0] === 'late is skipped: keychain: tokens work on macOS only; write env:<VAR> in its token here', 'Windows: no retry promise')
+  const other = healthHints(h, 'en')[0]!
+  assert(other.includes('any change to model-relay.json') && other.includes('keychain: tokens work on macOS only, on Linux write env:<VAR>'), 'elsewhere: both facts')
+  assert(healthHints(h, 'zh', false, true)[0]!.includes('只能在 macOS 使用') && buildPanelData(h, 8950, false, 'en', 0, false, null, true).hints[0] === healthHints(h, 'en', false, true)[0], 'zh, and the panel follows')
+})
+
+test('B11 (setupBrief half), F12: the setup brief names the account commands, forbids running setup-token or passing a value to security -w, and asks before accountFallback changes', () => {
+  const b = setupBrief('/p/tools/setup.mjs', 'node', 'add my second account', true, 'en')
+  for (const word of ['account-add <name>', 'account-sync <name>', 'account-token <name> keychain:<service>/<account>', 'account-token <name> env:<VAR>', 'account-fallback <name>', 'set accountFallback.mode', 'terms of use']) assert(b.includes(word), word)
+  assert(b.includes('Never run "claude setup-token" yourself, never pass a token value to "security -w"') && b.includes('Ask me before you change accountFallback.mode'), 'F12 rules')
+  assert(b.includes('Never ask me to paste an API key into this chat'), 'the paste ban stays')
+  assert(setupBrief('/p/tools/setup.mjs', 'node', '', false, 'zh').includes('account-add <name>'), 'also with no config yet')
+})
+
+test('A8, A16, F9: the command to resume by hand drops the wrapper\'s variables, keeps the relay only when claudeUrl is Anthropic, and has a PowerShell form', () => {
+  const via = { dir: '/h/.claude', anthropic: true }
+  const unset = RESUME_UNSET.map((v) => `-u ${v}`).join(' ')
+  const sh = manualSwitchText('a', '~/d', SID, '/h', 'no-wrapper', false, 'en', via)
+  assert(sh.includes(`env ${unset} CLAUDE_CONFIG_DIR=/h/d MODEL_RELAY_CONFIG_DIR=/h/.claude claude --resume ${SID}`) && !sh.includes('leaves the relay out'), sh)
+  assert(RESUME_UNSET.includes('MODEL_RELAY_WRAPPER_ID') && RESUME_UNSET.includes('CLAUDE_CODE_OAUTH_TOKEN') && RESUME_UNSET.includes('ANTHROPIC_API_KEY') && RESUME_UNSET.includes('ANTHROPIC_AUTH_TOKEN'), 'the credentials are in the list')
+  const plain = manualSwitchText('a', '~/d', SID, '/h', 'no-wrapper', false, 'en', { dir: '/h/.claude', anthropic: false })
+  // claudeUrl elsewhere: no command at all (it would send the window through the relay as an unregistered one); the wrapper does the switch
+  assert(!plain.includes('claude --resume') && !plain.includes('CLAUDE_CONFIG_DIR') && !plain.includes('leaves the relay out') && plain.includes('launcher wrapper') && plain.includes('/provider switch') && plain.startsWith('Nothing was written'), plain)
+  assert(!manualSwitchText('a', '~/d', SID, '/h', 'no-wrapper', true, 'zh', { dir: '/h/.claude', anthropic: false }).includes('--resume'), 'zh, PowerShell: none either')
+  const spaced = manualSwitchText('a', "/x/it's dir", SID, '/h', 'no-wrapper', false, 'en', { dir: '/r d/.claude', anthropic: true })
+  assert(spaced.includes("CLAUDE_CONFIG_DIR='/x/it'\\''s dir' MODEL_RELAY_CONFIG_DIR='/r d/.claude' claude"), 'paths are expanded and quoted')
+  const ps = manualSwitchText('a', "~/it's", SID, 'C:\\Users\\me', 'no-wrapper', true, 'en', { dir: 'C:\\Users\\me\\.claude', anthropic: true })
+  assert(ps.includes('in a new PowerShell window') && ps.includes(`Remove-Item ${RESUME_UNSET.map((v) => `Env:${v}`).join(',')} -ErrorAction SilentlyContinue; $env:CLAUDE_CONFIG_DIR='C:/Users/me/it''s'; $env:MODEL_RELAY_CONFIG_DIR='C:/Users/me/.claude'; claude --resume ${SID}`), ps)
+  assert(manualSwitchText('a', '~/d', SID, '/h', 'no-wrapper', true, 'zh', via).includes('在新的 PowerShell 視窗裡'), 'zh PowerShell')
+  // switchPlan carries the relay dir and claudeUrl from the config
+  const p = switchPlan({ fallback: fb('switch'), arg: '', wrapperId: undefined, interactive: true, typed: true, sid: SID, home: '/h', relayDir: '/h/.claude' }, 'en')
+  assert(p.action === 'say' && p.text.includes('MODEL_RELAY_CONFIG_DIR=/h/.claude'), 'claudeUrl unset is Anthropic')
+  const elsewhere = switchPlan({ fallback: fb('switch', { claudeUrl: 'https://gateway.example' }), arg: '', wrapperId: undefined, interactive: true, typed: true, sid: SID, home: '/h', relayDir: '/h/.claude' }, 'en')
+  assert(elsewhere.action === 'say' && !elsewhere.text.includes('--resume') && elsewhere.text.includes('launcher wrapper'), 'a gateway claudeUrl: no command, the wrapper')
+  assert(parseFallback({ claudeUrl: 'https://api.anthropic.com/' }).claudeIsAnthropic && parseFallback({}).claudeIsAnthropic && !parseFallback({ claudeUrl: 'http://api.anthropic.com' }).claudeIsAnthropic, 'claudeIsAnthropic')
+})
+
+test('A17: the zh texts use one term each: 額度用完 for a usage limit, 對話 ID for a session id', () => {
+  const zh = [
+    statusText(health({ ...accts, session: 'claude', account: 'team-1', accountServing: 'team-2' }), false, 'zh', 'team-1'),
+    statusText(health({ providers: {}, session: 'claude', selfServing: 'team-2' }), false, 'zh'),
+    accountServingText('team-1', 'team-2'), selfServingText('team-2'), limitToastText('zh'), accountLimitedText('team-1'),
+    switchPlan({ fallback: fb('switch'), arg: '', wrapperId: WRAPPER, interactive: true, typed: true, sid: 'nope', home: '/h' }).text,
+  ]
+  for (const t of zh) assert(!t.includes('用量已滿') && !t.includes('代號'), t)
+  assert(zh.slice(0, 6).every((t) => t.includes('額度用完')), 'the usage limit is 額度用完 everywhere')
+  assert(zh[6]!.includes('對話 ID'), zh[6]!)
 })
