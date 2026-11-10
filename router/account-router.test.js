@@ -566,7 +566,7 @@ test('A4: the account failing with 5xx hands over without either token; a non-Cl
   })
 })
 
-test('A7: a missing or hanging keychain item is read once in the background; no request or /__health waits on it', async (t) => {
+test('A7: a missing or hanging keychain item is read once in the background; no request or /__health waits on it', { skip: process.platform === 'win32' && 'keychain: tokens are macOS-only (README), and the stand-in keychain tool cannot run in the router child there' }, async (t) => {
   const r = await relay(t, {
     items: { 'relay-test/hang': 'HANG', 'relay-test/late': 'LATE-TOKEN' },
     providers: { slow: { kind: 'anthropic', token: 'keychain:relay-test/hang', accountUuid: SPARE_UUID, ...IDS } },
