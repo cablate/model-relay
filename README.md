@@ -85,7 +85,7 @@ claude plugin install model-relay@model-relay
 
 **Setting it up by hand:** run `/provider init` (creates `~/.claude/model-relay.json` with no provider yet, so every request still goes to Claude, and points `ANTHROPIC_BASE_URL` in `~/.claude/settings.json` at the relay). Add a provider with `node tools/setup.mjs add <name> --preset <preset> --model <model id> --token env:<VAR>` (`presets` lists the built-in ones; `--url` takes any other Anthropic-compatible address), restart Claude Code, then run `/provider doctor --ping`.
 
-**Where `node tools/setup.mjs` runs:** the `node tools/setup.mjs ...` commands later in this README are the same tool. They run from the plugin's install directory, which is `~/.claude/plugins/cache/model-relay/model-relay/<version>/` (`$CLAUDE_CONFIG_DIR/plugins/cache/model-relay/model-relay/<version>/` when you set `CLAUDE_CONFIG_DIR`; `ls` that folder for your version). Elsewhere, use the full path to `tools/setup.mjs` inside it. The command acts on the config directory in `$CLAUDE_CONFIG_DIR`, or `~/.claude` if unset. `/provider setup` runs them for you from anywhere.
+**Where `node tools/setup.mjs` runs:** the `node tools/setup.mjs ...` commands later in this README are the same tool. They run from the plugin's install directory, which is `~/.claude/plugins/cache/model-relay/model-relay/<version>/` (`$CLAUDE_CONFIG_DIR/plugins/cache/model-relay/model-relay/<version>/` when you set `CLAUDE_CONFIG_DIR`; `ls` that folder for your version). Elsewhere, use the full path to `tools/setup.mjs` inside it. The command acts on the config directory in `$MODEL_RELAY_CONFIG_DIR` when that is an absolute path that exists (a second account's window sets it, see [Using more than one Claude account](#using-more-than-one-claude-account)), else in `$CLAUDE_CONFIG_DIR`, or `~/.claude` if unset. `/provider setup` runs them for you from anywhere.
 
 **A key exported later is not seen:** `env:VAR` tokens are read from the router process's own environment, which it inherits from whichever Claude Code session (or setup command) started it. A variable exported after the router started is not seen until the router restarts: stop the router process (`doctor` prints its pid) and start a new Claude Code session. `doctor` reads your shell, so it can report the key as set while the router cannot see it.
 
@@ -162,7 +162,13 @@ Claude Code can still run such a subagent on another model without saying so (a 
 
 ### Edit the config from the command line
 
-`add`, `set`, `providers`, `remove` and `migrate` change the file without hand-editing JSON. Every edit keeps a `.model-relay-backup` copy next to the file, tokens are never printed, and the running router picks the change up on its next request. On an older config (see `format` under Configuration), `add`, `set`, `providers`, `remove`, `alias`, `init`, `restart`, `rc` and `proxy enable` refuse and tell you to run `migrate` first; `migrate` is the only command that understands it. `doctor` also warns about an older config, a failover name that matches no provider, two providers that name the same model (the first one in the file gets it), an `availableModels` list in `~/.claude/settings.json` that leaves a provider's model out, and a running router older than the plugin.
+`add`, `set`, `providers`, `remove`, `account-add` and `migrate` change the file without hand-editing JSON, and `launcher` writes the one file that starts the launcher wrapper. Every edit keeps a `.model-relay-backup` copy next to the file, tokens are never printed, and the running router picks the change up on its next request. The account commands are described in [Using more than one Claude account](#using-more-than-one-claude-account); in short:
+
+- **`account-add <name>`** makes a login directory for another Claude account (`~/.claude-<name>`, or `--dir <path>`) that only you can open, links into it whichever of `settings.json`, `CLAUDE.md`, `agents`, `commands`, `skills`, `hooks`, `plugins`, `projects` and `output-styles` your config directory has (plus each `--link <entry>`), writes `accounts.<name>.configDir`, and prints the steps only you can do, with the exact commands for your OS: `set accountFallback.mode switch`, `/login`, then `set accountFallback.account` and `launcher`. It refuses a name or directory already in use, a directory that is a symlink or not empty, one inside or around your config directory or another account's, and links to a login file, `ide`, `history.jsonl`, `shell-snapshots`, `session-env`, `backups` or the relay's own files; it never touches a shell profile, and warns when your `settings.json` sets a key that would send with something other than the account's login, and for each of `projects`, `settings.json` and `plugins` that your config directory does not have (so it linked nothing) with what the window then lacks.
+- **`set accountFallback.mode <off|switch>`** and **`set accountFallback.account <name|none>`** write the two keys of the account settings; the account must be an `accounts` entry with a `configDir`.
+- **`launcher`** writes `model-relay-launch.mjs` into your config directory and prints the alias or function that starts Claude Code through the wrapper with it.
+
+On an older config (see `format` under Configuration), `add`, `set`, `providers`, `remove`, `alias`, `init`, `restart`, `rc` and `proxy enable` refuse and tell you to run `migrate` first; `migrate` is the only command that understands it. `doctor` also warns about an older config, a failover name that matches no provider, two providers that name the same model (the first one in the file gets it), an `availableModels` list in `~/.claude/settings.json` that leaves a provider's model out, and a running router older than the plugin.
 
 ```bash
 node tools/setup.mjs providers
@@ -170,6 +176,9 @@ node tools/setup.mjs add local --url http://127.0.0.1:4000 --model your-local-mo
 node tools/setup.mjs set failover.chain backup,local
 node tools/setup.mjs set providers.local.fallback none
 node tools/setup.mjs migrate --go
+node tools/setup.mjs account-add team-3
+node tools/setup.mjs set accountFallback.mode switch
+node tools/setup.mjs launcher
 ```
 
 `remove <name>` takes the provider out of `failover.chain` and out of other providers' `fallback` lists, but it does not touch the `ANTHROPIC_DEFAULT_*_MODEL` aliases in `~/.claude/settings.json`. If `haiku`, `sonnet` or `opus` pointed at the removed provider's model, Claude Code keeps sending that model name and, with no provider left to claim it, the request goes to Claude. Reset each of those aliases yourself with `node tools/setup.mjs alias haiku claude` (or `alias haiku <name>` to give it to another provider; likewise for `sonnet` and `opus`). `doctor` warns about an alias that no provider matches.
@@ -189,9 +198,102 @@ node tools/setup.mjs rc
 
 `HTTPS_PROXY` lives in `settings.json` `env`, so it also applies to commands Claude Code runs (`git`, `curl`, `gh`): they go through the relay as blind tunnels, and fail while the router is down.
 
+## Using more than one Claude account
+
+If you have more than one Claude account, for example two Team seats, `model-relay` can open a window on the other account, or move a conversation to it when yours reaches its usage limit. Each window runs on its own account's own login. Read [Terms of use and risk](#terms-of-use-and-risk) before you turn it on. Everything is off until you set `accountFallback.mode`.
+
+### Terms used here
+
+- **Your account:** the Claude login of your own config directory, `~/.claude` or `$CLAUDE_CONFIG_DIR`. "Your" in this README means this one.
+- **Relay dir:** the config directory whose `model-relay.json` the router reads, normally `~/.claude`. A second account's window names it in `MODEL_RELAY_CONFIG_DIR`.
+- **Account:** an entry of `accounts` in `model-relay.json`: a name and the `configDir` of that account's own Claude Code login. `account-add` makes it.
+- **Account window:** a Claude Code window whose config directory is an account's, started with `MODEL_RELAY_CONFIG_DIR` pointing at the relay dir, so that it uses your config and your router.
+- **Registration:** the plugin in an account window telling the router, by session id, that this session belongs to that account (`POST /__account`), so that its Claude requests skip your failover.
+- **Seat:** one person's place on a Team or Enterprise plan. Two seats are two accounts.
+- **Usage limit:** Anthropic's 429 answer when an account has used its allowance.
+
+### Terms of use and risk
+
+Anthropic's terms, not this project, decide what you may do with several accounts. The page [Legal and compliance](https://code.claude.com/docs/en/legal-and-compliance) says this in its "Authentication and credential use" section (fetched 2026-11-10, quoted word for word):
+
+> OAuth authentication is intended exclusively for purchasers of Claude Free, Pro, Max, Ultra, Team, and Enterprise subscription plans and is designed to support ordinary use of Claude Code and other native Anthropic applications.
+
+Here each account runs on its own `/login` in Claude Code, and the relay changes nothing in what a window sends. That is not risk-free either: moving one person's work between accounts whenever a limit is reached may not be what the terms mean by ordinary use, and enforcement can reach either account. Nothing here is legal advice; read the page and decide for yourself.
+
+### The mode
+
+Set `accountFallback.mode` to `"switch"` and name the account in `accountFallback.account`: you move a conversation to your other account yourself with `/provider switch`, each window runs on its own account's login, the relay changes nothing a window sends, and Remote Control stays on the account of the window. Leave `"off"`, the default, to use none of this.
+
+### Before you start
+
+1. Claude Code is logged in with your own account and the relay is installed (`/provider doctor` runs). The recipes check only doctor's account lines and a `⚠` that names an account: a `⚠` about a provider's key or chain concerns the relay, and accounts alone need no provider.
+2. The `node tools/setup.mjs` commands run from the plugin's install directory ([Install](#install) says where; the command `account-add` prints uses the full path).
+3. Each account gets a folder of its own from `account-add <name>` and one `/login` there, as another Claude account than yours; recipe 1 walks through both, so do not run `account-add` twice for one name. `doctor` warns when the login is missing or is your own account.
+4. That folder has to share `projects/` with yours: without it `/provider switch` refuses, prints the `ln -s` command and `doctor` warns. It also needs your `settings.json` and plugins, so that the plugin runs in its window and registers it; without them the plugin does not run there. `account-add` links these from your config directory, whichever of them exists, and warns about each that does not; a folder made by hand needs the same links.
+
+### Recipe 1: a window on a second account
+
+1. Make the account's folder, here `team-2`: `node tools/setup.mjs account-add team-2`. It also prints a checklist of commands with your real paths, numbered in its own way: follow the steps here, and use that list to copy the commands. Its `Terms:` line is a note, not something to fix.
+2. Turn on mode `"switch"` first, because the plugin registers a window only in this mode and the login window of the next step should be registered: `node tools/setup.mjs set accountFallback.mode switch`.
+3. Log in as that account: run `CLAUDE_CONFIG_DIR=$HOME/.claude-team-2 MODEL_RELAY_CONFIG_DIR=$HOME/.claude claude`, type `/login`, finish the login, then `/exit`. `MODEL_RELAY_CONFIG_DIR` is the relay dir (`$HOME/.claude`, or your `$CLAUDE_CONFIG_DIR` when you set one): with it the plugin registers this window with your router, so a window that reaches its limit is never mistaken for your own account. Where you gave `--dir`, or your own account uses `CLAUDE_CONFIG_DIR`, copy the command that `account-add` printed, which has the real paths. On Windows, see the PowerShell form below.
+4. Name the account that `/provider switch` moves a window to: `node tools/setup.mjs set accountFallback.account team-2`.
+5. Write the launcher file and print the alias with `node tools/setup.mjs launcher`. Put the `alias claude=…` line it prints in `~/.zshrc` or `~/.bashrc` (a PowerShell function in `$PROFILE`), then open a new terminal.
+6. From your project folder, use `claude` as before. When your account reaches its limit a notice says `/provider switch`, then `/exit`: type them, and the wrapper resumes the conversation on `team-2`. To open a window on `team-2` directly, run the command of step 3 again.
+7. Check with `node tools/setup.mjs doctor`: an `Accounts: mode "switch"; /provider switch moves a window to team-2` line, `Login of team-2: … (an accountUuid found)`, and no `⚠` about `team-2` (it warns when `team-2` is not logged in yet or is logged in as your own account, or when its `projects/` is not yours). For a missing login, log in again as in step 3.
+
+### Recipe 2: adding a third account
+
+Here `team-3` joins `team-2` from recipe 1, which left the mode on `"switch"`.
+
+1. `node tools/setup.mjs account-add team-3` (`account-add` refuses a name that exists, so skip this step if `team-3` is already made).
+2. Log in there as in step 3 of recipe 1: `CLAUDE_CONFIG_DIR=$HOME/.claude-team-3 MODEL_RELAY_CONFIG_DIR=$HOME/.claude claude`, `/login`, then `/exit`.
+3. Make it the account that `/provider switch` moves a window to: `node tools/setup.mjs set accountFallback.account team-3`. One account is the target: `team-2` stays usable for windows you open on it directly, and `/provider switch` now goes to `team-3`.
+4. Run `node tools/setup.mjs doctor`: it shows `Accounts: mode "switch"; /provider switch moves a window to team-3` and `Login of team-3: … (an accountUuid found)`, and no `⚠` about `team-3`; for a missing login, log in again as in step 2.
+
+### Platform notes
+
+- **Windows:** the wrapper starts `claude.exe` from a folder on `PATH` (a drive or share path), where the native installer puts it. An npm install's `claude.cmd` cannot be started without a shell: install Claude Code with the native installer, or name the file, `-- C:\path\to\claude.exe`.
+- **An alias or a function, never a file named `claude` on `PATH`:** the wrapper starts `claude` from `PATH` and would start itself. `setup.mjs launcher` prints the alias for zsh and bash and a function for PowerShell.
+- **The alias keeps working across plugin updates:** it runs `model-relay-launch.mjs` in the relay dir, which `setup.mjs launcher` writes and which every session start refreshes in mode `"switch"` so that it names the plugin version running. Run `launcher` yourself the first time, before any session has refreshed it.
+- **PowerShell forms of the commands in this section:** the variable stays set in the window that sets it, so use a new PowerShell window for each.
+
+  ```powershell
+  $env:CLAUDE_CONFIG_DIR="$HOME\.claude-team-2"; $env:MODEL_RELAY_CONFIG_DIR="$HOME\.claude"; claude
+  ```
+
+  It logs in (recipe 1, step 3) and opens a window on `team-2` (recipe 1, step 6). The command that resumes a conversation by hand is under `/provider switch` in Commands.
+
+### The launcher wrapper: moving a window to another account
+
+With `accountFallback.mode` `"switch"`, the window moves: Claude Code starts on the other account's own login. Start Claude Code through the wrapper, which reads the `model-relay.json` of the config directory the window will use (`CLAUDE_CONFIG_DIR`, else `~/.claude`). A window with a config directory of its own must have `CLAUDE_CONFIG_DIR` set in the environment before the wrapper starts, since that is all the wrapper looks at. Run it from your project folder, in place of `claude`, through the file that `setup.mjs launcher` writes (it runs the `tools/launch.mjs` of the installed plugin, whatever its version):
+
+```bash
+node ~/.claude/model-relay-launch.mjs [your usual arguments]
+node ~/.claude/model-relay-launch.mjs -- <launcher> [arguments]
+```
+
+Without a leading `--`, every word is an argument and the launcher is `claude`; after `--`, the next word is the launcher. The file is in your relay dir (`~/.claude` unless `CLAUDE_CONFIG_DIR` says otherwise); `launcher` prints its path and the alias. On Windows, a launcher that is a `.cmd` or `.bat` script is not supported (the wrapper starts it without a shell), and that includes the `claude.cmd` of an npm install.
+
+- **Pass-through:** with no `model-relay.json` there, or a mode other than `"switch"`, it runs the launcher with exactly your arguments and environment. So does a window whose config directory is one of the `accounts` in the config `MODEL_RELAY_CONFIG_DIR` names, in every mode. A second account's own window is therefore untouched, its own `--settings` included.
+- **First launch:** your arguments as they are, plus `MODEL_RELAY_WRAPPER_ID` (a fresh id) in the environment.
+- **Switching:** after `/provider switch` and `/exit` (exit code 0), it starts the launcher once more with `CLAUDE_CONFIG_DIR` set to `accounts.<accountFallback.account>.configDir`. That relaunch gets only `--model`, `--permission-mode` and `--effort` from your arguments, plus `--resume=<session id>` and a `--settings` that keeps the memory folder of this project. Any other option of the original command (`--add-dir`, `--mcp-config` and the like) is not carried over, and the wrapper prints the names of those options, never their values. The window keeps the relay: `MODEL_RELAY_CONFIG_DIR` points it at your config directory, `HTTPS_PROXY` and `https_proxy` stay, the relay wiring of your `settings.json` (`ANTHROPIC_BASE_URL`, `HTTPS_PROXY`, `NO_PROXY`, `NODE_EXTRA_CA_CERTS`, whichever it sets) goes into that `--settings` so the window reaches the relay even with a `settings.json` of its own, and the router learns the session before the window starts. It removes `CLAUDE_CODE_OAUTH_TOKEN`, `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_BASE_URL`, `HTTP_PROXY` and `http_proxy` from that window's environment and names the ones it removed. Only when your `claudeUrl` is not `https://api.anthropic.com`, your `settings.json` sets none of those four, or your `model-relay.json` is gone by then, does the window bypass the relay instead: no `MODEL_RELAY_CONFIG_DIR`, the proxy variables removed too, and a `--settings` that sets `ANTHROPIC_BASE_URL` to `https://api.anthropic.com` and blanks `HTTPS_PROXY` and `https_proxy`. It refuses when the account's config directory is this window's own, and unless both config directories' `projects/` folders are the same folder, since `--resume` needs the transcript; the refusal prints the `ln -s` command (`New-Item -ItemType SymbolicLink` on Windows) that links the account's `projects/` to yours, and `/provider switch` makes the same check before `/exit`. It switches at most once, and never after it passed a `SIGTERM` or `SIGHUP` on to the window.
+- **Signals:** Ctrl-C reaches Claude Code, not the wrapper; `SIGTERM` and `SIGHUP` are passed on; a window killed by a signal makes the wrapper exit with 128 plus the signal's number.
+
+### The second account's window keeps the relay
+
+A window whose own config directory is one of `accounts`' (the wrapper's relaunch, or one you start yourself with `CLAUDE_CONFIG_DIR=<that dir> MODEL_RELAY_CONFIG_DIR=$HOME/.claude claude`) uses your config and your router, through `MODEL_RELAY_CONFIG_DIR`. That variable counts only when it is an absolute path that exists; its status files stay in its own config directory, where a statusline looks.
+
+- **Its session is registered:** in mode `"switch"` the plugin tells the router, by session id, that this is that account's window (`POST /__account`), at the start, right after the plugin itself restarts the router, and whenever the router no longer knows it. A registration the router refuses is shown once with the reason and asked again no sooner than a minute later; the router also drops one the config no longer allows (another mode, another `claudeUrl`, the account removed). A window of your own account that resumes such a session ends the registration.
+- **Its Claude requests are its own:** they go to Anthropic with the window's own login, never through your failover chain. A 429 there is that account's own limit, and it comes back to the window as it came. Your failover state is left exactly as it was. A provider's model (`model-relay:<name>` subagents, aliases) still goes to that provider, and a `/provider <name>` pin made in that window holds until the router restarts (then make it again). An automatic pin from before the registration does not.
+- **Its status:** for a window of team-2, the status line shows "Main: Claude (team-2)" or its own pin, and the status file shows `claude/team-2` or the pin; neither shows your failover. The panel and `/provider status` show the same: the Claude row says `Claude (team-2)` and your failover chain and its switch are left out. The limit notice for your own account does not appear there; an account at its limit gets one notice that says what to do. `/provider switch` is refused there.
+- A request from that window to a provider carries that account's metadata and email address to the provider, as any provider request carries the window's.
+- The router accepts a registration only in mode `"switch"` and only while `claudeUrl` is `https://api.anthropic.com`. Any local program can register a session; that only makes its Claude requests skip your failover. After a router restart, requests sent before the window's next check (up to 10 seconds) are treated as those of a window that never registered, the next bullet: with your relay dir's login readable and a different account in the request they go to Claude as sent; when either cannot be read, they take your normal path and a usage limit there can start your failover. The window's registration then comes back with the time it first saw that session registered, so a `/provider` pin made by hand in that window still counts; a session the window starts later (a `/resume` inside it) is counted from its own first registration, and an automatic pin made on it before does not hold it.
+- A window of another login that never registered (opened on an account's folder without `MODEL_RELAY_CONFIG_DIR`) is told apart by the account in its requests: while your relay dir's own login is readable and differs, its Claude requests go to Claude as sent, and its usage-limit answer never reaches your failover.
+- Requests to a provider from an account window, a pinned one included, still fall back along that provider's and your failover chain; what an account window never touches is your failover state.
+
 ## Configuration
 
-Configuration lives in `~/.claude/model-relay.json`. The directory defaults to `$CLAUDE_CONFIG_DIR` when set, falling back to `$USERPROFILE/.claude` or `$HOME/.claude`. [`model-relay.example.json`](model-relay.example.json) shows a provider from a preset and a local gateway.
+Configuration lives in `~/.claude/model-relay.json`. The directory defaults to `$CLAUDE_CONFIG_DIR` when set, falling back to `$USERPROFILE/.claude` or `$HOME/.claude`; `$MODEL_RELAY_CONFIG_DIR`, when it is an absolute path that exists, comes before both (a second account's window, see above). [`model-relay.example.json`](model-relay.example.json) shows a provider from a preset and a local gateway.
 
 | Field | Default | Meaning |
 |---|---|---|
@@ -204,6 +306,9 @@ Configuration lives in `~/.claude/model-relay.json`. The directory defaults to `
 | `failover.enabled` | `true` | Automatically switch to the failover chain on Claude 429 usage limits |
 | `failover.chain` | `[]` | Ordered providers that take over when Claude is out of quota or a provider keeps failing; unknown names are skipped. Empty means a 429 from Claude is passed back as it is (`add` puts the first provider of a new config here) |
 | `failover.cooldownMs` | `600000` | Milliseconds before probing Claude again for new sessions (10 minutes). Kept between `60000` (1 minute) and `7200000` (2 hours): a value outside that range is moved to the nearest limit |
+| `accountFallback.mode` | `"off"` | Whether a window may move to a second Claude account. `"off"` uses none, exactly as 0.7.5. `"switch"` is for a launcher that moves the whole window to that account's own login (`/provider switch`): the router then registers that window by session id and keeps its Claude requests out of your failover (see the launcher wrapper below). A window in this mode gets a notice, once, when the router has seen your account's usage-limit answer within `failover.cooldownMs`, whatever `failover.chain` holds: `/provider switch`, then `/exit`. Any other value counts as `"off"`, and `doctor` warns about one it does not know |
+| `accountFallback.account` | (none) | The account (a key of `accounts`) that `"switch"` moves a window to |
+| `accounts.<name>.configDir` | (none) | The config directory that account's own Claude Code login uses, such as `~/.claude-second` (`~` is your home directory). The login is read from `~/.claude.json` for `~/.claude` and from `<dir>/.claude.json` for any other directory, whatever `CLAUDE_CONFIG_DIR` says, and `doctor` names the file it read; `doctor` errors on two accounts that share a login, and warns about an account that is not logged in yet or is logged in as your own |
 | `retry.enabled` | `true` | Master switch for retrying a failing provider; `false` keeps the other retry settings for later |
 | `retry.attempts` | `3` | Times the SAME provider is retried with backoff when it answers 429/5xx; `0` means retry forever. Any other value is capped at `30` |
 | `retry.delayMs` | `2000` | First retry delay; multiplied by `retry.backoff` each attempt. Capped at `60000` (60 seconds), or `300000` (300 seconds) when set in a provider's own `retry` |
@@ -229,6 +334,7 @@ Each window writes its relay state to `~/.claude/model-relay-status/<session id>
 | `kind` | `label` | Meaning |
 |---|---|---|
 | `claude` | `claude` | This window goes to Claude through the relay |
+| `claude` | `claude/<account>` | A second account's window (the label names the account), see Using more than one Claude account |
 | `pinned` | the provider's model | Pinned with `/provider`, or by a failover |
 | `failover` | the provider's model | Claude's limit is reached; the next request goes there |
 | `limit` | `claude` | Claude's limit is reached and the failover chain has nobody to hand over to |
@@ -260,6 +366,7 @@ This feature is experimental: it may change or go away, and it is left out of `/
 |---|---|
 | `/provider` | Open the panel above the prompt to pick this window's model |
 | `/provider <name>` · `/provider claude` | Switch this window without the panel, answered in one line (e.g. `/provider backup`); back to Claude, the next turn rebuilds the prompt cache |
+| `/provider switch [<account>]` | Mode `"switch"` only (`accountFallback.mode`): in a window the launcher wrapper started (it sets `MODEL_RELAY_WRAPPER_ID`) with a person at it, leaves the wrapper this session's id in `model-relay-handoff/<wrapper id>.json` in the config directory, and you then type `/exit`: the wrapper resumes the conversation under `accountFallback.account`. The account named, if any, must be that one. Before it writes anything it refuses, with the fix, when that account's folder is missing, is this window's own, or has a `projects/` folder other than this one's (the `ln -s` command, or `New-Item -ItemType SymbolicLink` on Windows, is printed). Anywhere else (no wrapper, a `-p` run, a command no person typed) nothing is written; it says which, and prints the command to resume by hand, as `env -u CLAUDE_CODE_OAUTH_TOKEN -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN -u ANTHROPIC_BASE_URL -u HTTP_PROXY -u http_proxy -u MODEL_RELAY_WRAPPER_ID CLAUDE_CONFIG_DIR=<that account's configDir> MODEL_RELAY_CONFIG_DIR=<relay dir> claude --resume <session id>`, or on Windows, in a new PowerShell window, `Remove-Item Env:CLAUDE_CODE_OAUTH_TOKEN,Env:ANTHROPIC_API_KEY,Env:ANTHROPIC_AUTH_TOKEN,Env:ANTHROPIC_BASE_URL,Env:HTTP_PROXY,Env:http_proxy,Env:MODEL_RELAY_WRAPPER_ID -ErrorAction SilentlyContinue; $env:CLAUDE_CONFIG_DIR='<configDir>'; $env:MODEL_RELAY_CONFIG_DIR='<relay dir>'; claude --resume <session id>`. The variables it removes are the ones the wrapper removes, so a token exported in your shell cannot take over the second account's window. When your `claudeUrl` is not `https://api.anthropic.com`, no command is printed, because a window started by hand would use your relay without being registered; it points to the launcher wrapper instead (`/provider switch` in a window the wrapper started). Run it from the same working directory; it finds the conversation only if that config directory shares this one's transcripts (`projects/`, for example through a symlink); in another mode it says that it needs `"switch"` |
 | `/provider status` | The status as text: where this window goes, the switches every window shares, and anything to fix |
 | `/provider help` | Every command, grouped by what it reaches: this window, every window, setup and checks |
 | `/provider setup [goal]` | Let Claude walk you through setup with the setup tool; keys stay out of the chat |
@@ -275,7 +382,8 @@ This feature is experimental: it may change or go away, and it is left out of `/
 ## Cost, privacy, and permissions
 
 - **Network and data flow:** The router listens only on `127.0.0.1:<port>`. Requests go strictly to `claudeUrl` (`https://api.anthropic.com`) or the `baseUrl` endpoints you configure. `/provider ping` sends a `max_tokens: 1` request to each configured provider when you trigger it. No telemetry or analytics exist.
-- **Local files:** Reads `~/.claude/model-relay.json` and writes session sticky state to `~/.claude/model-relay-state.json` plus local logs (`model-relay.log` and `model-relay-requests.log`, each emptied once it passes 5 MB). The old file names (`custom-agent.json`, `custom-agent-state.json`, `custom-agent-router.log`, `custom-agent-requests.log`) are no longer read; `migrate --go` renames them.
+- **Other accounts' logins:** the router reads `oauthAccount.accountUuid` from the `.claude.json` of an account window's account, to tell whose usage limit a 429 is, and never logs it; `doctor` reads that file for each account in `accounts` and prints only whether an `accountUuid` is there. Nothing else in that file is used.
+- **Local files:** Reads `~/.claude/model-relay.json` and writes session sticky state to `~/.claude/model-relay-state.json` plus local logs (`model-relay.log` and `model-relay-requests.log`, each emptied once it passes 5 MB). The old file names (`custom-agent.json`, `custom-agent-state.json`, `custom-agent-router.log`, `custom-agent-requests.log`) are no longer read; `migrate --go` renames them. With accounts it also writes `model-relay-launch.mjs` (the launcher file), `model-relay-handoff/<wrapper id>.json` (a `/provider switch` hand-over, in a folder only you can open, deleted by the wrapper when the window ends) and, for `account-add`, a folder `~/.claude-<name>` (or the `--dir` you gave) with symlinks back into your config directory.
 - **Local certificate (proxy mode only):** `~/.claude/model-relay-pki/` holds a public CA file and one leaf certificate with its key (restricted to your user). The CA is limited to `api.anthropic.com` and trusted only through `NODE_EXTRA_CA_CERTS`; delete the folder or run `proxy disable --go` to stop using it.
 - **Plugin permissions:** Inspect all hooks, state keys, and env access at any time by running `claude plugin validate /path/to/model-relay`.
 
@@ -284,6 +392,7 @@ This feature is experimental: it may change or go away, and it is left out of `/
 | Environment | Status |
 |---|---|
 | Windows 11 + Node.js 22 + Git Bash / PowerShell | Tested |
+| Windows with an npm-installed Claude Code (`claude.cmd`) | The launcher wrapper cannot start it: use the native installer, or name the file with `-- <full path to claude.exe>` |
 | macOS / Linux + Node.js 20+ (`sh` + `curl`) | Per official Node.js & POSIX specs. CI runs only `node tools/check.mjs` on Node.js 22 (Ubuntu, Windows, macOS); Node.js 20, the plugin hooks and the Claude Code integration are not tested there |
 
 ## Limitations
@@ -312,7 +421,8 @@ Start with `/provider doctor --ping`: it lists each problem with a `⚠` and the
 1. Run `/provider doctor` and note the router's `pid` (on the `Router health` line; `Router status: offline` means nothing is running, so skip stopping it). Do this before uninstalling, because the tool that prints it lives in the plugin's folder.
 2. Run `claude plugin uninstall model-relay@model-relay` and remove `ANTHROPIC_BASE_URL` from `~/.claude/settings.json` (in proxy mode remove `HTTPS_PROXY`, `NODE_EXTRA_CA_CERTS` and `NO_PROXY` instead; running `node tools/setup.mjs proxy disable --go` first does that and puts `ANTHROPIC_BASE_URL` back, which you then remove).
 3. Close the Claude Code windows that still have the plugin loaded (an open one starts the router again), then stop the router with `kill <pid>` (macOS/Linux) or `taskkill /PID <pid> /F` (Windows). It keeps running after the plugin is removed. A gateway the router started from a provider's `launch` also keeps running on its own, so stop it after the router, which restarts a closed one within about 30 seconds. Find its process by the port in that provider's `baseUrl` (`lsof -i :<port>` on macOS/Linux, `netstat -ano | findstr :<port>` on Windows) and stop it the same way.
-4. Delete optional state files (`~/.claude/model-relay.json`, `~/.claude/model-relay-state.json`, `~/.claude/model-relay-status/`, `~/.claude/model-relay-pki/`, `~/.claude/model-relay.log`, `~/.claude/model-relay-requests.log`, and any `*.model-relay-backup` copies).
+4. Delete optional state files (`~/.claude/model-relay.json`, `~/.claude/model-relay-state.json`, `~/.claude/model-relay-status/`, `~/.claude/model-relay-pki/`, `~/.claude/model-relay-handoff/`, `~/.claude/model-relay-launch.mjs`, `~/.claude/model-relay.log`, `~/.claude/model-relay-requests.log`, and any `*.model-relay-backup` copies).
+5. If you used more than one account: remove the `alias claude=…` line or the `claude` function you put in your shell profile (it runs the launcher file you just deleted), and delete each `~/.claude-<name>` folder `account-add` made (it holds that account's Claude Code login; most of its entries are symlinks into `~/.claude`, so delete the folder and not what the links point to).
 
 ## Run from source
 
