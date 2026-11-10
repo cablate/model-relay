@@ -222,3 +222,26 @@ test('A7 (docs audit): an account nobody has made yet is sent to account-add fir
   assert.match((await c.run('set', 'accountFallback.account', 'team-2')).stderr, /make one with account-add <name>/)
   assert.strictEqual(c.text(), before, 'nothing written')
 })
+
+test('Windows: the commands doctor and account-add print are PowerShell commands there and POSIX ones elsewhere, whatever this machine is', async (t) => {
+  const cfg = { accountFallback: { mode: 'switch', account: 'team-2' }, accounts: { 'team-2': { configDir: '~/.claude-team-2' } }, providers: {} }
+  const projects = (out) => lineWith(out, "projects folder is not this config dir's")
+  const w = await home(t, cfg, { platform: 'win32' })
+  assert.match(projects((await w.run('doctor')).out), /: New-Item -ItemType SymbolicLink -Path '.*projects' -Target '.*projects'$/)
+  const added = (await w.run('account-add', 'team-3')).out
+  assert.match(lineWith(added, '2. '), /^ +2\. \$env:CLAUDE_CONFIG_DIR='?[^';]*\.claude-team-3'?; \$env:MODEL_RELAY_CONFIG_DIR='?[^';]*\.claude'?; claude {3}\(in a new PowerShell window: the variables stay set in it\), then \/login as that account$/m)
+  const p = await home(t, cfg, { platform: 'darwin' })
+  assert.match(projects((await p.run('doctor')).out), /: ln -s .* .*projects$/)
+  assert.match(lineWith((await p.run('account-add', 'team-3')).out, '2. '), /2\. CLAUDE_CONFIG_DIR=\S*\.claude-team-3 MODEL_RELAY_CONFIG_DIR=\S*\.claude claude, then \/login as that account$/)
+})
+
+test('Windows spells its variables without regard to case: dropVars takes a differently spelled name too, once, and elsewhere only the exact one', async () => {
+  const { dropVars, DROPPED_VARS } = await launchModule()
+  const vars = () => ({ Path: 'x', Anthropic_Api_Key: 'a', http_proxy: 'p', HTTP_PROXY: 'q', claude_code_oauth_token: 'o', ANTHROPIC_BASE_URL: 'u' })
+  const w = vars()
+  assert.deepStrictEqual(dropVars(w, DROPPED_VARS, true), ['claude_code_oauth_token', 'Anthropic_Api_Key', 'ANTHROPIC_BASE_URL', 'http_proxy', 'HTTP_PROXY'], 'each once, in the order of the names asked for')
+  assert.deepStrictEqual(w, { Path: 'x' })
+  const p = vars()
+  assert.deepStrictEqual(dropVars(p, DROPPED_VARS, false), ['ANTHROPIC_BASE_URL', 'HTTP_PROXY', 'http_proxy'])
+  assert.deepStrictEqual(Object.keys(p), ['Path', 'Anthropic_Api_Key', 'claude_code_oauth_token'], 'another spelling is another variable there')
+})

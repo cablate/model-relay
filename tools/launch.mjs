@@ -183,6 +183,16 @@ export function accountDir(cfg, env) {
   return { account, dir: L.expandHome(dir, home(env)) }
 }
 
+// Takes names out of the object it is given and returns the ones it took, once each, in the order of names. Windows
+// names its variables without regard to case (Anthropic_Api_Key is ANTHROPIC_API_KEY there), so a differently spelled
+// one goes with it: copied into a plain object, such a name would otherwise reach the account's window.
+export function dropVars(vars, names, win = process.platform === 'win32') {
+  const same = (a, b) => (win ? a.toUpperCase() === b.toUpperCase() : a === b)
+  const removed = [...new Set(names.flatMap((n) => Object.keys(vars).filter((k) => same(k, n))))]
+  for (const k of removed) delete vars[k]
+  return removed
+}
+
 // A file that cannot be removed (a folder in its place, a permission) is left; nothing reads it again
 const rmQuiet = (file) => {
   try {
@@ -353,10 +363,9 @@ export async function main(argv, env = process.env, cwd = process.cwd()) {
       return code
     }
     const next = { ...env, CLAUDE_CONFIG_DIR: acct.dir, ...(bypass ? {} : { MODEL_RELAY_CONFIG_DIR: dir }) }
-    delete next.MODEL_RELAY_WRAPPER_ID // one hop: the relaunched window can hand nothing on
-    if (bypass) delete next.MODEL_RELAY_CONFIG_DIR
-    const removed = (bypass ? BYPASS_DROPPED_VARS : DROPPED_VARS).filter((k) => Object.hasOwn(next, k))
-    for (const k of removed) delete next[k]
+    dropVars(next, ['MODEL_RELAY_WRAPPER_ID']) // one hop: the relaunched window can hand nothing on
+    if (bypass) dropVars(next, ['MODEL_RELAY_CONFIG_DIR'])
+    const removed = dropVars(next, bypass ? BYPASS_DROPPED_VARS : DROPPED_VARS)
     if (removed.length) say(`not passed to ${acct.account}'s window: ${removed.join(', ')}`)
     if (bypass) say(`${why}, so ${acct.account}'s window talks to Anthropic without the relay`)
     else {

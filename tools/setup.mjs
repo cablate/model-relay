@@ -1255,7 +1255,7 @@ async function accountReport(raw, say, find, error) {
     const [from, at] = [path.join(cfgDir, 'projects'), path.join(L.expandHome(view.dirs.get(to), home), 'projects')]
     if (!L.sameDir(at, from)) {
       const { linkCommand } = await import('./launch.mjs')
-      find('account-projects', `${to}'s projects folder is not this config dir's, so /provider switch refuses (--resume could not find the conversation). Make ${at} a link to ${from} (move or remove ${at} first): ${linkCommand(from, at)}`, { account: to })
+      find('account-projects', `${to}'s projects folder is not this config dir's, so /provider switch refuses (--resume could not find the conversation). Make ${at} a link to ${from} (move or remove ${at} first): ${linkCommand(from, at, platform === 'win32')}`, { account: to })
     }
   }
   const overrides = loginOverrides()
