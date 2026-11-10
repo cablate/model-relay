@@ -9,17 +9,27 @@ const { isDeepStrictEqual } = require('util')
 
 const isPort = (n) => Number.isInteger(n) && n > 1024 && n < 65536
 
-// Two spellings of one directory (symlinks, `c:\x` vs `C:\X` on Windows) compare equal; the router and setup.mjs
-// both use this to tell whose router answers on a port
-function realDir(d) {
-  try {
-    return fs.realpathSync.native(d)
-  } catch {
-    return path.resolve(d)
+// Two spellings of one directory (symlinks, `c:\x` vs `C:\X` on Windows, 8.3 short names such as RUNNER~1) compare
+// equal; the router, setup.mjs and the launcher wrapper all use this to tell whether two folders are the same one.
+// fs.realpathSync.native asks the OS, which expands short names and symlinks; a path that does not exist yet (a
+// link that is still to be made) gets the real path of its nearest existing ancestor with the rest appended as written.
+// `win` picks the path flavour, so Windows paths are also taken apart right when this runs elsewhere (as a test does).
+function realDir(d, win = process.platform === 'win32') {
+  const P = win ? path.win32 : path
+  const rest = []
+  let cur = P.resolve(d)
+  for (;;) {
+    try {
+      return P.join(fs.realpathSync.native(cur), ...rest)
+    } catch {}
+    const up = P.dirname(cur)
+    if (up === cur) return P.resolve(d)
+    rest.unshift(P.basename(cur))
+    cur = up
   }
 }
 const dirKey = (d, win) => (win ? d.replace(/\\/g, '/').toLowerCase() : d)
-const sameDir = (a, b, win = process.platform === 'win32') => dirKey(realDir(a), win) === dirKey(realDir(b), win)
+const sameDir = (a, b, win = process.platform === 'win32') => dirKey(realDir(a, win), win) === dirKey(realDir(b, win), win)
 
 function str(v) {
   return typeof v === 'string' && v.length > 0 ? v : null

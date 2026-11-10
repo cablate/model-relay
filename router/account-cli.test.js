@@ -647,9 +647,11 @@ test('Windows: the commands doctor and account-add print are PowerShell commands
   assert.match(projects((await w.run('doctor')).out), /: New-Item -ItemType SymbolicLink -Path '.*projects' -Target '.*projects'$/)
   const added = (await w.run('account-add', 'team-3')).out
   assert.match(lineWith(added, '2. '), /^ +2\. \$env:CLAUDE_CONFIG_DIR='?[^';]*\.claude-team-3'?; \$env:MODEL_RELAY_CONFIG_DIR='?[^';]*\.claude'?; claude {3}\(in a new PowerShell window: the variables stay set in it\), then \/login as that account$/m)
+  // the stand-in darwin quotes a path that has a backslash, as sh does, so on a Windows machine each path ends in a quote
+  const q = process.platform === 'win32' ? "'?" : ''
   const p = await home(t, cfg, { platform: 'darwin' })
-  assert.match(projects((await p.run('doctor')).out), /: ln -s .* .*projects$/)
-  assert.match(lineWith((await p.run('account-add', 'team-3')).out, '2. '), /2\. CLAUDE_CONFIG_DIR=\S*\.claude-team-3 MODEL_RELAY_CONFIG_DIR=\S*\.claude claude, then \/login as that account$/)
+  assert.match(projects((await p.run('doctor')).out), new RegExp(`: ln -s .* .*projects${q}$`))
+  assert.match(lineWith((await p.run('account-add', 'team-3')).out, '2. '), new RegExp(`2\\. CLAUDE_CONFIG_DIR=\\S*\\.claude-team-3${q} MODEL_RELAY_CONFIG_DIR=\\S*\\.claude${q} claude, then \\/login as that account$`))
 })
 
 test('Windows spells its variables without regard to case: dropVars takes a differently spelled name too, once, and elsewhere only the exact one', async () => {

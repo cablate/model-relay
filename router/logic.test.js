@@ -2,6 +2,7 @@
 const test = require('node:test')
 const assert = require('node:assert')
 const os = require('node:os')
+const fs = require('node:fs')
 const L = require('./logic')
 
 const cfg = L.parseCfg({
@@ -323,6 +324,36 @@ test('directories compare by real path, and case-insensitively only on Windows',
   assert.strictEqual(L.sameDir('/tmp/Relay-A', '/tmp/relay-a', false), false)
   assert.strictEqual(L.sameDir(os.tmpdir(), os.tmpdir() + '/', false), true)
   assert.strictEqual(L.isPort(1025) && L.isPort(65535) && !L.isPort(1024) && !L.isPort(65536) && !L.isPort('8950'), true)
+})
+
+// Windows names one folder both `C:\Users\RUNNER~1` and `C:\Users\runneradmin` (8.3 short name), and `c:\users` as well; the OS
+// resolves them (fs.realpathSync.native), stubbed here with a drive that has those folders, so this runs on any machine
+test('realDir and sameDir expand 8.3 short names and ignore case on win32 only, also below a folder that does not exist yet', () => {
+  const long = ['C:\\Users\\runneradmin', 'C:\\Users\\runneradmin\\AppData', 'C:\\Users\\runneradmin\\AppData\\Local', 'C:\\Users\\runneradmin\\AppData\\Local\\Temp']
+  const there = new Map([['c:\\', 'C:\\'], ['c:\\users', 'C:\\Users']])
+  for (const d of long) {
+    there.set(d.toLowerCase(), d)
+    there.set(d.toLowerCase().replace('runneradmin', 'runner~1'), d)
+  }
+  const native = fs.realpathSync.native
+  fs.realpathSync.native = (p) => {
+    const hit = there.get(String(p).toLowerCase())
+    if (!hit) throw Object.assign(new Error(`ENOENT: ${p}`), { code: 'ENOENT' })
+    return hit
+  }
+  try {
+    const short = 'C:\\Users\\RUNNER~1\\AppData\\Local\\Temp'
+    const longTemp = 'C:\\Users\\runneradmin\\AppData\\Local\\Temp'
+    assert.strictEqual(L.realDir(short, true), longTemp, 'an existing folder, by its short name')
+    assert.strictEqual(L.realDir(`${short}\\x\\projects`, true), `${longTemp}\\x\\projects`, 'the nearest existing folder is expanded, the rest stays as written')
+    assert.strictEqual(L.sameDir(short, longTemp, true), true)
+    assert.strictEqual(L.sameDir(`${short}\\x\\projects`, longTemp.toLowerCase() + '\\X\\Projects', true), true, 'short vs long and case, below a folder that is not there')
+    assert.strictEqual(L.sameDir(`${short}\\x`, `${longTemp}\\y`, true), false, 'another folder stays another')
+    assert.strictEqual(L.sameDir(short, longTemp, false), false, 'elsewhere a short name is only a name')
+    assert.strictEqual(L.sameDir(longTemp, longTemp.toLowerCase(), false), false, 'elsewhere case counts')
+  } finally {
+    fs.realpathSync.native = native
+  }
 })
 
 // ---------- format 2: no private defaults; what the older versions filled in lives in migrate.js ----------
