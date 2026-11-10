@@ -9,6 +9,7 @@ import type { AvatarEntry, AvatarMode, AvatarView, PanelData, PingStat, Provider
 // avatars: the pictures of the avatar pane, by persona (parseAvatars); the router ignores the key
 // avatarPane: open the avatar pane in every window ("avatarPane": true); off by default, so pictures in the config show
 // nothing until it is turned on (/provider avatar on)
+// fallback: accountFallback (parseFallback): the mode, and for "switch" the account and its config dir
 export interface LocalCfg {
   port: number
   nodePath: string
@@ -16,6 +17,89 @@ export interface LocalCfg {
   statusBar: boolean
   avatars: Record<string, AvatarEntry>
   avatarPane: boolean
+  fallback: Fallback
+}
+
+export type FallbackMode = 'off' | 'switch'
+export interface Fallback {
+  mode: FallbackMode // an unknown value counts as "off", as the router counts it
+  account: string // accountFallback.account, trimmed and lower case; '' when unset
+  accountDir: string // accounts.<account>.configDir as written ('' when unset); a leading ~ is expanded by the caller
+  accounts: Record<string, string> // every account in accounts with a configDir, by its name (trimmed, lower case, a plain name only)
+  // claudeUrl is Anthropic itself: the only case in which an account window may use the relay (as the router's accountView says)
+  claudeIsAnthropic: boolean
+}
+const MODES: readonly string[] = ['off', 'switch']
+// An account name that is an ordinary own key ("__proto__" and "../x" are not); router/logic.js SAFE_NAME, which this
+// module cannot load (no Node here)
+export const SAFE_NAME = /^[a-z0-9][a-z0-9_.-]*$/
+
+// accounts.<name> is found as providers.<name> is: own keys only, trimmed and in any case
+export function parseFallback(raw: Record<string, unknown>): Fallback {
+  const af: Record<string, unknown> = isObj(raw.accountFallback) ? raw.accountFallback : {}
+  const mode = (typeof af.mode === 'string' && MODES.includes(af.mode) ? af.mode : 'off') as FallbackMode
+  const account = typeof af.account === 'string' ? af.account.trim().toLowerCase() : ''
+  const accounts: Record<string, unknown> = isObj(raw.accounts) ? raw.accounts : {}
+  const key = account ? Object.keys(accounts).find((k) => k.trim().toLowerCase() === account) : undefined
+  const entry = key === undefined ? null : accounts[key]
+  const accountDir = isObj(entry) && typeof entry.configDir === 'string' ? entry.configDir.trim() : ''
+  const all: Record<string, string> = {}
+  for (const [k, v] of Object.entries(accounts)) {
+    const name = k.trim().toLowerCase()
+    if (SAFE_NAME.test(name) && isObj(v) && typeof v.configDir === 'string' && v.configDir.trim()) all[name] = v.configDir.trim()
+  }
+  // ponytail: no URL parsing here (this module runs where no Node is); a spelling the router would accept (a :443 port)
+  // counts as not Anthropic, which only gives the plainer resume command
+  const claudeUrl = typeof raw.claudeUrl === 'string' && /^https?:\/\//i.test(raw.claudeUrl) ? raw.claudeUrl : 'https://api.anthropic.com'
+  return { mode, account, accountDir, accounts: all, claudeIsAnthropic: /^https:\/\/api\.anthropic\.com\/?$/i.test(claudeUrl) }
+}
+
+// A leading ~ is the home directory, as configDir() finds it (USERPROFILE, then HOME)
+export const expandHome = (p: string, home: string): string => (p === '~' || p.startsWith('~/') ? `${home.replace(/\\/g, '/')}${p.slice(1)}` : p)
+const isAbsolute = (p: string) => p.startsWith('/') || /^[A-Za-z]:[\\/]/.test(p)
+
+// The relay's config dir: MODEL_RELAY_CONFIG_DIR when it is absolute and resolves (resolved: that check's answer),
+// else this window's own config dir. A window of a second account sets it to main's dir, so the plugin reads main's
+// config and uses main's router; status files stay in the window's own dir, where a statusline looks.
+export function relayConfigDir(given: string | undefined, resolved: boolean, own: string): string {
+  return given && isAbsolute(given) && resolved ? given.replace(/\\/g, '/') : own
+}
+
+// POST /__account: this sid is a window of that account (or, with null, is not). The HTTP status comes last on its own
+// line (accountAnswer reads it), so a refusal is told from a change. since: when this window first saw the sid
+// registered (ms), so a router that restarted can keep the /provider pins made after it
+export function accountArgv(cfg: LocalCfg, sid: string, account: string | null, isWin = true, since?: number): string[] {
+  return [curlBin(isWin), '-s', '-m', '3', '-w', '\n%{http_code}', '-X', 'POST', '-H', 'content-type: application/json', '-d', JSON.stringify({ sid, account, ...(since ? { since } : {}) }), `${routerUrl(cfg)}/__account`]
+}
+
+// What the router said to /__account: 'changed', 'refused' with its reason (the router's fixed text), or 'failed' (no
+// answer at all)
+export function accountAnswer(exitCode: number | null, stdout: string): { result: 'changed' } | { result: 'refused'; why: string } | { result: 'failed' } {
+  if (exitCode !== 0) return { result: 'failed' }
+  const cut = stdout.lastIndexOf('\n')
+  const status = Number(stdout.slice(cut + 1).trim())
+  if (status >= 200 && status < 300) return { result: 'changed' }
+  if (!status) return { result: 'failed' }
+  let why = ''
+  try {
+    why = String(JSON.parse(stdout.slice(0, cut)).error.message || '').replace(/^model-relay router: /, '')
+  } catch {}
+  return { result: 'refused', why: why || `HTTP ${status}` }
+}
+
+// What the router said to /__session: 'changed', 'refused' with its reason (a 4xx carries the router's fixed text), or 'failed'
+export function sessionAnswer(exitCode: number | null, stdout: string): ReturnType<typeof accountAnswer> {
+  return exitCode === 0 && stdout.includes('"ok":true') ? { result: 'changed' } : accountAnswer(exitCode, stdout)
+}
+
+export function sessionRefusedText(why: string, lang: 'zh' | 'en' = 'zh'): string {
+  return lang === 'en' ? `The relay refused: ${why}. Nothing changed.` : `轉發站拒絕了：${why}。沒有改變。`
+}
+
+export function accountRefusedText(account: string, why: string, lang: 'zh' | 'en' = 'zh'): string {
+  return lang === 'en'
+    ? `The relay did not take this window as ${account}'s: ${why}. Its Claude requests take your account's path until that is fixed.`
+    : `轉發站沒有把這個視窗登記為 ${account} 的視窗（轉發站回報：${why}）。修好之前，它的 Claude 請求走你帳號的路徑。`
 }
 
 export const CONFIG_NAME = 'model-relay.json'
@@ -28,7 +112,7 @@ export function parseLocal(raw: unknown, oldName = false): LocalCfg | null {
   const r = raw as Record<string, unknown>
   const port = typeof r.port === 'number' && Number.isInteger(r.port) && r.port > 1024 && r.port < 65536 ? r.port : 8950
   const nodePath = typeof r.nodePath === 'string' && r.nodePath.length > 0 ? r.nodePath : 'node'
-  return { port, nodePath, outdated: oldName || r.format !== 2, statusBar: r.statusBar === true, avatars: parseAvatars(r.avatars), avatarPane: r.avatarPane === true }
+  return { port, nodePath, outdated: oldName || r.format !== 2, statusBar: r.statusBar === true, avatars: parseAvatars(r.avatars), avatarPane: r.avatarPane === true, fallback: parseFallback(r) }
 }
 
 // The agent fields a provider's "agent" object in the config may set, with the shape each must have; `name` and `model`
@@ -116,8 +200,9 @@ export function healthWaitArgv(cfg: LocalCfg, sid: string, isWin = true): string
   return [curlBin(isWin), '-s', '-m', '2', '--retry', '6', '--retry-connrefused', '--retry-delay', '1', healthUrl(cfg, sid)]
 }
 
+// The HTTP status comes last on its own line (sessionAnswer reads it), so a refusal is told from no answer at all
 export function sessionArgv(cfg: LocalCfg, sid: string, on: string, isWin = true): string[] {
-  return [curlBin(isWin), '-s', '-m', '3', '-X', 'POST', '-H', 'content-type: application/json', '-d', JSON.stringify({ sid, on }), `${routerUrl(cfg)}/__session`]
+  return [curlBin(isWin), '-s', '-m', '3', '-w', '\n%{http_code}', '-X', 'POST', '-H', 'content-type: application/json', '-d', JSON.stringify({ sid, on }), `${routerUrl(cfg)}/__session`]
 }
 
 // The router tests each provider for up to 15 s, after waiting up to 10 s for a local one it starts itself
@@ -161,6 +246,7 @@ export function setupBrief(script: string, nodePath: string, goal: string, hasCf
     '',
     'Rules:',
     '- Never ask me to paste an API key into this chat, and never print one. Use "env:VAR_NAME" tokens; tell me which variable to set, how to make it permanent on my OS, and that Claude Code must be restarted to see it.',
+    `- For a second Claude account, use the account commands, which print the next step: "account-add <name>" makes the account's folder (the person then logs in there once); "set accountFallback.mode <off|switch>" and "set accountFallback.account <name>" choose whether and where /provider switch moves a window; "launcher" prints the command that starts windows. Ask me before you change accountFallback.mode.`,
     '- Commands that accept --go (migrate, remove, proxy): run without --go first, show me the result, and add --go only after I agree.',
     '- Tell me before anything changes ~/.claude/settings.json (init --fix, doctor --fix, alias, proxy) and wait for my yes.',
     `- If doctor lists the "outdated" finding, my config is from an older version: follow ${script.replace(/tools\/setup\.mjs$/, 'UPGRADING.md')} step by step.`,
@@ -212,8 +298,12 @@ export interface Health {
   ping?: Record<string, PingStat> // the last test per provider; absent on older routers
   seenModels?: Record<string, number> // when each model id last reached the router; absent on older routers
   unresolved: { provider: string; env: string }[] // providers skipped because their env:VAR is unset for the router
+  account?: string // this sid is registered as a window of that second account (mode switch)
+  accountLimited?: boolean // that account is at its usage limit
   // What the router is doing right now; absent when it predates the switches
   switches?: { failover: boolean; retry: boolean; proxy: boolean; proxyReady: boolean }
+  claudeLimitedAt?: number // when the router last saw Claude's usage-limit 429, whatever failover did with it; 0 or absent: not since it started
+  cooldownMs?: number // failover.cooldownMs as the router reads it; absent on older routers
 }
 
 const isObj = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v)
@@ -273,7 +363,11 @@ export function parseHealth(stdout: string): Health | null {
       ...(ping ? { ping } : {}),
       ...(seenModels ? { seenModels } : {}),
       unresolved,
+      ...(str(j.account) ? { account: str(j.account).toLowerCase() } : {}),
+      ...(j.accountLimited === true ? { accountLimited: true } : {}),
       ...(switches ? { switches } : {}),
+      ...(num(j.claudeLimitedAt) > 0 ? { claudeLimitedAt: num(j.claudeLimitedAt) } : {}),
+      ...(conf && num(conf.cooldownMs) > 0 ? { cooldownMs: num(conf.cooldownMs) } : {}),
     }
   } catch {
     return null
@@ -292,19 +386,23 @@ export function healthHints(h: Health | null, lang: 'zh' | 'en', outdated = fals
   return out
 }
 
-export function buildPanelData(h: Health | null, port: number, direct: boolean, lang: 'zh' | 'en', now: number, outdated = false): PanelData {
+export function buildPanelData(h: Health | null, port: number, direct: boolean, lang: 'zh' | 'en', now: number, outdated = false, account: string | null = null): PanelData {
+  const mainFailover = account ? null : h
   return {
     online: Boolean(h),
     direct,
     port,
     session: h?.session ?? 'claude',
-    failoverProvider: h?.failoverProvider ?? null,
-    failoverSince: h?.failoverSince ?? 0,
-    nextClaudeTry: h?.nextClaudeTry ?? 0,
+    failoverProvider: mainFailover?.failoverProvider ?? null,
+    failoverSince: mainFailover?.failoverSince ?? 0,
+    nextClaudeTry: mainFailover?.nextClaudeTry ?? 0,
     sessionsOnCustom: h?.sessionsOnCustom ?? 0,
     providers: h?.providers ?? {},
     aliases: h?.aliases ?? {},
-    failoverChain: h?.failoverChain ?? [],
+    account,
+    limited: Boolean(account && h?.accountLimited),
+    // main's failover chain does not apply to an account window
+    failoverChain: account ? [] : h?.failoverChain ?? [],
     switches: h?.switches ?? null,
     stats: h?.stats ?? {},
     ping: h?.ping ?? {},
@@ -364,7 +462,17 @@ export function startFailedText(configDir: string, lang: 'zh' | 'en' = 'zh'): st
     : `轉發站沒有啟動，這個對話暫時直連 Claude；原因記在 ${configDir}/model-relay.log（或執行 /provider doctor）`
 }
 
-export function statusText(h: Health | null, direct: boolean, lang: 'zh' | 'en' = 'zh'): string {
+// Claude under an account's name, as every text and the panel write it
+export const claudeAs = (name: string, lang: 'zh' | 'en'): string => (lang === 'en' ? `Claude (${name})` : `Claude（${name}）`)
+
+// account: this window is that second account's, as its config dir and the router agree: it shows Claude under that
+// account, or its own /provider pin, and never main's failover
+export function statusText(h: Health | null, direct: boolean, lang: 'zh' | 'en' = 'zh', account: string | null = null): string {
+  if (h && account) {
+    const own = h.session !== 'claude' && has(h.providers, h.session) ? h.providers[h.session] : undefined
+    if (own) return lang === 'en' ? `Main: ${own} (pinned for this window)` : `主線：${own}（這個視窗固定用它）`
+    return lang === 'en' ? `Main: Claude (${account})` : `主線：Claude（${account}）`
+  }
   if (!h) {
     if (lang === 'en') return direct ? 'Relay offline: connected directly to Claude' : 'Relay offline, restarting…'
     return direct ? '轉發站離線：主線暫時直連 Claude，model-relay 子代理無法使用' : '轉發站離線，正在重啟…'
@@ -384,14 +492,16 @@ export function statusText(h: Health | null, direct: boolean, lang: 'zh' | 'en' 
 //   claude   <tab> claude     this session goes to Claude through the relay
 //   pinned   <tab> <model>    pinned to a provider (/provider, or a failover that pinned it)
 //   failover <tab> <model>    Claude's limit is reached; the next request goes to that model
+//   claude   <tab> claude/<a> a second account's window (mode switch)
 //   limit    <tab> claude     Claude's limit is reached and the failover chain has nobody to hand over to
 //   offline  <tab> offline    no router of ours answers for this window
 //   direct   <tab> claude     no router of ours answers, so this window talks to Claude directly
 // foreign: the port answers for another config dir's router, which this window never counts as its own
-export function statusFields(h: Health | null, direct: boolean, foreign = false): [string, string] {
+export function statusFields(h: Health | null, direct: boolean, foreign = false, account: string | null = null): [string, string] {
   if (foreign || !h) return direct ? ['direct', 'claude'] : ['offline', 'offline']
   const pinned = h.session !== 'claude' && has(h.providers, h.session) ? h.providers[h.session] : undefined
   if (pinned) return ['pinned', pinned]
+  if (account) return ['claude', `claude/${account}`]
   if (h.failoverSince) {
     const to = h.failoverProvider ? h.providers[h.failoverProvider] ?? h.failoverProvider : ''
     return to ? ['failover', to] : ['limit', 'claude']
@@ -821,25 +931,179 @@ export function statText(st: ProviderStat | undefined, lang: 'zh' | 'en'): { tex
 }
 
 // What one switch came to, in one line: the status line and the panel already show the rest
-export function switchedText(target: string, model: string, lang: 'zh' | 'en' = 'zh'): string {
+export function switchedText(target: string, model: string, lang: 'zh' | 'en' = 'zh', account: string | null = null): string {
   if (target === 'claude') {
+    const who = account ? `Claude (${account})` : 'Claude'
     return lang === 'en'
-      ? '✓ This window is back on Claude (the next turn rebuilds the prompt cache)'
-      : '✓ 這個視窗切回 Claude（下一輪會重建一次快取）'
+      ? `✓ This window is back on ${who} (the next turn rebuilds the prompt cache)`
+      : `✓ 這個視窗切回 ${who}（下一輪會重建一次快取）`
   }
   return lang === 'en' ? `✓ This window now uses ${target} (${model})` : `✓ 這個視窗改用 ${target}（${model}）`
 }
 
+// ---- accountFallback: /provider switch and the account toasts ----
+
+export const isUuid = (s: unknown): s is string => typeof s === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(s)
+
+const shWord = (s: string) => (/^[A-Za-z0-9_./:=@%+-]+$/.test(s) ? s : `'${s.replace(/'/g, `'\\''`)}'`)
+const psWord = (s: string) => `'${s.replace(/'/g, "''")}'`
+
+// Why no handoff was written: no person at this session (a -p run), a person but not their command (another plugin, a
+// scheduled prompt), or a window the launcher wrapper did not start
+export type NoHandoff = 'headless' | 'not-typed' | 'no-wrapper'
+
+// What /provider switch [<account>] does. "write": hand the launcher wrapper this session's id in
+// <config dir>/model-relay-handoff/<wrapper id>.json (setup.mjs handoff writes it, 0700/0600, exclusively, atomically),
+// then the person types /exit and the wrapper resumes the conversation under the account. "say": only text, nothing
+// written: a mode other than switch, an account that is not the configured one, a session no person is at (interactive
+// false, a -p run), a command no person typed (typed false), or no wrapper (MODEL_RELAY_WRAPPER_ID unset or not a UUID)
+// gets the command to resume by hand instead. interactive and typed are separate facts and get separate reasons.
+// home (resolved as configDir() does) expands a leading ~; nothing from the handoff file decides where the wrapper goes.
+export type SwitchPlan = { action: 'write'; wrapperId: string; sid: string; text: string } | { action: 'say'; text: string }
+// relayDir: the relay's config dir, for the account window's MODEL_RELAY_CONFIG_DIR in the command to resume by hand
+// setup: the path of this plugin's setup.mjs, for the commands a refusal names
+export function switchPlan(o: { fallback: Fallback; arg: string; wrapperId: string | undefined; interactive: boolean; typed: boolean; sid: string; home: string; relayDir?: string; isWin?: boolean; setup?: string }, lang: 'zh' | 'en' = 'zh'): SwitchPlan {
+  const en = lang === 'en'
+  const { mode, account, accountDir } = o.fallback
+  // the commands, with this plugin's own setup.mjs, so the person can paste them
+  // the path is quoted so it pastes even with a space in it (a Windows user folder, say)
+  const q = o.isWin ? psWord : shWord
+  const cli = (...words: string[]) => `node ${q(o.setup ?? 'setup.mjs')} ${words.join(' ')}`
+  if (mode !== 'switch') {
+    return { action: 'say', text: en
+      ? `/provider switch needs accountFallback.mode "switch" (now "${mode}"): ${cli('set', 'accountFallback.mode', 'switch')}; nothing was changed.`
+      : `/provider switch 要 accountFallback.mode 設為 "switch"（目前是 "${mode}"）：${cli('set', 'accountFallback.mode', 'switch')}；沒有做任何變更。` }
+  }
+  if (!account) {
+    return { action: 'say', text: en
+      ? `Name the account this window moves to first: ${cli('account-add', '<name>')} makes its folder (skip it when accounts.<name>.configDir exists), then ${cli('set', 'accountFallback.account', '<name>')}; nothing was changed.`
+      : `請先指定這個視窗要移去的帳號：${cli('account-add', '<name>')} 會建立它的資料夾（accounts.<name>.configDir 已經有的話可以略過），再執行 ${cli('set', 'accountFallback.account', '<name>')}；沒有做任何變更。` }
+  }
+  if (!accountDir) {
+    return { action: 'say', text: en
+      ? `accountFallback.account is ${account}, but accounts.${account}.configDir is not set: ${cli('account-add', account)} makes its folder and writes it; nothing was changed.`
+      : `accountFallback.account 是 ${account}，但 accounts.${account}.configDir 沒有設定：${cli('account-add', account)} 會建立它的資料夾並寫入設定；沒有做任何變更。` }
+  }
+  // the wrapper refuses any other name after /exit (tools/launch.mjs accountDir); refuse it here, before a handoff is written
+  if (!SAFE_NAME.test(account)) return { action: 'say', text: notPlain(account, cli, en) }
+  const asked = o.arg.trim().toLowerCase()
+  if (asked && asked !== account) {
+    return { action: 'say', text: en
+      ? `This window can switch to ${account} only (accountFallback.account); nothing was changed.`
+      : `這個視窗只能切到 ${account}（accountFallback.account），沒有做任何變更。` }
+  }
+  if (!isUuid(o.sid)) {
+    return { action: 'say', text: en ? 'This session has no id to resume; nothing was changed.' : '這個對話沒有可接續的對話 ID，沒有做任何變更。' }
+  }
+  const why: NoHandoff | null = !o.interactive ? 'headless' : !o.typed ? 'not-typed' : !isUuid(o.wrapperId) ? 'no-wrapper' : null
+  if (!why) {
+    return { action: 'write', wrapperId: o.wrapperId!.toLowerCase(), sid: o.sid.toLowerCase(), text: en
+      ? `Ready: type /exit, and this conversation resumes on ${account}.`
+      : `準備好了：輸入 /exit，這段對話會在 ${account} 接著進行。` }
+  }
+  return { action: 'say', text: manualSwitchText(account, accountDir, o.sid, o.home, why, Boolean(o.isWin), lang, { dir: o.relayDir ?? '', anthropic: o.fallback.claudeIsAnthropic }) }
+}
+
+// accountFallback.account holds a name the launcher wrapper would refuse (anything but a lower-case letter or digit first,
+// then letters, digits, _ . -): say so with the command that sets a plain one
+const notPlain = (account: string, cli: (...words: string[]) => string, en: boolean) => en
+  ? `accountFallback.account is "${account}", which the launcher wrapper refuses (a plain name is lower-case letters, digits, "_", "." and "-", starting with a letter or digit): ${cli('set', 'accountFallback.account', '<name>')}; nothing was changed.`
+  : `accountFallback.account 是 "${account}"，啟動器包裝程式不接受這個名稱（單純的名稱只用小寫字母、數字、"_"、"." 與 "-"，並以字母或數字開頭）：${cli('set', 'accountFallback.account', '<name>')}；沒有做任何變更。`
+
+// What /provider switch checks before it writes a handoff, which the wrapper would otherwise refuse only after /exit
+// (tools/launch.mjs): the account's folder is there, it is not this window's own, and its projects folder is this one's.
+// real: where each path resolves to; undefined when it does not exist. null: nothing to refuse.
+export type SwitchReal = { own?: string; account?: string; ownProjects?: string; accountProjects?: string }
+export function switchRefusal(o: { account: string; ownDir: string; accountDir: string; real: SwitchReal; isWin?: boolean; setup?: string }, lang: 'zh' | 'en' = 'zh'): string | null {
+  const en = lang === 'en'
+  if (!SAFE_NAME.test(o.account)) return notPlain(o.account, (...words: string[]) => `node ${(o.isWin ? psWord : shWord)(o.setup ?? 'setup.mjs')} ${words.join(' ')}`, en)
+  const key = (p: string) => (o.isWin ? p.replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase() : p.replace(/\/+$/, ''))
+  const { account, ownDir, accountDir, real } = o
+  if (!real.account) {
+    return en
+      ? `${accountDir} (accounts.${account}.configDir) does not exist: setup.mjs account-add makes an account's folder, or create it and log in as ${account} there. Nothing was changed.`
+      : `${accountDir}（accounts.${account}.configDir）不存在：setup.mjs account-add 可以建立帳號的資料夾，或自己建立它並在那裡登入 ${account}。沒有做任何變更。`
+  }
+  if (real.own && key(real.account) === key(real.own)) {
+    return en
+      ? `accounts.${account}.configDir is this window's own config dir, whose login is yours; there is nothing to switch to. Nothing was changed.`
+      : `accounts.${account}.configDir 就是這個視窗自己的設定資料夾，它的登入是你的帳號，沒有可切換的對象。沒有做任何變更。`
+  }
+  if (!real.ownProjects || !real.accountProjects || key(real.ownProjects) !== key(real.accountProjects)) {
+    const from = `${ownDir}/projects`
+    const to = `${accountDir}/projects`
+    const link = o.isWin ? `New-Item -ItemType SymbolicLink -Path ${psWord(to)} -Target ${psWord(from)}` : `ln -s ${shWord(from)} ${shWord(to)}`
+    return en
+      ? `${account}'s projects folder is not this window's, so --resume could not find this conversation after /exit. Make ${to} a link to ${from} (move or remove ${to} first): ${link}. Nothing was changed.`
+      : `${account} 的 projects 資料夾和這個視窗的不是同一個，/exit 之後 --resume 會找不到這段對話。把 ${to} 設成指向 ${from} 的連結（先搬走或刪掉 ${to}）：${link}。沒有做任何變更。`
+  }
+  return null
+}
+
+// The command that resumes this conversation under the account by hand, in the shell of this platform. It is no more
+// than claude --resume under the other config dir: it finds the conversation only from the same working directory, and
+// only when that config dir shares this one's transcripts (projects/, e.g. through a symlink)
+// The variables the launcher wrapper takes out of the account window's environment (DROPPED_VARS in tools/launch.mjs)
+// and the wrapper's own id: the command to resume by hand drops the same ones. tools/hooks-host.mjs holds the two lists equal.
+export const RESUME_UNSET = ['CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_BASE_URL', 'HTTP_PROXY', 'http_proxy', 'MODEL_RELAY_WRAPPER_ID']
+// relay: the relay's config dir and whether claudeUrl is Anthropic itself. Only then does the window keep the relay
+// (MODEL_RELAY_CONFIG_DIR, as the wrapper's relaunch does). Otherwise no command is printed: the account's folder links
+// settings.json with the relay's wiring, so a plain command would send the window through the relay unregistered; the
+// text points to the launcher wrapper, which starts that window without the relay.
+export function manualSwitchText(account: string, accountDir: string, sid: string, home: string, why: NoHandoff, isWin = false, lang: 'zh' | 'en' = 'zh', relay: { dir: string; anthropic: boolean } = { dir: '', anthropic: false }): string {
+  const dir = accountDir === '~' || accountDir.startsWith('~/') ? `${home.replace(/\\/g, '/')}${accountDir.slice(1)}` : accountDir
+  const viaRelay = relay.anthropic && relay.dir !== ''
+  const relayDir = relay.dir.replace(/\\/g, '/')
+  const cmd = isWin
+    ? `Remove-Item ${RESUME_UNSET.map((v) => `Env:${v}`).join(',')} -ErrorAction SilentlyContinue; $env:CLAUDE_CONFIG_DIR=${psWord(dir)};${viaRelay ? ` $env:MODEL_RELAY_CONFIG_DIR=${psWord(relayDir)};` : ''} claude --resume ${sid}`
+    : `env ${RESUME_UNSET.map((v) => `-u ${v}`).join(' ')} CLAUDE_CONFIG_DIR=${shWord(dir)}${viaRelay ? ` MODEL_RELAY_CONFIG_DIR=${shWord(relayDir)}` : ''} claude --resume ${sid}`
+  const en = lang === 'en'
+  const shell = isWin ? (en ? ' in a new PowerShell window (the variables it sets stay set there)' : '在新的 PowerShell 視窗裡' ) : ''
+  const reason = {
+    headless: en ? 'no person is at this session' : '這個對話沒有人在操作',
+    'not-typed': en ? 'it must be typed at the prompt; this one came from elsewhere' : '這個指令要在輸入框親自輸入，這次不是',
+    'no-wrapper': en ? 'this window was not started by the launcher wrapper' : '這個視窗不是由啟動器包裝程式開的',
+  }[why]
+  const wrapperOnly = en
+    ? `Nothing was written (${reason}). This conversation is not moved to ${account} by hand here: your claudeUrl is not https://api.anthropic.com (or the relay's folder is unknown), and a window started by hand would reach your relay without being registered as ${account}'s. The launcher wrapper starts that window without the relay: start Claude Code through it (setup.mjs launcher prints the command), then run /provider switch there and /exit.`
+    : `沒有寫入任何東西（${reason}）。這裡不提供手動把對話移到 ${account} 的指令：你的 claudeUrl 不是 https://api.anthropic.com（或不知道轉發站的資料夾），手動開的視窗會經過你的轉發站，卻沒有登記成 ${account} 的視窗。啟動器包裝程式會讓那個視窗不經過轉發站：請改用它啟動 Claude Code（setup.mjs launcher 會印出指令），再在那個視窗執行 /provider switch 與 /exit。`
+  if (!viaRelay) return wrapperOnly
+  return en
+    ? `Nothing was written (${reason}). To go on with this conversation on ${account}, run /exit, then${shell}, from this same working directory:\n  ${cmd}\nIt finds the conversation only if ${account}'s config dir shares this one's transcripts (projects/, e.g. a symlink).`
+    : `沒有寫入任何東西（${reason}）。要在 ${account} 接著這段對話，先 /exit，再${shell}從同一個工作資料夾執行：\n  ${cmd}\n只有 ${account} 的設定資料夾和這裡共用對話紀錄（projects/，例如用符號連結）時，才找得到這段對話。`
+}
+
+// In mode switch, once per session when the router saw Claude's usage-limit 429 within the cooldown (claudeLimitedAt,
+// set whatever the failover chain holds, so an empty chain counts too)
+export function wantsLimitToast(mode: FallbackMode, h: Health | null, now: number): boolean {
+  return mode === 'switch' && Boolean(h && h.claudeLimitedAt) && now - h!.claudeLimitedAt! < (h!.cooldownMs || 600000)
+}
+
+export function limitToastText(lang: 'zh' | 'en' = 'zh'): string {
+  return lang === 'en' ? 'Your account reached its usage limit — /provider switch, then /exit' : '你的帳號額度用完：執行 /provider switch，再 /exit'
+}
+
+// B14: a second account's window whose account is at its usage limit: Claude Code's own limit text is all it would show,
+// so say what to do
+export function accountLimitedText(account: string, lang: 'zh' | 'en' = 'zh'): string {
+  return lang === 'en'
+    ? `${account} reached its usage limit; continue in a window of your own account, or wait for the limit to reset`
+    : `${account} 額度用完；請改在你自己帳號的視窗繼續，或等額度重置`
+}
+
 // One row per route, each written as the command that picks it
-function routeRows(h: Health, lang: 'zh' | 'en', withClaude: boolean): string[] {
+// account: this is that second account's window: its Claude row is Claude under its name (B5, B2)
+function routeRows(h: Health, lang: 'zh' | 'en', withClaude: boolean, account: string | null = null): string[] {
   const en = lang === 'en'
   const active = h.session || 'claude'
   const rows: string[] = []
   if (withClaude) {
-    const desc = active === 'claude'
-      ? (en ? 'Anthropic Claude  ← in use' : 'Anthropic Claude  ← 使用中')
-      : (en ? 'Anthropic Claude (switching back rebuilds the prompt cache)' : 'Anthropic Claude（切回時長對話會重建一次快取）')
-    rows.push(`  ${active === 'claude' ? '●' : '○'} /provider ${'claude'.padEnd(8)} ${desc}`)
+    const own = active === 'claude'
+    const label = account ? claudeAs(account, lang) : 'Anthropic Claude'
+    const desc = own
+      ? `${label}  ${en ? '← in use' : '← 使用中'}`
+      : en ? `${label} (switching back rebuilds the prompt cache)` : `${label}（切回時長對話會重建一次快取）`
+    rows.push(`  ${own ? '●' : '○'} /provider ${'claude'.padEnd(8)} ${desc}`)
   }
   for (const [k, m] of Object.entries(h.providers)) {
     const notes = [statText(h.stats?.[k], lang), pingText(h.ping?.[k], lang)].filter((x) => x !== null).map((x) => x.text)
@@ -856,14 +1120,15 @@ function routeRows(h: Health, lang: 'zh' | 'en', withClaude: boolean): string[] 
 }
 
 // The switches every window shares, and where each Claude alias goes, on one line
-function sharedLine(h: Health, lang: 'zh' | 'en'): string {
+// account: an account window leaves out your failover, which never applies to it
+function sharedLine(h: Health, lang: 'zh' | 'en', account: string | null = null): string {
   const en = lang === 'en'
   const sw = h.switches
   const onOff = (on: boolean) => (on ? `● ${en ? 'on' : '開啟'}` : `○ ${en ? 'off' : '關閉'}`)
   const foOn = sw ? sw.failover : true
   const chain = h.failoverChain.length ? h.failoverChain.join(' → ') : en ? 'nobody to hand over to' : '沒有接手者'
   const parts = [
-    `${en ? '429 failover' : '429 備援'} ${onOff(foOn)}${foOn ? (en ? ` (${chain})` : `（${chain}）`) : ''}`,
+    ...(account ? [] : [`${en ? '429 failover' : '429 備援'} ${onOff(foOn)}${foOn ? (en ? ` (${chain})` : `（${chain}）`) : ''}`]),
     `${en ? 'Retry' : '失敗重試'} ${onOff(!sw || sw.retry)}`,
     `${en ? 'Remote Control' : '手機遙控'} ${onOff(!!sw?.proxy)}`,
   ]
@@ -873,15 +1138,19 @@ function sharedLine(h: Health, lang: 'zh' | 'en'): string {
 }
 
 // /provider status: where this window goes, what every window shares, and what to fix; the commands are in /provider help
-export function providerReport(h: Health | null, now: number, lang: 'zh' | 'en' = 'zh'): string {
+// account: this is that second account's window (accountLabel): its own view, never your failover (B2)
+export function providerReport(h: Health | null, now: number, lang: 'zh' | 'en' = 'zh', account: string | null = null): string {
   const en = lang === 'en'
   if (!h) {
     return en
       ? 'Relay is not responding; auto-restarting every 10s.'
       : '轉發站沒有回應；每 10 秒會自動重啟，稍後再試。'
   }
-  let head = statusText(h, false, lang)
-  if (h.failoverSince) {
+  let head = statusText(h, false, lang, account)
+  if (account && h.accountLimited) {
+    head += en ? ` (${account} is at its usage limit)` : `（${account} 額度用完）`
+  }
+  if (h.failoverSince && !account) {
     const mins = Math.max(0, Math.round((h.nextClaudeTry - now) / 60000))
     head += en
       ? ` (retrying Claude in ~${mins}m; only new sessions switch back)`
@@ -889,11 +1158,11 @@ export function providerReport(h: Health | null, now: number, lang: 'zh' | 'en' 
   }
   return [
     head,
-    sharedLine(h, lang),
+    sharedLine(h, lang, account),
     ...healthHints(h, lang).map((x) => `⚠ ${x}`),
     '',
     en ? 'Switch this window:' : '切換這個視窗：',
-    ...routeRows(h, lang, true),
+    ...routeRows(h, lang, true, account),
     '',
     en ? 'All commands: /provider help' : '所有指令：/provider help',
   ].join('\n')
@@ -906,13 +1175,15 @@ export function pingReport(h: Health | null, lang: 'zh' | 'en' = 'zh'): string {
 }
 
 // /provider help: every command, grouped by what it reaches
-export function helpText(providers: string[], lang: 'zh' | 'en' = 'zh'): string {
+// showSwitch: a window /provider switch works in (mode switch, not an account's window): the line is shown nowhere else
+export function helpText(providers: string[], lang: 'zh' | 'en' = 'zh', showSwitch = false): string {
   const en = lang === 'en'
   const groups: [string, [string, string][]][] = [
     [en ? 'This window:' : '這個視窗：', [
       ['/provider', en ? "Open the panel to switch this window's model" : '開啟面板，切換這個視窗的模型'],
       ['/provider <name> | claude', en ? 'Switch this window directly (e.g. /provider claude)' : '直接切換這個視窗（例：/provider claude）'],
       ['/provider status', en ? 'The same status as text' : '文字版狀態'],
+      ...(showSwitch ? [['/provider switch [<account>]', en ? 'Move this window to your other account, then /exit (start windows with the launcher: setup.mjs launcher)' : '把這個視窗移到你的另一個帳號，再 /exit（用啟動器開視窗：setup.mjs launcher）'] as [string, string]] : []),
     ]],
     [en ? 'Shared by every window:' : '所有視窗共用：', [
       ['/provider failover <on|off|a,b>', en ? 'Turn 429 failover on or off, or set who takes over' : '開關 429 備援或設定接手順序'],
@@ -937,6 +1208,9 @@ export function helpText(providers: string[], lang: 'zh' | 'en' = 'zh'): string 
       ? `Subagents: subagent_type "model-relay:<name>" runs a full Agent on that provider (${names})`
       : `子代理：subagent_type "model-relay:<名稱>" 派出等同預設 Agent 的子代理並走該供應商（${names}）`)
   }
+  lines.push(en
+    ? 'Accounts: setup.mjs account-add <name> makes an account folder, launcher prints the command that starts windows; /provider setup walks you through it'
+    : '帳號：setup.mjs account-add <名稱> 建立帳號資料夾，launcher 印出開視窗的指令；/provider setup 可以帶你設定')
   return lines.join('\n')
 }
 

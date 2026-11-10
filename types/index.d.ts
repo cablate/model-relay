@@ -24,7 +24,9 @@ export type PanelData = {
   sessionsOnCustom: number
   providers: Record<string, string>
   aliases: Record<string, string>
-  failoverChain: string[]
+  failoverChain: string[] // empty in an account window: your failover does not apply there
+  account: string | null // this window is that second account's
+  limited: boolean // an account window at its usage limit
   // The router's own view of its switches; null when it is offline or too old to report them
   switches: { failover: boolean; retry: boolean; proxy: boolean; proxyReady: boolean } | null
   stats: Record<string, ProviderStat>

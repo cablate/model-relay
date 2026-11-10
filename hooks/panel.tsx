@@ -3,7 +3,7 @@
 // It is for one thing, picking this window's model; what every window shares stays folded behind Settings [s].
 import type { EngineInterface } from 'claude-code'
 import type { PanelData, PanelUi } from '../types'
-import { fit, pingText, statText } from './logic'
+import { claudeAs, fit, pingText, statText } from './logic'
 
 type Elements = ReturnType<EngineInterface['ui']['resolve']>
 
@@ -44,7 +44,9 @@ export function panelTree(ui: Elements, v: PanelView, act: PanelActions) {
       ? (en
           ? `Claude limit reached: requests go to ${foText}; Claude again in ~${mins}m`
           : `Claude 額度用完：請求改走 ${foText}，約 ${mins} 分鐘後再試 Claude`)
-      : null
+      : v.limited && v.account
+        ? (en ? `${v.account} is at its usage limit` : `${v.account} 額度用完`)
+        : null
 
   const inUse = <Text dimColor>{en ? 'In use' : '使用中'}</Text>
   const mark = (active: boolean) => <Text color={active ? 'green' : 'gray'} bold>{active ? '● ' : '○ '}</Text>
@@ -56,7 +58,7 @@ export function panelTree(ui: Elements, v: PanelView, act: PanelActions) {
         <Text>
           {mark(isClaudeActive)}
           <Text bold={isClaudeActive}>{'claude'.padEnd(8)}</Text>{' '}
-          <Text dimColor>Anthropic Claude</Text>
+          <Text dimColor>{v.account ? claudeAs(v.account, v.lang) : 'Anthropic Claude'}</Text>
         </Text>
       </Box>
       {isClaudeActive
@@ -127,7 +129,8 @@ export function panelTree(ui: Elements, v: PanelView, act: PanelActions) {
         <Text bold>{en ? 'Shared by every window' : '所有視窗共用'}</Text>
         {sw
           ? [
-              switchRow(
+              // your failover chain does not apply to an account window, so its switch is not shown there
+              v.account ? null : switchRow(
                 'failover',
                 en ? '429 failover' : '429 備援',
                 sw.failover,
