@@ -11,6 +11,7 @@ const os = require('node:os')
 const path = require('node:path')
 const { spawn, execFile } = require('node:child_process')
 const L = require('./logic')
+const { sh, win } = require('./test-shell')
 
 const SETUP = path.join(__dirname, '..', 'tools', 'setup.mjs')
 const ROUTER = path.join(__dirname, 'router.js')
@@ -302,7 +303,7 @@ test('A1, A2, A3, A5, A10, A12, A7, A8: failover, pin and cooldown on the accoun
   assert.strictEqual(calls[0].api, 'execFile', 'never a synchronous read')
   assert.strictEqual(calls[0].file, '/usr/bin/security')
   assert.deepStrictEqual(calls[0].args.slice(0, 6), ['find-generic-password', '-s', 'relay-test', '-a', 'spare', '-w'])
-  assert.match(calls[0].args[6], /Library\/Keychains\/login\.keychain-db$/)
+  assert.match(calls[0].args[6], /Library[\\/]Keychains[\\/]login\.keychain-db$/) // joined with the platform's separator
   assert.strictEqual(calls[0].timeout, 5000)
   assert.ok(!calls[0].shell)
 
@@ -814,7 +815,7 @@ test('A5: account-sync copies accountUuid, deviceId and email and prints none of
   writeLogin(acctDir, `{"primaryApiKey": "${FAKE}", oops`)
   const broken = await run('account-sync', 'spare')
   assert.strictEqual(broken.code, 1)
-  assert.match(broken.out, /\.claude-spare\/\.claude\.json could not be read as a JSON object\. Nothing was changed\./)
+  assert.match(broken.out, /\.claude-spare[\\/]\.claude\.json could not be read as a JSON object\. Nothing was changed\./)
   clean(broken, 'parse error')
   writeLogin(acctDir, { ...login, userID: 'x' })
   const lacking = await run('account-sync', 'spare')
@@ -1894,7 +1895,7 @@ test('list 10: account-add makes a 0700 dir with exactly the links the relay dir
       for (const e of fs.readdirSync(d).sort()) {
         const p = path.join(d, e)
         const st = fs.lstatSync(p)
-        out.push(`${path.relative(c.home, p)} ${st.isSymbolicLink() ? `-> ${fs.readlinkSync(p)}` : (st.mode & 0o777).toString(8)}${st.isFile() ? ` ${fs.readFileSync(p, 'utf8')}` : ''}`)
+        out.push(`${path.relative(c.home, p).split(path.sep).join('/')} ${st.isSymbolicLink() ? `-> ${fs.readlinkSync(p)}` : (st.mode & 0o777).toString(8)}${st.isFile() ? ` ${fs.readFileSync(p, 'utf8')}` : ''}`)
         if (st.isDirectory() && !st.isSymbolicLink()) walk(p)
       }
     }
@@ -1934,7 +1935,7 @@ test('list 10: account-add makes a 0700 dir with exactly the links the relay dir
   const ok = await c.run('account-add', 'team-3', '--link', 'statusline.sh')
   assert.strictEqual(ok.code, 0, ok.out)
   const dir = path.join(c.home, '.claude-team-3')
-  assert.strictEqual(fs.statSync(dir).mode & 0o777, 0o700)
+  if (!win) assert.strictEqual(fs.statSync(dir).mode & 0o777, 0o700) // Windows has no such modes: it reports 0o666 for every folder
   assert.deepStrictEqual(fs.readdirSync(dir).sort(), ['CLAUDE.md', 'agents', 'projects', 'settings.json', 'statusline.sh'])
   for (const n of fs.readdirSync(dir)) assert.strictEqual(fs.readlinkSync(path.join(dir, n)), path.join(c.relayDir, n))
   const changed = tree().filter((l) => !before.includes(l)).filter((l) => !l.startsWith('.claude-team-3') && !l.startsWith('.claude/model-relay.json '))
@@ -1952,7 +1953,7 @@ test('list 10: account-add makes a 0700 dir with exactly the links the relay dir
   fs.chmodSync(path.join(c.home, 'empty'), 0o755)
   const reuse = await c.run('account-add', 'team-4', '--dir', '~/empty')
   assert.strictEqual(reuse.code, 0, reuse.out)
-  assert.strictEqual(fs.statSync(path.join(c.home, 'empty')).mode & 0o777, 0o700)
+  if (!win) assert.strictEqual(fs.statSync(path.join(c.home, 'empty')).mode & 0o777, 0o700)
   assert.strictEqual(JSON.parse(cfgText()).accounts['team-4'].configDir, '~/empty')
 })
 
@@ -2136,7 +2137,10 @@ test('list 18: the plan\'s config: providers and doctor see other-org as team-3\
   const old = await cli(t, { cfg: { accountFallback: { mode: 'switch', account: 'spare' }, accounts: { 'team-1': { configDir: '/nowhere-1', fallback: 'spare' }, spare: { configDir: '/nowhere-2' } }, failover: { enabled: true, chain: ['other'] } } })
   const unreadable = await old.run('doctor')
   // W-8: a login that is not there yet says to log in, with the command, not that the organizations differ
-  assert.match(unreadable.out, /Fallback of team-1: ✗ spare \(team-1 is not logged in yet: run CLAUDE_CONFIG_DIR=\/nowhere-1 MODEL_RELAY_CONFIG_DIR=\S+ claude, then \/login there; spare is not logged in yet: run CLAUDE_CONFIG_DIR=\/nowhere-2 MODEL_RELAY_CONFIG_DIR=\S+ claude, then \/login there\)/)
+  // the dirs given as /nowhere-1 and /nowhere-2 are resolved by the platform (C:\nowhere-1 on Windows), and quoted for the shell
+  const esc = (x) => x.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  const [n1, n2] = ['/nowhere-1', '/nowhere-2'].map((d) => esc(sh(path.resolve(d))))
+  assert.match(unreadable.out, new RegExp(`Fallback of team-1: ✗ spare \\(team-1 is not logged in yet: run CLAUDE_CONFIG_DIR=${n1} MODEL_RELAY_CONFIG_DIR=\\S+ claude, then /login there; spare is not logged in yet: run CLAUDE_CONFIG_DIR=${n2} MODEL_RELAY_CONFIG_DIR=\\S+ claude, then /login there\\)`))
   assert.match(unreadable.out, /⚠ team-1's fallback spare is skipped: team-1 is not logged in yet/)
   assert.ok(!unreadable.out.includes('not in one organization'), unreadable.out)
 })

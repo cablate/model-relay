@@ -11,6 +11,7 @@ const net = require('node:net')
 const os = require('node:os')
 const path = require('node:path')
 const { execFile } = require('node:child_process')
+const { sh, ps } = require('./test-shell')
 
 const SETUP = path.join(__dirname, '..', 'tools', 'setup.mjs')
 const PRELOAD = (platform) => `'use strict'
@@ -370,11 +371,11 @@ test('F14: account-sync refuses a name that is not a plain word, and printed ste
   const add = await c.run('account-add', 'team-3', '--dir', "~/it's here")
   assert.strictEqual(add.code, 0, add.out)
   const dir = path.join(c.dir, "it's here")
-  assert.ok(add.out.includes(`2. CLAUDE_CONFIG_DIR='${dir.replace(/'/g, "'\\''")}' MODEL_RELAY_CONFIG_DIR=${c.relayDir} claude, then /login as that account`), add.out)
+  assert.ok(add.out.includes(`2. CLAUDE_CONFIG_DIR='${dir.replace(/'/g, "'\\''")}' MODEL_RELAY_CONFIG_DIR=${sh(c.relayDir)} claude, then /login as that account`), add.out)
   const w = await home(t, { providers: {} }, { platform: 'win32' })
   const win = await w.run('account-add', 'team-3', '--dir', "~/it's here")
   assert.strictEqual(win.code, 0, win.out)
-  assert.ok(win.out.includes(`2. $env:CLAUDE_CONFIG_DIR='${path.join(w.dir, "it's here").replace(/'/g, "''")}'; $env:MODEL_RELAY_CONFIG_DIR=${w.relayDir}; claude   (in a new PowerShell window: the variables stay set in it), then /login`), win.out)
+  assert.ok(win.out.includes(`2. $env:CLAUDE_CONFIG_DIR='${path.join(w.dir, "it's here").replace(/'/g, "''")}'; $env:MODEL_RELAY_CONFIG_DIR=${ps(w.relayDir)}; claude   (in a new PowerShell window: the variables stay set in it), then /login`), win.out)
 })
 
 test('A9/B8: off macOS, keychain: is refused with the env: hint, account-add and account-sync print env: steps, and doctor says keychain: works on macOS only without running anything', async (t) => {
