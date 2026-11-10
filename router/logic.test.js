@@ -349,8 +349,11 @@ test('realDir and sameDir expand 8.3 short names and ignore case on win32 only, 
     assert.strictEqual(L.sameDir(short, longTemp, true), true)
     assert.strictEqual(L.sameDir(`${short}\\x\\projects`, longTemp.toLowerCase() + '\\X\\Projects', true), true, 'short vs long and case, below a folder that is not there')
     assert.strictEqual(L.sameDir(`${short}\\x`, `${longTemp}\\y`, true), false, 'another folder stays another')
-    assert.strictEqual(L.sameDir(short, longTemp, false), false, 'elsewhere a short name is only a name')
-    assert.strictEqual(L.sameDir(longTemp, longTemp.toLowerCase(), false), false, 'elsewhere case counts')
+    // On a real Windows host the OS call itself expands short names and folds case, so "elsewhere" can only be shown off it
+    if (process.platform !== 'win32') {
+      assert.strictEqual(L.sameDir(short, longTemp, false), false, 'elsewhere a short name is only a name')
+      assert.strictEqual(L.sameDir(longTemp, longTemp.toLowerCase(), false), false, 'elsewhere case counts')
+    }
   } finally {
     fs.realpathSync.native = native
   }
