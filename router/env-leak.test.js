@@ -31,7 +31,7 @@ const snapshot = (dir) => {
   return out
 }
 
-test('a test file run with the real relay dir in the environment leaves that dir untouched and no router behind', () => {
+test('a test file run with the real relay dir in the environment leaves that dir untouched and no router behind', (t) => {
   const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'relay-envleak-')))
   try {
     const real = path.join(root, 'real')
@@ -45,7 +45,13 @@ test('a test file run with the real relay dir in the environment leaves that dir
     delete env.NODE_TEST_CONTEXT // else the child's node --test would report to this runner instead of running
     for (const f of FILES) {
       const r = spawnSync(process.execPath, ['--test', path.join(__dirname, f)], { env, encoding: 'utf8', timeout: 240000 })
-      assert.strictEqual(r.status, 0, `${f} did not pass:\n${`${r.stdout}${r.stderr}`.slice(-1500)}`)
+      // What this test proves is the dir and the processes, not the child's own assertions: those run in the main suite,
+      // and a child test that only fails for timing on a loaded runner (seen once on ubuntu-latest) must not fail this
+      // one. The child must still have run its tests, or an untouched dir would prove nothing.
+      const out = `${r.stdout}${r.stderr}`
+      const passed = Number((/^(?:#|ℹ) pass (\d+)$/m.exec(out) || [])[1] || 0) // TAP or spec, whichever reporter the child picked
+      assert.ok(passed > 0, `${f} ran no test:\n${out.slice(-1500)}`)
+      if (r.status !== 0) t.diagnostic(`${f} exited ${r.status}: ${out.split('\n').filter((l) => /^\s*(?:not ok |✖ )/.test(l)).join(' | ') || 'no "not ok" line'}`)
       assert.deepStrictEqual(snapshot(real), before, `${f} changed the dir the variables name`)
     }
     if (process.platform !== 'win32') {
