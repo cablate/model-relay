@@ -25,8 +25,10 @@ export type PanelData = {
   providers: Record<string, string>
   aliases: Record<string, string>
   failoverChain: string[] // empty in an account window: your failover does not apply there
+  kinds: Record<string, string> // providers that are a second Claude account: name -> "anthropic"
   account: string | null // this window is that second account's
-  limited: boolean // an account window at its usage limit
+  serving: string | null // the account this window's requests go to instead, because its own account is at its usage limit
+  limited: boolean // an account window at its usage limit with nobody to go to
   // The router's own view of its switches; null when it is offline or too old to report them
   switches: { failover: boolean; retry: boolean; proxy: boolean; proxyReady: boolean } | null
   stats: Record<string, ProviderStat>

@@ -11,6 +11,11 @@ import {
   accountArgv,
   accountLimitedText,
   accountRefusedText,
+  accountServingText,
+  selfServingText,
+  accountNames,
+  agentProviders,
+  apiOnlyToastText,
   avatarArgv,
   avatarBytes,
   avatarLabel,
@@ -54,6 +59,7 @@ import {
   setupCliArgv,
   setupCommandArgs,
   setupScript,
+  shownAs,
   spawnedElsewhere,
   staleStatusText,
   startArgv,
@@ -65,6 +71,7 @@ import {
   switchPlan,
   switchRefusal,
   toggleArgv,
+  wantsApiOnlyToast,
   wantsLimitToast,
   type AvatarAim,
   type AvatarWant,
@@ -100,6 +107,7 @@ let lastStaleTry = 0
 let staleBusy = false // the router runs older code but was answering a request when we last tried to replace it
 let outdatedTold = false // the toast about an older config, once per session
 let limitTold = false // accountFallback "switch": the toast about the main account's limit, once per session
+let apiOnlyTold = false // accountFallback "api-only": the toast about a window the wrapper did not start, once per session
 // Whether a person is at this session (session.start's isInteractive: false under -p and the SDK); /provider switch
 // writes a handoff only then
 let interactive = false
@@ -115,9 +123,11 @@ let relayReal: string | undefined
 const accountSince = new Map<string, number>()
 let accountRefusedAt = 0 // the router last refused this window's registration: asked again a minute later at most
 let accountRefusalTold = false // its hint, once per session
-let accountLimitedTold = false // an account window at its usage limit: told once per limit
+let servingTold: string | null = null // the fallback account the router last reported for this window: one toast per move there
+let accountLimitedTold = false // an account window at its usage limit with nobody to go to: told once per limit
 // The providers our own router last reported; kept through an outage so a model-relay:<name> spawn still gets its model
 let knownProviders: Record<string, string> = {}
+let knownAccounts: string[] = [] // second Claude accounts: /provider choices with no subagent
 // model-relay:<name> subagents started and not finished yet, by agentId: checked against the router when their turn ends
 const pending = new Map<string, { name: string; model: string; since: number }>()
 let avatarEntries: Record<string, AvatarEntry> = {} // the config's "avatars", read each tick
@@ -143,16 +153,20 @@ async function myVersion($: EngineInterface): Promise<string> {
 }
 
 // One model-relay:<name> agent per provider, and the provider names in /provider's hint; redone when the router's list changes
-async function syncProviders($: EngineInterface, providers: Record<string, string>): Promise<void> {
-  knownProviders = providers
+// A second Claude account (kind "anthropic") gets no agent but is still one of /provider's choices.
+async function syncProviders($: EngineInterface, providers: Record<string, string>, kinds: Record<string, string> = {}): Promise<void> {
+  const agents = agentProviders(providers, kinds)
+  knownProviders = agents
+  knownAccounts = accountNames(providers, kinds)
   let options: ReturnType<typeof providerAgentOptions> = {}
   try {
     options = providerAgentOptions(JSON.parse(await $.fs.read(`${await configDir($)}/${CONFIG_NAME}`)))
   } catch {}
-  const specs = providerAgentSpecs(providers, options)
-  const sig = JSON.stringify(specs)
+  const specs = providerAgentSpecs(agents, options)
+  // The picker's names are part of it: a Claude account added alone changes no agent but must reach the hint
+  const sig = JSON.stringify([specs, Object.keys(providers)])
   if (sig === registeredSig) return
-  const plain = providerAgentSpecs(providers)
+  const plain = providerAgentSpecs(agents)
   for (const [i, spec] of specs.entries()) {
     const ok = await $.agent.register(spec).then(() => true, () => false)
     // Claude Code refused this provider's "agent" fields: keep the agent with the defaults rather than lose it
@@ -257,8 +271,10 @@ async function resyncAccount($: EngineInterface, cfg: LocalCfg): Promise<Health 
 
 // The status of this window: under its account when the router has it registered as that account's window
 const accountLabel = (h: Health | null) => (windowAccount && h && h.account === windowAccount ? windowAccount : null)
-const sText = (h: Health | null, direct: boolean, lang: 'zh' | 'en') => statusText(h, direct, lang, accountLabel(h))
-const sFields = (h: Health | null, direct: boolean, foreign = false) => statusFields(h, direct, foreign, accountLabel(h))
+// selfServing is the relay's own account's, never an account window's (one whose registration did not take)
+const ownView = (h: Health | null) => (h && windowAccount ? { ...h, selfServing: undefined } : h)
+const sText = (h: Health | null, direct: boolean, lang: 'zh' | 'en') => statusText(ownView(h), direct, lang, accountLabel(h))
+const sFields = (h: Health | null, direct: boolean, foreign = false) => statusFields(ownView(h), direct, foreign, accountLabel(h))
 
 async function readLocal($: EngineInterface): Promise<LocalCfg | null> {
   const base = await configDir($)
@@ -406,7 +422,7 @@ async function syncPanelData($: EngineInterface, cfg: LocalCfg, h: Health | null
   try {
     const ui = await read($, panelUi)
     if (!ui.open) return
-    const snap = buildPanelData(h, cfg.port, direct, lang, Date.now(), cfg.outdated, accountLabel(h))
+    const snap = buildPanelData(ownView(h), cfg.port, direct, lang, Date.now(), cfg.outdated, accountLabel(h), await isWindows($))
     await update($, panelData, () => snap)
   } catch {}
 }
@@ -419,14 +435,15 @@ async function setPanelNote($: EngineInterface, note: PanelNote | undefined): Pr
 
 // Opened fresh each time: no note or open confirmation from last time, the shared settings folded away
 async function openPanel($: EngineInterface, cfg: LocalCfg, h: Health | null, lang: 'zh' | 'en'): Promise<void> {
-  await update($, panelData, () => buildPanelData(h, cfg.port, direct, lang, Date.now(), cfg.outdated, accountLabel(h)))
+  const win = await isWindows($)
+  await update($, panelData, () => buildPanelData(ownView(h), cfg.port, direct, lang, Date.now(), cfg.outdated, accountLabel(h), win))
   await update($, panelUi, ({ note: _n, ...u }) => ({ ...u, open: true, confirmingClaude: false, confirmingProxy: false, showSettings: false }))
 }
 
 // Our router answered: it is the one source of what providers exist
 async function ours($: EngineInterface, cfg: LocalCfg, h: Health, lang: 'zh' | 'en'): Promise<void> {
   startFailed = false
-  await syncProviders($, h.providers)
+  await syncProviders($, h.providers, h.kinds)
   await syncPanelData($, cfg, h, lang)
   followAvatar($, h)
 }
@@ -460,8 +477,19 @@ async function tick($: EngineInterface): Promise<void> {
       outdatedTold = true
       $.ui.toast(outdatedText(lang))
     }
-    // an account window at its own usage limit: Claude Code's limit text says nothing of what to do
-    if (h && accountLabel(h) && h.accountLimited) {
+    if (!apiOnlyTold && !windowAccount && cfg.fallback.mode === 'api-only' && wantsApiOnlyToast(cfg.fallback.mode, await $.env.get('MODEL_RELAY_WRAPPER_ID'))) {
+      apiOnlyTold = true
+      $.ui.toast(apiOnlyToastText(lang))
+    }
+    if (h) {
+      // an account window's fallback account, or, in a main window, the relay's own account's
+      const own = !windowAccount && !h.account ? h.selfServing ?? null : null
+      const serving = accountLabel(h) ? h.accountServing ?? null : own
+      if (serving && serving !== servingTold) $.ui.toast(own ? selfServingText(own, lang) : accountServingText(windowAccount!, serving, lang))
+      servingTold = serving
+    }
+    // an account window at its own usage limit with nobody to go to: Claude Code's limit text says nothing of what to do
+    if (h && accountLabel(h) && h.accountLimited && !h.accountServing) {
       if (!accountLimitedTold) {
         accountLimitedTold = true
         $.ui.toast(accountLimitedText(windowAccount!, lang))
@@ -574,7 +602,7 @@ function panelActions($: EngineInterface): PanelActions {
         if (answer.result === 'failed') return bad(lang === 'en' ? 'Relay did not respond; nothing changed.' : '轉發站沒有回應，沒有改變。')
         const h = await health($, cfg)
         await close()
-        $.ui.toast(switchedText(target, h && has(h.providers, target) ? h.providers[target]! : target, lang, accountLabel(h)))
+        $.ui.toast(switchedText(target, (h && shownAs(h, target, lang)) ?? target, lang, accountLabel(h)))
         return undefined
       }),
     askClaude: (ask) => {
@@ -727,7 +755,7 @@ export const register: Register = (on) => {
     if (arg === 'help') {
       // /provider switch is for a window of your own account in mode switch; an account's window is refused it
       const showSwitch = cfg?.fallback.mode === 'switch' && !(cfg && (await findWindowAccount($, cfg)))
-      return { text: helpText(Object.keys(knownProviders), lang, showSwitch) }
+      return { text: helpText(Object.keys(knownProviders), lang, knownAccounts, showSwitch) }
     }
     if (!cfg) {
       return {
@@ -751,7 +779,7 @@ export const register: Register = (on) => {
 
     if (arg === 'status') {
       const h = await health($, cfg)
-      return { text: `${cfg.outdated ? `${outdatedText(lang)}\n\n` : ''}${providerReport(h, Date.now(), lang, accountLabel(h))}` }
+      return { text: `${cfg.outdated ? `${outdatedText(lang)}\n\n` : ''}${providerReport(ownView(h), Date.now(), lang, accountLabel(h), win)}` }
     }
 
     if (arg === 'avatar') return { text: await toggleAvatar($, lang) }
@@ -853,7 +881,7 @@ export const register: Register = (on) => {
         followAvatar($, h)
       }
       await syncPanelData($, cfg, h, lang)
-      return { text: switchedText(target, providers[target] ?? target, lang, windowAccount) }
+      return { text: switchedText(target, (h0 && shownAs(h0, target, lang)) ?? target, lang, windowAccount) }
     }
     const names = [...Object.keys(providers), windowAccount ?? 'claude'].join(lang === 'en' ? ', ' : '、')
     return {

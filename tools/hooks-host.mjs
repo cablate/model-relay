@@ -138,7 +138,7 @@ test('A3 (stand-in host): a -p run, a command no person sent, an unwrapped windo
     const out = await ru.command('switch', 'composer')
     assert.ok(out.text.includes('not started by the launcher wrapper') && handoffs(u).length === 0, `${id}: ${out.text}`)
   }
-  const o = host('off')
+  const o = host('rc-keep')
   const ro = await load(o)
   await ro.start(true)
   assert.match((await ro.command('switch', 'composer')).text, /needs accountFallback\.mode "switch"/)
@@ -153,7 +153,7 @@ test('A3 (stand-in host): on Windows the manual command is PowerShell, and ~ is 
   assert.ok(out.text.includes(`$env:CLAUDE_CONFIG_DIR='C:/Users/me/.claude-second'; $env:MODEL_RELAY_CONFIG_DIR='/cfg'; claude --resume ${SID}`), out.text)
 })
 
-test('A3 (stand-in host): the limit toast fires once in mode switch on the router\'s claudeLimitedAt, empty chain included', async () => {
+test('A3 (stand-in host): the limit toast fires once in mode switch on the router\'s claudeLimitedAt, empty chain included; the api-only toast once in an unwrapped window', async () => {
   const limited = health({ claudeLimitedAt: Date.now() - 1000, failoverSince: 0, failoverChain: [] })
   const s = host('switch', {}, limited)
   const rs = await load(s)
@@ -164,10 +164,19 @@ test('A3 (stand-in host): the limit toast fires once in mode switch on the route
   const off = host('off', {}, limited)
   await (await load(off)).start(true)
   assert.ok(!off.toasts.some((t) => t.includes('/provider switch')), 'not in another mode')
+  assert.ok(!off.envReads.includes('MODEL_RELAY_WRAPPER_ID'), 'the mode is checked before the variable is read')
   const failoverOnly = host('switch', {}, health({ failoverSince: Date.now() - 1000, nextClaudeTry: Date.now() + 1000 }))
   await (await load(failoverOnly)).start(true)
   assert.ok(!failoverOnly.toasts.some((t) => t.includes('/provider switch')), 'failover state without a seen limit is not it')
 
+  const a = host('api-only', { MODEL_RELAY_WRAPPER_ID: undefined })
+  const ra = await load(a)
+  await ra.start(true)
+  await ra.start(true)
+  assert.strictEqual(a.toasts.filter((t) => t.includes('Remote Control stays on here')).length, 1, JSON.stringify(a.toasts))
+  const wrapped = host('api-only')
+  await (await load(wrapped)).start(true)
+  assert.ok(!wrapped.toasts.some((t) => t.includes('Remote Control stays on here')), 'a wrapped window gets none')
 })
 
 // ---------- S4: a window of the second account, pointed at main's relay with MODEL_RELAY_CONFIG_DIR ----------
@@ -376,6 +385,51 @@ test('fix 6: an account whose configDir is the relay dir itself never makes a wi
   assert.ok(!/already runs on the second account/.test(out) && handoffs(h).length === 0)
 })
 
+test('fallback 11 (stand-in host): the account window says once that its usage limit moved it to the fallback account, and its status names that account', async () => {
+  const h = accountHost({ providers: { other: 'other-model', spare: 'anthropic-account' }, kinds: { spare: 'anthropic' }, accountServing: 'spare' })
+  const r = await load(h)
+  const told = () => h.toasts.filter((t) => t.includes('usage limit'))
+  await r.start(true)
+  assert.deepStrictEqual(told(), ['other-org reached its usage limit; this window uses spare now'])
+  assert.strictEqual(statusLines(h).at(-1).text, 'claude\tclaude/spare\n')
+  await r.start(true)
+  assert.strictEqual(told().length, 1, 'once per move')
+  // the cooldown ends: back on its own account; the next limit is said again
+  h.health = { ...h.health, accountServing: undefined }
+  await r.start(true)
+  assert.strictEqual(statusLines(h).at(-1).text, 'claude\tclaude/other-org\n')
+  h.health = { ...h.health, accountServing: 'spare' }
+  await r.start(true)
+  assert.strictEqual(told().length, 2)
+  // a main window never shows it, whatever a health answer says
+  const m = host('switch', {}, health({ providers: { spare: 'anthropic-account' }, kinds: { spare: 'anthropic' }, accountServing: 'spare' }))
+  await (await load(m)).start(true)
+  assert.ok(!m.toasts.some((t) => t.includes('usage limit;')))
+})
+
+test('list 11 (stand-in host): a main window says once that the relay\'s own account\'s limit moved it, and its status names that account; an account window never takes it', async () => {
+  const h = host('switch', {}, health({ providers: { other: 'other-model' }, failoverChain: ['other'], selfServing: 'team-2' }))
+  const r = await load(h)
+  const told = () => h.toasts.filter((t) => t.includes('usage limit'))
+  await r.start(true)
+  assert.deepStrictEqual(told(), ['Your account reached its usage limit; this window uses team-2 now'])
+  assert.strictEqual(statusLines(h).at(-1).text, 'claude\tclaude/team-2\n')
+  await r.start(true)
+  assert.strictEqual(told().length, 1, 'once per move')
+  h.health = { ...h.health, selfServing: undefined }
+  await r.start(true)
+  assert.strictEqual(statusLines(h).at(-1).text, 'claude\tclaude\n', 'back on its own account')
+  h.health = { ...h.health, selfServing: 'team-3' }
+  await r.start(true)
+  assert.deepStrictEqual(told().slice(1), ['Your account reached its usage limit; this window uses team-3 now'])
+  // an account window, registered or refused, shows its own route, never the relay's own account's
+  const a = accountHost({ selfServing: 'team-2' })
+  a.accountRefuse = 'that account is not in accounts'
+  await (await load(a)).start(true)
+  assert.ok(!a.toasts.some((t) => t.includes('Your account reached')), JSON.stringify(a.toasts))
+  assert.ok(!statusLines(a).at(-1).text.includes('team-2'), statusLines(a).at(-1).text)
+})
+
 // ---------- the stable launcher file: written by setup.mjs launcher only, run by the hook at session start ----------
 
 // session.start does not wait for the launcher refresh, so what it ran is read after the host's pending work settles
@@ -408,8 +462,8 @@ test('an account window resolves its own config dir once, not at every tick (its
   assert.ok(account() > account1, 'the accounts\' dirs are checked each tick')
 })
 
-test('acceptance 3 (stand-in host): session start runs setup.mjs launcher with the relay dir in mode switch, never in off, and $.fs.write never targets model-relay-launch.mjs', async () => {
-  for (const h of [host('switch'), accountHost({})]) {
+test('acceptance 3 (stand-in host): session start runs setup.mjs launcher with the relay dir in mode switch, rc-keep or api-only, never in off, and $.fs.write never targets model-relay-launch.mjs', async () => {
+  for (const h of [host('switch'), host('rc-keep'), host('api-only'), accountHost({})]) {
     const r = await load(h)
     await r.start(true)
     await settled()
@@ -418,7 +472,7 @@ test('acceptance 3 (stand-in host): session start runs setup.mjs launcher with t
     assert.ok(!h.writes.some((w) => w.path.includes('model-relay-launch')), JSON.stringify(h.writes.map((w) => w.path)))
   }
   // mode off (or an unknown mode): no file is written for someone who uses no second account
-  for (const mode of ['off', 'later']) {
+  for (const mode of ['off', 'rc_keep']) {
     const off = host(mode)
     await (await load(off)).start(true)
     await settled()
@@ -511,50 +565,52 @@ test('B13 (stand-in host): /provider switch in an account window says it is for 
 })
 
 test('B15 (stand-in host): a router refusal of /provider <name> is shown as the router\'s reason, not as "did not respond"', async () => {
-  const h = host('switch', {}, health({ providers: { spare: 'spare-model' } }))
-  h.sessionRefuse = 'unknown provider "spare" (configured: none)'
+  const h = host('switch', {}, health({ providers: { spare: 'anthropic-account' }, kinds: { spare: 'anthropic' } }))
+  h.sessionRefuse = 'provider "spare" is the fallback of another account\'s windows; this session cannot use it (configured: none)'
   const r = await load(h)
   await r.start(true)
   const text = (await r.command('spare', 'composer')).text
-  assert.strictEqual(text, 'The relay refused: unknown provider "spare" (configured: none). Nothing changed.')
+  assert.strictEqual(text, 'The relay refused: provider "spare" is the fallback of another account\'s windows; this session cannot use it (configured: none). Nothing changed.')
   h.sessionRefuse = null
   h.down = true
   const down = (await r.command('spare', 'composer')).text
   assert.ok(!down.includes('refused'), 'no router at all is not a refusal')
 })
 
-test('B5 (stand-in host): /provider <account> in an account window answers with Claude under its name; any other name with its model', async () => {
-  const h = accountHost({ providers: { other: 'other-model' } })
+test('B5 (stand-in host): /provider <account> answers with Claude under its name', async () => {
+  const h = host('switch', {}, health({ providers: { spare: 'anthropic-account', aaa: 'aaa-9' }, kinds: { spare: 'anthropic' } }))
   const r = await load(h)
   await r.start(true)
-  assert.strictEqual((await r.command('other-org', 'composer')).text, '✓ This window is back on Claude (other-org) (the next turn rebuilds the prompt cache)')
-  assert.strictEqual(h.pinned, 'claude')
-  assert.strictEqual((await r.command('other', 'composer')).text, '✓ This window now uses other (other-model)')
+  assert.strictEqual((await r.command('spare', 'composer')).text, '✓ This window now uses spare (Claude (spare))')
+  assert.strictEqual((await r.command('aaa', 'composer')).text, '✓ This window now uses aaa (aaa-9)')
 })
 
 test('B2 (stand-in host): /provider status in an account window shows its account and never your failover', async () => {
-  const h = accountHost({ failoverSince: Date.now() - 1000, nextClaudeTry: Date.now() + 600000 })
+  const h = accountHost({ failoverSince: Date.now() - 1000, nextClaudeTry: Date.now() + 600000, providers: { other: 'other-model', spare: 'anthropic-account' }, kinds: { spare: 'anthropic' }, accountServing: 'spare' })
   const r = await load(h)
   await r.start(true)
   const text = (await r.command('status', 'composer')).text
-  assert.ok(text.startsWith('Main: Claude (other-org)'), text)
-  assert.ok(!text.includes('retrying Claude') && !text.includes('429 failover') && text.includes('● /provider claude   Claude (other-org)  ← in use'), text)
+  assert.ok(text.startsWith('Main: Claude (spare) (other-org is at its usage limit)'), text)
+  assert.ok(!text.includes('retrying Claude') && !text.includes('429 failover') && text.includes('○ /provider claude   Claude (other-org)'), text)
 })
 
-test('B14 (stand-in host): an account window at its usage limit is told once what to do; again after the limit passed and came back', async () => {
+test('B14 (stand-in host): an account window at its usage limit with nobody to go to is told once what to do; again after the limit passed and came back', async () => {
   const h = accountHost({ accountLimited: true })
   const r = await load(h)
-  const told = () => h.toasts.filter((t) => t.includes('continue in a window of your own account'))
+  const told = () => h.toasts.filter((t) => t.includes('no fallback account to move to'))
   await r.start(true)
   await r.start(true)
-  assert.deepStrictEqual(told(), ['other-org reached its usage limit; continue in a window of your own account, or wait for the limit to reset'])
+  assert.deepStrictEqual(told(), ['other-org reached its usage limit and has no fallback account to move to (accounts.other-org.fallback); continue in a window of your own account, or wait for the limit to reset'])
   h.health = { ...h.health, accountLimited: undefined }
   await r.start(true)
   h.health = { ...h.health, accountLimited: true }
   await r.start(true)
   assert.strictEqual(told().length, 2)
-  // a main window never gets it
+  // a fallback account serving the window is the other toast, not this one; a main window never gets it
+  const serving = accountHost({ accountLimited: true, providers: { other: 'other-model', spare: 'anthropic-account' }, kinds: { spare: 'anthropic' }, accountServing: 'spare' })
+  await (await load(serving)).start(true)
+  assert.strictEqual(serving.toasts.filter((t) => t.includes('no fallback account to move to')).length, 0)
   const main = host('switch', {}, health({ accountLimited: true }))
   await (await load(main)).start(true)
-  assert.strictEqual(main.toasts.filter((t) => t.includes('continue in a window of your own account')).length, 0)
+  assert.strictEqual(main.toasts.filter((t) => t.includes('no fallback account to move to')).length, 0)
 })

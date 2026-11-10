@@ -3,7 +3,7 @@
 // It is for one thing, picking this window's model; what every window shares stays folded behind Settings [s].
 import type { EngineInterface } from 'claude-code'
 import type { PanelData, PanelUi } from '../types'
-import { claudeAs, fit, pingText, statText } from './logic'
+import { claudeAs, fit, pingText, routeLabel, statText } from './logic'
 
 type Elements = ReturnType<EngineInterface['ui']['resolve']>
 
@@ -28,12 +28,17 @@ export function panelTree(ui: Elements, v: PanelView, act: PanelActions) {
   const inner = Math.max(32, v.columns - FRAME_CELLS)
   const en = v.lang === 'en'
 
+  // a second Claude account is shown as Claude under its name, never as "anthropic-account" (B5)
+  const kinds = v.kinds ?? {}
+  const label = (name: string) => routeLabel(v.providers, kinds, name, v.lang) ?? name
   const fo = v.failoverProvider
-  const foText = fo ? `${fo} (${v.providers[fo] ?? fo})` : (en ? 'nobody to hand over to' : '沒有接手者')
+  const foText = fo ? `${fo} (${label(fo)})` : (en ? 'nobody to hand over to' : '沒有接手者')
   const mins = v.failoverSince ? Math.max(0, Math.round((v.nextClaudeTry - v.now) / 60000)) : 0
   const aliasPairs = Object.entries(v.aliases ?? {})
     .filter(([, p]) => v.providers[p])
-    .map(([slot, p]) => `${slot} → ${p} (${v.providers[p]})`)
+    .map(([slot, p]) => `${slot} → ${p} (${label(p)})`)
+  // a second account's window: what moved it to its fallback account, or that nobody is left (B6)
+  const servingText = v.serving ? claudeAs(v.serving, v.lang) : ''
 
   // Only what changes where this window's requests go gets a line of its own
   const alert = !v.online
@@ -44,14 +49,20 @@ export function panelTree(ui: Elements, v: PanelView, act: PanelActions) {
       ? (en
           ? `Claude limit reached: requests go to ${foText}; Claude again in ~${mins}m`
           : `Claude 額度用完：請求改走 ${foText}，約 ${mins} 分鐘後再試 Claude`)
-      : v.limited && v.account
-        ? (en ? `${v.account} is at its usage limit` : `${v.account} 額度用完`)
-        : null
+      : v.serving
+        ? (en
+            ? `${v.account ?? 'Your account'} is at its usage limit: requests go to ${servingText}`
+            : `${v.account ? `${v.account} ` : '你的帳號'}額度用完：請求改走 ${servingText}`)
+        : v.limited && v.account
+          ? (en ? `${v.account} is at its usage limit and has no fallback account to move to` : `${v.account} 額度用完，沒有可以改用的備援帳號`)
+          : null
 
   const inUse = <Text dimColor>{en ? 'In use' : '使用中'}</Text>
   const mark = (active: boolean) => <Text color={active ? 'green' : 'gray'} bold>{active ? '● ' : '○ '}</Text>
 
-  const isClaudeActive = v.session === 'claude'
+  // in an account window the account its limit moved it to is the row in use, as the status line says
+  const moved = v.account ? v.serving : null
+  const isClaudeActive = v.session === 'claude' && !moved
   const claudeRow = (
     <Box key="route:claude">
       <Box flexGrow={1}>
@@ -78,7 +89,7 @@ export function panelTree(ui: Elements, v: PanelView, act: PanelActions) {
   )
 
   const providerRows = Object.entries(v.providers).map(([name, model], idx) => {
-    const active = v.session === name
+    const active = v.session === name || moved === name
     // the last real request and the last test are shown apart: a long reply is not a slow provider
     const notes = [statText(v.stats[name], v.lang), pingText(v.ping?.[name], v.lang)].filter((x) => x !== null)
     const hk = String(idx + 2)
@@ -88,7 +99,7 @@ export function panelTree(ui: Elements, v: PanelView, act: PanelActions) {
           <Text>
             {mark(active)}
             <Text bold={active}>{name.padEnd(8)}</Text>{' '}
-            <Text color={active ? ACCENT : undefined}>{model}</Text>
+            <Text color={active ? ACCENT : undefined}>{label(name) || model}</Text>
             {notes.map((n, i) => <Text key={`note:${i}`} color={n.color}>{` · ${n.text}`}</Text>)}
           </Text>
         </Box>

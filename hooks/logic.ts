@@ -9,7 +9,8 @@ import type { AvatarEntry, AvatarMode, AvatarView, PanelData, PingStat, Provider
 // avatars: the pictures of the avatar pane, by persona (parseAvatars); the router ignores the key
 // avatarPane: open the avatar pane in every window ("avatarPane": true); off by default, so pictures in the config show
 // nothing until it is turned on (/provider avatar on)
-// fallback: accountFallback (parseFallback): the mode, and for "switch" the account and its config dir
+// fallback: accountFallback (parseFallback): the mode, and for "switch" the account and its config dir. These are the
+// hook's and the launcher wrapper's, not the router's: in "switch" the router uses no account at all
 export interface LocalCfg {
   port: number
   nodePath: string
@@ -20,7 +21,7 @@ export interface LocalCfg {
   fallback: Fallback
 }
 
-export type FallbackMode = 'off' | 'switch'
+export type FallbackMode = 'off' | 'switch' | 'rc-keep' | 'api-only'
 export interface Fallback {
   mode: FallbackMode // an unknown value counts as "off", as the router counts it
   account: string // accountFallback.account, trimmed and lower case; '' when unset
@@ -29,7 +30,7 @@ export interface Fallback {
   // claudeUrl is Anthropic itself: the only case in which an account window may use the relay (as the router's accountView says)
   claudeIsAnthropic: boolean
 }
-const MODES: readonly string[] = ['off', 'switch']
+const MODES: readonly string[] = ['off', 'switch', 'rc-keep', 'api-only']
 // An account name that is an ordinary own key ("__proto__" and "../x" are not); router/logic.js SAFE_NAME, which this
 // module cannot load (no Node here)
 export const SAFE_NAME = /^[a-z0-9][a-z0-9_.-]*$/
@@ -246,7 +247,8 @@ export function setupBrief(script: string, nodePath: string, goal: string, hasCf
     '',
     'Rules:',
     '- Never ask me to paste an API key into this chat, and never print one. Use "env:VAR_NAME" tokens; tell me which variable to set, how to make it permanent on my OS, and that Claude Code must be restarted to see it.',
-    `- For a second Claude account, use the account commands, which print the next step: "account-add <name>" makes the account's folder (the person then logs in there once); "set accountFallback.mode <off|switch>" and "set accountFallback.account <name>" choose whether and where /provider switch moves a window; "launcher" prints the command that starts windows. Ask me before you change accountFallback.mode.`,
+    // B11/F12: the account commands and the rules around them; the paste ban above covers a setup-token as well
+    `- For a second or third Claude account, use the account commands, which print the next step: "account-add <name>" makes the account's folder; "account-sync <name>" and then "account-token <name> keychain:<service>/<account>" (macOS) or "account-token <name> env:<VAR>" (elsewhere) give a token account its token; "account-fallback <name> <target>[,<target>...]" and "set accountFallback.mode <off|switch|rc-keep|api-only>" and "set accountFallback.account <name>" choose how accounts take over from each other. Never run "claude setup-token" yourself, never pass a token value to "security -w", and tell me to run those two in my own terminal. Ask me before you change accountFallback.mode or any accounts.<name>.fallback. rc-keep, api-only and fallback lists send my requests with another account's token and identity values, which can conflict with Anthropic's terms of use: say so and wait for my yes.`,
     '- Commands that accept --go (migrate, remove, proxy): run without --go first, show me the result, and add --go only after I agree.',
     '- Tell me before anything changes ~/.claude/settings.json (init --fix, doctor --fix, alias, proxy) and wait for my yes.',
     `- If doctor lists the "outdated" finding, my config is from an older version: follow ${script.replace(/tools\/setup\.mjs$/, 'UPGRADING.md')} step by step.`,
@@ -286,7 +288,8 @@ export interface Health {
   failoverSince: number
   nextClaudeTry: number
   sessionsOnCustom?: number
-  providers: Record<string, string> // provider name -> model id; empty when none is usable
+  providers: Record<string, string> // provider name -> model id (or "anthropic-account"); empty when none is usable
+  kinds?: Record<string, string> // providers that are not a model id: name -> kind ("anthropic", a second Claude account)
   aliases: Record<string, string>
   failoverProvider?: string // absent when failover has nobody to hand over to
   failoverChain: string[]
@@ -297,9 +300,15 @@ export interface Health {
   stats?: Record<string, ProviderStat> // the last real request per provider
   ping?: Record<string, PingStat> // the last test per provider; absent on older routers
   seenModels?: Record<string, number> // when each model id last reached the router; absent on older routers
-  unresolved: { provider: string; env: string }[] // providers skipped because their env:VAR is unset for the router
+  // providers skipped because their env:VAR is unset for the router, or their keychain: item could not be read
+  unresolved: { provider: string; env: string; keychain?: string; malformed?: boolean }[]
   account?: string // this sid is registered as a window of that second account (mode switch)
-  accountLimited?: boolean // that account is at its usage limit
+  accountServing?: string // that account is at its usage limit, and this window goes to this one (accounts.<name>.fallback)
+  // that account is at its usage limit and there is nobody to go to: no fallback list, or every account of it at its own limit
+  accountLimited?: boolean
+  // a main window: the relay's own account is at its usage limit, and this window's requests go to this account of its
+  // fallback list (a plain account name; the router lists that account nowhere else for a main window)
+  selfServing?: string
   // What the router is doing right now; absent when it predates the switches
   switches?: { failover: boolean; retry: boolean; proxy: boolean; proxyReady: boolean }
   claudeLimitedAt?: number // when the router last saw Claude's usage-limit 429, whatever failover did with it; 0 or absent: not since it started
@@ -344,7 +353,8 @@ export function parseHealth(stdout: string): Health | null {
       ? { failover: conf.failoverEnabled, retry: conf.retryEnabled, proxy: conf.proxyEnabled, proxyReady: px?.certificate === true }
       : undefined
     const unresolved = Array.isArray(j.unresolved)
-      ? j.unresolved.filter(isObj).map((u) => ({ provider: str(u.provider), env: str(u.env) })).filter((u) => u.provider)
+      // keychain: "" is a bare "keychain:" token: still a keychain entry, so the string is kept even when empty
+      ? j.unresolved.filter(isObj).map((u) => ({ provider: str(u.provider), env: str(u.env), ...(typeof u.keychain === 'string' ? { keychain: u.keychain } : {}), ...(u.malformed === true ? { malformed: true } : {}) })).filter((u) => u.provider)
       : []
     return {
       session: str(j.session).toLowerCase() || 'claude',
@@ -352,6 +362,7 @@ export function parseHealth(stdout: string): Health | null {
       nextClaudeTry: num(j.nextClaudeTry),
       sessionsOnCustom: num(j.sessionsOnCustom),
       providers: lowerMap(j.providers, false),
+      ...(isObj(j.kinds) ? { kinds: lowerMap(j.kinds, true) } : {}),
       aliases: lowerMap(j.aliases, true),
       ...(failoverProvider ? { failoverProvider } : {}),
       failoverChain,
@@ -364,7 +375,9 @@ export function parseHealth(stdout: string): Health | null {
       ...(seenModels ? { seenModels } : {}),
       unresolved,
       ...(str(j.account) ? { account: str(j.account).toLowerCase() } : {}),
+      ...(str(j.accountServing) ? { accountServing: str(j.accountServing).toLowerCase() } : {}),
       ...(j.accountLimited === true ? { accountLimited: true } : {}),
+      ...(/^[a-z0-9][a-z0-9_.-]*$/.test(str(j.selfServing).toLowerCase()) ? { selfServing: str(j.selfServing).toLowerCase() } : {}),
       ...(switches ? { switches } : {}),
       ...(num(j.claudeLimitedAt) > 0 ? { claudeLimitedAt: num(j.claudeLimitedAt) } : {}),
       ...(conf && num(conf.cooldownMs) > 0 ? { cooldownMs: num(conf.cooldownMs) } : {}),
@@ -375,10 +388,36 @@ export function parseHealth(stdout: string): Health | null {
 }
 
 // One line per thing the person should act on: an older config, a provider the router skips
-export function healthHints(h: Health | null, lang: 'zh' | 'en', outdated = false): string[] {
+// isWin: keychain: tokens can never be read there, so the hint says what to write instead; elsewhere the hook cannot tell
+// macOS from Linux (it sees only the Windows variables), so the hint names both facts
+export function healthHints(h: Health | null, lang: 'zh' | 'en', outdated = false, isWin = false): string[] {
   const en = lang === 'en'
   const out = outdated ? [outdatedText(lang)] : []
   for (const u of h ? h.unresolved : []) {
+    if (u.keychain === '') {
+      out.push(en
+        ? `${u.provider} is skipped: its token "keychain:" names no item (write keychain:<service>/<account>)`
+        : `${u.provider} 被略過：它的 token「keychain:」沒寫項目（要寫成 keychain:<service>/<account>）`)
+      continue
+    }
+    if (u.malformed) {
+      out.push(en
+        ? `${u.provider} is skipped: its keychain: reference is malformed (write keychain:<service>/<account>)`
+        : `${u.provider} 被略過：它的 keychain: 參照格式不對（要寫成 keychain:<service>/<account>）`)
+      continue
+    }
+    if (u.keychain && isWin) {
+      out.push(en
+        ? `${u.provider} is skipped: keychain: tokens work on macOS only; write env:<VAR> in its token here`
+        : `${u.provider} 被略過：keychain: token 只能在 macOS 使用；這裡請把它的 token 寫成 env:<VAR>`)
+      continue
+    }
+    if (u.keychain) {
+      out.push(en
+        ? `${u.provider} is skipped: the relay could not read keychain item ${u.keychain} (once fixed, /provider restart reads it again, and so does any change to model-relay.json; keychain: tokens work on macOS only, on Linux write env:<VAR>)`
+        : `${u.provider} 被略過：轉發站讀不到鑰匙圈項目 ${u.keychain}（修好後執行 /provider restart 會再讀一次，改動 model-relay.json 也會；keychain: token 只能在 macOS 使用，Linux 請寫成 env:<VAR>）`)
+      continue
+    }
     out.push(en
       ? `${u.provider} is skipped: ${u.env ? `the relay was started without ${u.env}` : 'its token "env:" names no variable'}`
       : `${u.provider} 被略過：${u.env ? `轉發站啟動時沒有 ${u.env}` : '它的 token「env:」沒寫變數名稱'}`)
@@ -386,7 +425,8 @@ export function healthHints(h: Health | null, lang: 'zh' | 'en', outdated = fals
   return out
 }
 
-export function buildPanelData(h: Health | null, port: number, direct: boolean, lang: 'zh' | 'en', now: number, outdated = false, account: string | null = null): PanelData {
+// account: this window is that second account's (as for statusFields): the panel shows its own route, never main's failover
+export function buildPanelData(h: Health | null, port: number, direct: boolean, lang: 'zh' | 'en', now: number, outdated = false, account: string | null = null, isWin = false): PanelData {
   const mainFailover = account ? null : h
   return {
     online: Boolean(h),
@@ -399,14 +439,17 @@ export function buildPanelData(h: Health | null, port: number, direct: boolean, 
     sessionsOnCustom: h?.sessionsOnCustom ?? 0,
     providers: h?.providers ?? {},
     aliases: h?.aliases ?? {},
+    kinds: h?.kinds ?? {},
     account,
-    limited: Boolean(account && h?.accountLimited),
+    // who serves this window instead: the account its usage limit moved it to (an account window), or the one the relay's own account's limit moved it to
+    serving: h ? (account ? servingOf(h) : h.selfServing ?? null) : null,
+    limited: Boolean(account && h?.accountLimited && !(h && servingOf(h))),
     // main's failover chain does not apply to an account window
     failoverChain: account ? [] : h?.failoverChain ?? [],
     switches: h?.switches ?? null,
     stats: h?.stats ?? {},
     ping: h?.ping ?? {},
-    hints: healthHints(h, lang, outdated),
+    hints: healthHints(h, lang, outdated, isWin),
     lang,
     now,
   }
@@ -462,25 +505,40 @@ export function startFailedText(configDir: string, lang: 'zh' | 'en' = 'zh'): st
     : `轉發站沒有啟動，這個對話暫時直連 Claude；原因記在 ${configDir}/model-relay.log（或執行 /provider doctor）`
 }
 
+// A provider as the status names it: a second Claude account (kind "anthropic") as Claude under its name, never as
+// "anthropic-account"; any other by its model id. undefined for a name the router does not list.
+const isAccountKind = (h: Health, name: string) => Boolean(h.kinds && has(h.kinds, name) && h.kinds[name] === 'anthropic')
 // Claude under an account's name, as every text and the panel write it
 export const claudeAs = (name: string, lang: 'zh' | 'en'): string => (lang === 'en' ? `Claude (${name})` : `Claude（${name}）`)
+// The same from what the router lists, for the panel, which holds no Health (B5)
+export function routeLabel(providers: Record<string, string>, kinds: Record<string, string>, name: string, lang: 'zh' | 'en'): string | undefined {
+  if (!has(providers, name)) return undefined
+  return has(kinds, name) && kinds[name] === 'anthropic' ? claudeAs(name, lang) : providers[name]
+}
+export const shownAs = (h: Health, name: string, lang: 'zh' | 'en'): string | undefined => routeLabel(h.providers, h.kinds ?? {}, name, lang)
+const fieldOf = (h: Health, name: string) => (isAccountKind(h, name) ? `claude/${name}` : h.providers[name]!)
+// accountServing, when the router lists it for this window
+const servingOf = (h: Health) => (h.accountServing && has(h.providers, h.accountServing) ? h.accountServing : null)
 
 // account: this window is that second account's, as its config dir and the router agree: it shows Claude under that
-// account, or its own /provider pin, and never main's failover
+// account, or its own /provider pin, or the account its usage limit moved it to, and never main's failover
 export function statusText(h: Health | null, direct: boolean, lang: 'zh' | 'en' = 'zh', account: string | null = null): string {
   if (h && account) {
-    const own = h.session !== 'claude' && has(h.providers, h.session) ? h.providers[h.session] : undefined
+    const own = h.session !== 'claude' ? shownAs(h, h.session, lang) : undefined
     if (own) return lang === 'en' ? `Main: ${own} (pinned for this window)` : `主線：${own}（這個視窗固定用它）`
+    const serving = servingOf(h)
+    if (serving) return lang === 'en' ? `Main: ${shownAs(h, serving, lang)} (${account} is at its usage limit)` : `主線：${shownAs(h, serving, lang)}（${account} 額度用完）`
     return lang === 'en' ? `Main: Claude (${account})` : `主線：Claude（${account}）`
   }
   if (!h) {
     if (lang === 'en') return direct ? 'Relay offline: connected directly to Claude' : 'Relay offline, restarting…'
     return direct ? '轉發站離線：主線暫時直連 Claude，model-relay 子代理無法使用' : '轉發站離線，正在重啟…'
   }
-  const pinned = h.session !== 'claude' && has(h.providers, h.session) ? h.providers[h.session] : undefined
+  const pinned = h.session !== 'claude' ? shownAs(h, h.session, lang) : undefined
   if (pinned) return lang === 'en' ? `Main: ${pinned} (pinned for this window)` : `主線：${pinned}（這個視窗固定用它）`
+  if (h.selfServing) return lang === 'en' ? `Main: Claude (${h.selfServing}) (your account is at its usage limit)` : `主線：Claude（${h.selfServing}）（你的帳號額度用完）`
   if (h.failoverSince) {
-    const to = h.failoverProvider ? h.providers[h.failoverProvider] ?? h.failoverProvider : ''
+    const to = h.failoverProvider ? shownAs(h, h.failoverProvider, lang) ?? h.failoverProvider : ''
     if (to) return lang === 'en' ? `Claude limit reached: routing to ${to}` : `Claude 額度用完：下一個請求起改用 ${to}`
     return lang === 'en' ? 'Claude limit reached' : 'Claude 額度用完'
   }
@@ -490,20 +548,24 @@ export function statusText(h: Health | null, direct: boolean, lang: 'zh' | 'en' 
 // The relay state of this session for statusline tools (coralline's relay segment), written by the hook to
 // <config dir>/model-relay-status/<session id> as one line "kind<TAB>label":
 //   claude   <tab> claude     this session goes to Claude through the relay
-//   pinned   <tab> <model>    pinned to a provider (/provider, or a failover that pinned it)
-//   failover <tab> <model>    Claude's limit is reached; the next request goes to that model
-//   claude   <tab> claude/<a> a second account's window (mode switch)
+//   pinned   <tab> <model>    pinned to a provider (/provider, or a failover that pinned it); claude/<name> for a second
+//                             Claude account (kind "anthropic")
+//   failover <tab> <model>    Claude's limit is reached; the next request goes to that model (or claude/<name>)
+//   claude   <tab> claude/<a> a second account's window (mode switch); claude/<b> while a's usage limit sends it to its
+//                             fallback account b; in a main window, claude/<b> while the relay's own account's usage
+//                             limit sends it to b
 //   limit    <tab> claude     Claude's limit is reached and the failover chain has nobody to hand over to
 //   offline  <tab> offline    no router of ours answers for this window
 //   direct   <tab> claude     no router of ours answers, so this window talks to Claude directly
 // foreign: the port answers for another config dir's router, which this window never counts as its own
 export function statusFields(h: Health | null, direct: boolean, foreign = false, account: string | null = null): [string, string] {
   if (foreign || !h) return direct ? ['direct', 'claude'] : ['offline', 'offline']
-  const pinned = h.session !== 'claude' && has(h.providers, h.session) ? h.providers[h.session] : undefined
+  const pinned = h.session !== 'claude' && has(h.providers, h.session) ? fieldOf(h, h.session) : undefined
   if (pinned) return ['pinned', pinned]
-  if (account) return ['claude', `claude/${account}`]
+  if (account) return ['claude', `claude/${servingOf(h) ?? account}`]
+  if (h.selfServing) return ['claude', `claude/${h.selfServing}`]
   if (h.failoverSince) {
-    const to = h.failoverProvider ? h.providers[h.failoverProvider] ?? h.failoverProvider : ''
+    const to = h.failoverProvider ? (has(h.providers, h.failoverProvider) ? fieldOf(h, h.failoverProvider) : h.failoverProvider) : ''
     return to ? ['failover', to] : ['limit', 'claude']
   }
   return ['claude', 'claude']
@@ -1079,37 +1141,61 @@ export function wantsLimitToast(mode: FallbackMode, h: Health | null, now: numbe
   return mode === 'switch' && Boolean(h && h.claudeLimitedAt) && now - h!.claudeLimitedAt! < (h!.cooldownMs || 600000)
 }
 
+// accounts.<name>.fallback: once each time the router starts sending this account window to its fallback account
+export function accountServingText(account: string, serving: string, lang: 'zh' | 'en' = 'zh'): string {
+  return lang === 'en' ? `${account} reached its usage limit; this window uses ${serving} now` : `${account} 額度用完，這個視窗改用 ${serving}`
+}
+
+// a main window: once each time the relay's own account's usage limit moves it to another account of its list
+export function selfServingText(serving: string, lang: 'zh' | 'en' = 'zh'): string {
+  return lang === 'en' ? `Your account reached its usage limit; this window uses ${serving} now` : `你的帳號額度用完，這個視窗改用 ${serving}`
+}
+
 export function limitToastText(lang: 'zh' | 'en' = 'zh'): string {
   return lang === 'en' ? 'Your account reached its usage limit — /provider switch, then /exit' : '你的帳號額度用完：執行 /provider switch，再 /exit'
 }
 
-// B14: a second account's window whose account is at its usage limit: Claude Code's own limit text is all it would show,
-// so say what to do
+// B14: a second account's window whose account is at its usage limit with nobody to go to: Claude Code's own limit text is
+// all it would show, so say what to do
 export function accountLimitedText(account: string, lang: 'zh' | 'en' = 'zh'): string {
   return lang === 'en'
-    ? `${account} reached its usage limit; continue in a window of your own account, or wait for the limit to reset`
-    : `${account} 額度用完；請改在你自己帳號的視窗繼續，或等額度重置`
+    ? `${account} reached its usage limit and has no fallback account to move to (accounts.${account}.fallback); continue in a window of your own account, or wait for the limit to reset`
+    : `${account} 額度用完，而且沒有可以改用的備援帳號（accounts.${account}.fallback）；請改在你自己帳號的視窗繼續，或等額度重置`
+}
+
+// In mode api-only, once per session in a window the wrapper did not start (MODEL_RELAY_WRAPPER_ID unset or not a UUID);
+// the caller checks the mode before it reads the variable
+export const wantsApiOnlyToast = (mode: FallbackMode, wrapperId: string | undefined): boolean => mode === 'api-only' && !isUuid(wrapperId)
+
+export function apiOnlyToastText(lang: 'zh' | 'en' = 'zh'): string {
+  return lang === 'en'
+    ? 'This window was not started by the launcher wrapper, so Remote Control stays on here, which accountFallback.mode "api-only" turns off. Start windows with the alias that setup.mjs launcher prints'
+    : '這個視窗不是由啟動器包裝程式開的，所以這裡的 Remote Control 沒有關閉，而 accountFallback.mode 為 "api-only" 時它應該關閉。請用 setup.mjs launcher 印出的別名開視窗'
 }
 
 // One row per route, each written as the command that picks it
-// account: this is that second account's window: its Claude row is Claude under its name (B5, B2)
+// account: this is that second account's window: its Claude row is Claude under its name, and the account its usage limit
+// moved it to is the row in use (B5, B2)
 function routeRows(h: Health, lang: 'zh' | 'en', withClaude: boolean, account: string | null = null): string[] {
   const en = lang === 'en'
   const active = h.session || 'claude'
+  const moved = account ? servingOf(h) : null
   const rows: string[] = []
   if (withClaude) {
-    const own = active === 'claude'
+    const own = active === 'claude' && !moved
     const label = account ? claudeAs(account, lang) : 'Anthropic Claude'
     const desc = own
       ? `${label}  ${en ? '← in use' : '← 使用中'}`
       : en ? `${label} (switching back rebuilds the prompt cache)` : `${label}（切回時長對話會重建一次快取）`
     rows.push(`  ${own ? '●' : '○'} /provider ${'claude'.padEnd(8)} ${desc}`)
   }
-  for (const [k, m] of Object.entries(h.providers)) {
+  for (const k of Object.keys(h.providers)) {
+    const m = shownAs(h, k, lang) ?? h.providers[k]
     const notes = [statText(h.stats?.[k], lang), pingText(h.ping?.[k], lang)].filter((x) => x !== null).map((x) => x.text)
     const noteText = notes.length ? (en ? ` (${notes.join(' · ')})` : `（${notes.join(' · ')}）`) : ''
-    const mine = active === k ? (en ? '  ← in use' : '  ← 使用中') : ''
-    rows.push(`  ${active === k ? '●' : '○'} /provider ${k.padEnd(8)} ${m}${noteText}${mine}`)
+    const on = active === k || moved === k
+    const mine = on ? (en ? '  ← in use' : '  ← 使用中') : ''
+    rows.push(`  ${on ? '●' : '○'} /provider ${k.padEnd(8)} ${m}${noteText}${mine}`)
   }
   if (Object.keys(h.providers).length === 0) {
     rows.push(en
@@ -1139,7 +1225,7 @@ function sharedLine(h: Health, lang: 'zh' | 'en', account: string | null = null)
 
 // /provider status: where this window goes, what every window shares, and what to fix; the commands are in /provider help
 // account: this is that second account's window (accountLabel): its own view, never your failover (B2)
-export function providerReport(h: Health | null, now: number, lang: 'zh' | 'en' = 'zh', account: string | null = null): string {
+export function providerReport(h: Health | null, now: number, lang: 'zh' | 'en' = 'zh', account: string | null = null, isWin = false): string {
   const en = lang === 'en'
   if (!h) {
     return en
@@ -1147,8 +1233,8 @@ export function providerReport(h: Health | null, now: number, lang: 'zh' | 'en' 
       : '轉發站沒有回應；每 10 秒會自動重啟，稍後再試。'
   }
   let head = statusText(h, false, lang, account)
-  if (account && h.accountLimited) {
-    head += en ? ` (${account} is at its usage limit)` : `（${account} 額度用完）`
+  if (account && h.accountLimited && !servingOf(h)) {
+    head += en ? ` (${account} is at its usage limit and has no fallback account to move to)` : `（${account} 額度用完，沒有可以改用的備援帳號）`
   }
   if (h.failoverSince && !account) {
     const mins = Math.max(0, Math.round((h.nextClaudeTry - now) / 60000))
@@ -1159,7 +1245,7 @@ export function providerReport(h: Health | null, now: number, lang: 'zh' | 'en' 
   return [
     head,
     sharedLine(h, lang, account),
-    ...healthHints(h, lang).map((x) => `⚠ ${x}`),
+    ...healthHints(h, lang, false, isWin).map((x) => `⚠ ${x}`),
     '',
     en ? 'Switch this window:' : '切換這個視窗：',
     ...routeRows(h, lang, true, account),
@@ -1175,8 +1261,9 @@ export function pingReport(h: Health | null, lang: 'zh' | 'en' = 'zh'): string {
 }
 
 // /provider help: every command, grouped by what it reaches
+// accounts: second Claude accounts (kind "anthropic"), a /provider choice with no subagent
 // showSwitch: a window /provider switch works in (mode switch, not an account's window): the line is shown nowhere else
-export function helpText(providers: string[], lang: 'zh' | 'en' = 'zh', showSwitch = false): string {
+export function helpText(providers: string[], lang: 'zh' | 'en' = 'zh', accounts: string[] = [], showSwitch = false): string {
   const en = lang === 'en'
   const groups: [string, [string, string][]][] = [
     [en ? 'This window:' : '這個視窗：', [
@@ -1209,8 +1296,14 @@ export function helpText(providers: string[], lang: 'zh' | 'en' = 'zh', showSwit
       : `子代理：subagent_type "model-relay:<名稱>" 派出等同預設 Agent 的子代理並走該供應商（${names}）`)
   }
   lines.push(en
-    ? 'Accounts: setup.mjs account-add <name> makes an account folder, launcher prints the command that starts windows; /provider setup walks you through it'
-    : '帳號：setup.mjs account-add <名稱> 建立帳號資料夾，launcher 印出開視窗的指令；/provider setup 可以帶你設定')
+    ? 'Accounts: setup.mjs account-add <name> makes an account folder, account-sync <name> sets up a token account, launcher prints the command that starts windows; /provider setup walks you through it'
+    : '帳號：setup.mjs account-add <名稱> 建立帳號資料夾，account-sync <名稱> 設定 token 帳號，launcher 印出開視窗的指令；/provider setup 可以帶你設定')
+  if (accounts.length) {
+    const cmds = accounts.map((k) => `/provider ${k}`)
+    lines.push(en
+      ? `Claude accounts (no subagent; this switches the window to it): ${cmds.join(', ')}`
+      : `Claude 帳號（沒有子代理；用這個把視窗切過去）：${cmds.join('、')}`)
+  }
   return lines.join('\n')
 }
 
@@ -1223,6 +1316,18 @@ export interface ProviderAgentSpec extends AgentOptions {
 
 const DEFAULT_AGENT_PROMPT =
   "You are an agent for Claude Code, Anthropic's official CLI for Claude. Given the user's message, use the available tools to complete the task fully and report your findings and changes clearly and concisely."
+
+// The second Claude accounts among the router's providers: /provider choices that get no subagent. A kind this hook
+// does not know is neither an account nor an agent.
+export function accountNames(providers: Record<string, string>, kinds: Record<string, string> = {}): string[] {
+  return Object.keys(providers).filter((name) => has(kinds, name) && kinds[name] === 'anthropic')
+}
+
+// The providers a model-relay:<name> subagent can run on: a second Claude account (kind "anthropic") has no model of
+// its own to give one, so it is left out here and stays in the /provider picker
+export function agentProviders(providers: Record<string, string>, kinds: Record<string, string> = {}): Record<string, string> {
+  return Object.fromEntries(Object.entries(providers).filter(([name]) => !has(kinds, name)))
+}
 
 // Builds one `$.agent.register` spec per provider the router serves. `tools` is omitted so the subagent inherits every
 // tool the parent has (identical to the built-in general-purpose Agent), while `model` is set to the provider's model ID.
