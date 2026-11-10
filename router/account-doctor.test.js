@@ -10,6 +10,7 @@ const net = require('node:net')
 const os = require('node:os')
 const path = require('node:path')
 const { execFile } = require('node:child_process')
+const { loginCmd, linkCmd } = require('./test-shell')
 
 const SETUP = path.join(__dirname, '..', 'tools', 'setup.mjs')
 const MINE = '11111111-2222-4333-8444-555555555555'
@@ -61,7 +62,7 @@ test('accounts alone need no provider: doctor says Config OK and does not warn a
 test('doctor warns when an account is not logged in yet, or is logged in as your own account, and says what to run', async (t) => {
   const c = await setup(t)
   const none = (await c.findings()).find((f) => f.id === 'account-not-logged-in')
-  assert.ok(none && none.text.startsWith(`team-2 is not logged in yet: run CLAUDE_CONFIG_DIR=${c.team2} MODEL_RELAY_CONFIG_DIR=${c.relay} claude, then /login there`), JSON.stringify(none))
+  assert.ok(none && none.text.startsWith(`team-2 is not logged in yet: run ${loginCmd(c.team2, c.relay)}, then /login there`), JSON.stringify(none))
   c.login(c.home, MINE)
   c.login(c.team2, MINE) // the same account as ~/.claude.json
   const yours = (await c.findings()).find((f) => f.id === 'account-is-yours')
@@ -72,13 +73,13 @@ test('doctor warns when an account is not logged in yet, or is logged in as your
   assert.ok(!ids.includes('account-not-logged-in') && !ids.includes('account-is-yours'), ids.join())
 })
 
-test('doctor warns, with the ln -s command, when the switch target has a projects folder of its own or the relay dir has none', async (t) => {
+test('doctor warns, with the command that links the folder (ln -s, New-Item on Windows), when the switch target has a projects folder of its own or the relay dir has none', async (t) => {
   const c = await setup(t)
   c.login(c.home, MINE)
   c.login(c.team2, OTHER)
   fs.mkdirSync(path.join(c.team2, 'projects'))
   const apart = (await c.findings()).find((f) => f.id === 'account-projects')
-  assert.ok(apart && apart.text.includes(`ln -s ${path.join(c.relay, 'projects')} ${path.join(c.team2, 'projects')}`) && apart.text.includes('/provider switch refuses'), JSON.stringify(apart))
+  assert.ok(apart && apart.text.includes(linkCmd(path.join(c.relay, 'projects'), path.join(c.team2, 'projects'))) && apart.text.includes('/provider switch refuses'), JSON.stringify(apart))
   fs.rmSync(path.join(c.team2, 'projects'), { recursive: true })
   fs.symlinkSync(path.join(c.relay, 'projects'), path.join(c.team2, 'projects'))
   assert.ok(!(await c.findings()).some((f) => f.id === 'account-projects'), 'linked: nothing to say')
@@ -95,7 +96,7 @@ test('account-add warns for each of projects, settings.json and plugins that the
   const bare = await c.run('account-add', 'team-3')
   assert.strictEqual(bare.code, 0, bare.out)
   for (const n of ['projects', 'settings.json', 'plugins']) assert.ok(bare.out.includes(`⚠ ${path.join(c.relay, n)} does not exist, so it is not linked: `), `${n}: ${bare.out}`)
-  assert.match(bare.out, /\/provider switch refuses until .*team-3\/projects and .*\.claude\/projects are one folder/)
+  assert.match(bare.out, /\/provider switch refuses until .*team-3[\\/]projects and .*\.claude[\\/]projects are one folder/)
   assert.match(bare.out, /the plugin does not run in team-3's window, so it is never registered with the router/)
   fs.mkdirSync(path.join(c.relay, 'projects'))
   fs.mkdirSync(path.join(c.relay, 'plugins'))

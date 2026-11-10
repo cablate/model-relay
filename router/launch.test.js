@@ -10,6 +10,8 @@ const os = require('node:os')
 const path = require('node:path')
 const { spawn, execFileSync } = require('node:child_process')
 const http = require('node:http')
+const { pathToFileURL } = require('node:url')
+const { linkCmd, win } = require('./test-shell')
 
 const LAUNCH = path.join(__dirname, '..', 'tools', 'launch.mjs')
 const SID = '22222222-3333-4444-8555-666666666666'
@@ -72,7 +74,7 @@ async function fixture(t, { cfg = undefined, plan = [], projects = 'shared', set
   await new Promise((r) => router.listen(0, '127.0.0.1', r))
   t.after(() => router.close())
   if (cfg && typeof cfg === 'object' && cfg.port === undefined) cfg = { ...cfg, port: router.address().port }
-  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'relay-launch-')))
+  const root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'relay-launch-'))) // the long form on Windows, which is also what git prints
   t.after(() => fs.rmSync(root, { recursive: true, force: true }))
   const home = path.join(root, 'home')
   const main = path.join(home, '.claude')
@@ -83,8 +85,21 @@ async function fixture(t, { cfg = undefined, plan = [], projects = 'shared', set
   else if (projects === 'own') fs.mkdirSync(path.join(acct, 'projects'))
   if (cfg !== undefined) fs.writeFileSync(path.join(main, 'model-relay.json'), typeof cfg === 'string' ? cfg : JSON.stringify(cfg))
   if (settings) fs.writeFileSync(path.join(main, 'settings.json'), JSON.stringify(settings))
-  const fake = path.join(root, 'fake-claude')
-  fs.writeFileSync(fake, FAKE, { mode: 0o755 })
+  // Elsewhere the fake is a script with a shebang, run as the program itself. Windows cannot run a script as a program,
+  // and the wrapper starts no shell, so there the launcher is the path of a claude.exe that does not exist, and a
+  // preload (--require) has the wrapper's spawn of exactly that path start node on the script instead: the wrapper
+  // still resolves the launcher, passes the argv and environment, and reads the exit code the way it would for a real one
+  const fake = path.join(root, win ? 'fake-claude.exe' : 'fake-claude')
+  const script = win ? path.join(root, 'fake-claude.js') : fake
+  fs.writeFileSync(script, FAKE, { mode: 0o755 })
+  const preload = path.join(root, 'fake-spawn.cjs')
+  fs.writeFileSync(preload, `'use strict'
+const cp = require('node:child_process')
+const spawn = cp.spawn
+cp.spawn = (file, args, options) => (file === ${JSON.stringify(fake)} ? spawn(process.execPath, [${JSON.stringify(script)}, ...args], options) : spawn(file, args, options))
+require('node:module').syncBuiltinESMExports()
+`)
+  const wrapperArgv = (args) => [...(win ? ['--require', preload] : []), LAUNCH, '--', fake, ...args]
   const log = path.join(root, 'starts.log')
   const planFile = path.join(root, 'plan.json')
   fs.writeFileSync(planFile, JSON.stringify(plan))
@@ -93,16 +108,18 @@ async function fixture(t, { cfg = undefined, plan = [], projects = 'shared', set
   const starts = () => (fs.existsSync(log) ? fs.readFileSync(log, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l)) : [])
   // Starts the wrapper: { child, done } where done resolves { code, signal, stderr }
   const start = (args, extraEnv = {}) => {
-    const child = spawn(process.execPath, [LAUNCH, '--', fake, ...args], { cwd, env: { ...env, ...extraEnv }, stdio: ['ignore', 'ignore', 'pipe'] })
+    const child = spawn(process.execPath, wrapperArgv(args), { cwd, env: { ...env, ...extraEnv }, stdio: ['ignore', 'ignore', 'pipe'] })
     let stderr = ''
     child.stderr.on('data', (c) => (stderr += c))
     const done = new Promise((resolve) => child.on('exit', (code, signal) => resolve({ code, signal, stderr })))
     return { child, done }
   }
   const run = (args, extraEnv) => start(args, extraEnv).done
-  return { root, home, main, acct, cwd, fake, starts, start, run, routerSeen, handoffDir: path.join(main, 'model-relay-handoff') }
+  return { root, home, main, acct, cwd, fake, env, wrapperArgv, starts, start, run, routerSeen, handoffDir: path.join(main, 'model-relay-handoff') }
 }
 
+// the refusal for a projects folder that is not shared, up to the command that links it (ln -s, New-Item on Windows)
+const NOT_SHARED = new RegExp(`projects folder is not this config dir's projects folder, so --resume could not find this conversation\\. Make \\S+ a link to \\S+ \\(move or remove \\S+ first\\): ${win ? 'New-Item -ItemType SymbolicLink -Path ' : 'ln -s '}`)
 const cfgOf = (mode, extra = {}) => ({ format: 2, accountFallback: { mode, account: 'second' }, accounts: { second: { configDir: '~/.claude-second' } }, providers: {}, ...extra })
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 const handoffLeft = (f) => (fs.existsSync(f.handoffDir) ? fs.readdirSync(f.handoffDir).filter((n) => !n.endsWith('.target')) : [])
@@ -168,7 +185,8 @@ test('A4, A11: a handoff makes exactly one relaunch on the account, through main
   assert.strictEqual(second.env.MODEL_RELAY_CONFIG_DIR, f.main, 'the window uses main\'s relay config')
   for (const k of DROPPED.filter((k) => k !== 'ANTHROPIC_AUTH_TOKEN')) assert.strictEqual(first.env[k], true, `the first launch keeps ${k}`)
   assert.strictEqual(first.env.MODEL_RELAY_CONFIG_DIR, undefined)
-  assert.match(r.stderr, /not passed to second's window: CLAUDE_CODE_OAUTH_TOKEN, ANTHROPIC_API_KEY, ANTHROPIC_BASE_URL, HTTP_PROXY, http_proxy\n/)
+  // Windows has one variable for HTTP_PROXY and http_proxy (node starts a child with the first of the two), so it is named once
+  assert.match(r.stderr, new RegExp(`not passed to second's window: CLAUDE_CODE_OAUTH_TOKEN, ANTHROPIC_API_KEY, ANTHROPIC_BASE_URL, ${win ? 'HTTP_PROXY(, http_proxy)?' : 'HTTP_PROXY, http_proxy'}\\n`))
   assert.ok(!r.stderr.includes('127.0.0.1'), 'names only')
   assert.ok(!r.stderr.includes('=k') && !/\bk\b.*\bo\b/.test(r.stderr), 'names only')
   // the options the relaunch leaves out are named, not their values or the prompt (--model and the rest of the kept ones are not)
@@ -199,10 +217,13 @@ test('A4: the project key follows the main repository root through git, so a wor
   git('init', '-q')
   git('commit', '-q', '--allow-empty', '-m', 'x')
   git('worktree', 'add', '-q', path.join(f.root, 'wt'), '-b', 'wt')
-  const child = spawn(process.execPath, [LAUNCH, '--', f.fake], { cwd: path.join(f.root, 'wt'), env: { ...process.env, HOME: f.home, CLAUDE_CONFIG_DIR: f.main, FAKE_LOG: path.join(f.root, 'starts.log'), FAKE_PLAN: path.join(f.root, 'plan.json'), FAKE_MAIN: f.main }, stdio: 'ignore' })
+  const child = spawn(process.execPath, f.wrapperArgv([]), { cwd: path.join(f.root, 'wt'), env: f.env, stdio: 'ignore' })
   await new Promise((r) => child.on('exit', r))
+  assert.strictEqual(f.starts().length, 2, 'the switch went on')
   const settings = JSON.parse(f.starts()[1].argv.at(-1))
-  assert.strictEqual(settings.autoMemoryDirectory, path.join(f.main, 'projects', repo.replace(/[^A-Za-z0-9]/g, '-'), 'memory'))
+  const want = path.join(f.main, 'projects', repo.replace(/[^A-Za-z0-9]/g, '-'), 'memory')
+  // git prints the drive letter as the folder was given to it, which can differ in case from node's on Windows
+  assert.strictEqual(win ? settings.autoMemoryDirectory.toLowerCase() : settings.autoMemoryDirectory, win ? want.toLowerCase() : want)
 })
 
 test('A4: refused handoffs: a sid that is an option, a symlink, a stale file, account __proto__, a projects folder of its own', async (t) => {
@@ -213,8 +234,8 @@ test('A4: refused handoffs: a sid that is an option, a symlink, a stale file, ac
     ['account __proto__', { cfg: JSON.parse('{"format":2,"accountFallback":{"mode":"switch","account":"__proto__"},"accounts":{"__proto__":{"configDir":"~/.claude-second"}}}'), plan: [{ handoff: { sid: SID } }] }, /accountFallback\.account is not set to a plain account name/],
     ['an inherited account name', { cfg: cfgOf('switch', { accountFallback: { mode: 'switch', account: 'constructor' } }), plan: [{ handoff: { sid: SID } }] }, /accounts\.constructor\.configDir is not set/],
     ['the mode changed while the window ran', { plan: [{ handoff: { sid: SID }, cfg: cfgOf('off') }] }, /no longer "switch"/],
-    ['projects not shared', { projects: 'own', plan: [{ handoff: { sid: SID } }] }, /projects folder is not this config dir's projects folder, so --resume could not find this conversation\. Make \S+ a link to \S+ \(move or remove \S+ first\): ln -s /],
-    ['no projects folder at all', { projects: 'none', plan: [{ handoff: { sid: SID } }] }, /projects folder is not this config dir's projects folder, so --resume could not find this conversation\. Make \S+ a link to \S+ \(move or remove \S+ first\): ln -s /],
+    ['projects not shared', { projects: 'own', plan: [{ handoff: { sid: SID } }] }, NOT_SHARED],
+    ['no projects folder at all', { projects: 'none', plan: [{ handoff: { sid: SID } }] }, NOT_SHARED],
     ['the account dir is this window\'s own', { cfg: cfgOf('switch', { accounts: { second: { configDir: '~/.claude' } } }), plan: [{ handoff: { sid: SID } }] }, /is this window's own config dir/],
     ['a folder where the handoff goes (it cannot be removed)', { plan: [{ handoff: { sid: SID, folder: true } }] }, /not a regular file/],
   ]
@@ -245,17 +266,22 @@ test('A4: a non-zero exit gives no relaunch, and no handoff is left behind', asy
   assert.deepStrictEqual(handoffLeft(f), [], 'deleted on this way out too')
 })
 
+// Node cannot deliver SIGINT, SIGTERM or SIGHUP to a process on Windows: child.kill() there ends it outright, so a test
+// cannot tell the wrapper's handling of them from its being killed. Windows runs the slow child only.
 test('A4: SIGINT leaves the wrapper alive; a child killed by SIGTERM gives 143; SIGHUP is passed on', async (t) => {
   const f = await fixture(t, { cfg: cfgOf('switch'), plan: [{ sleepMs: 1500, handoff: { sid: SID } }, {}] })
   const a = f.start([])
-  await sleep(400)
-  a.child.kill('SIGINT')
-  a.child.kill('SIGQUIT')
-  await sleep(200)
-  assert.strictEqual(a.child.exitCode, null, 'still running')
+  if (!win) {
+    await sleep(400)
+    a.child.kill('SIGINT')
+    a.child.kill('SIGQUIT')
+    await sleep(200)
+    assert.strictEqual(a.child.exitCode, null, 'still running')
+  }
   const ra = await a.done
   assert.strictEqual(ra.code, 0, ra.stderr)
   assert.strictEqual(f.starts().length, 2, 'the child finished, wrote its handoff, and the switch went on')
+  if (win) return
 
   for (const [sig, code] of [['SIGTERM', 143], ['SIGHUP', 129]]) {
     const g = await fixture(t, { cfg: cfgOf('switch'), plan: [{ sleepMs: 5000, handoff: { sid: SID } }] })
@@ -276,7 +302,7 @@ test('A4: SIGINT leaves the wrapper alive; a child killed by SIGTERM gives 143; 
 })
 
 test('A4: only --model, --permission-mode and --effort with a real value are kept, before a lone --', async () => {
-  const { keptFlags, splitArgv } = await import(LAUNCH)
+  const { keptFlags, splitArgv } = await import(pathToFileURL(LAUNCH).href) // a Windows path is no module URL as it is
   assert.deepStrictEqual(keptFlags(['--model', '--dangerously-skip-permissions', '--effort=', '--permission-mode', 'plan']), ['--permission-mode', 'plan'])
   assert.deepStrictEqual(keptFlags(['--model=opus', '--', '--effort', 'high']), ['--model', 'opus'])
   assert.deepStrictEqual(keptFlags(['--modelx', 'y', '--model']), [])
@@ -288,7 +314,7 @@ test('A4: only --model, --permission-mode and --effort with a real value are kep
   assert.deepStrictEqual(splitArgv(['--']), { launcher: 'claude', args: [] })
 })
 
-test('A4: a window the wrapper passed SIGTERM or SIGHUP to is never relaunched, even when it exits 0 after writing a handoff', async (t) => {
+test('A4: a window the wrapper passed SIGTERM or SIGHUP to is never relaunched, even when it exits 0 after writing a handoff', { skip: win && 'node cannot deliver SIGTERM or SIGHUP on Windows: child.kill() ends the wrapper outright' }, async (t) => {
   for (const sig of ['SIGTERM', 'SIGHUP']) {
     const f = await fixture(t, { cfg: cfgOf('switch'), plan: [{ handoff: { sid: SID }, trap: true, sleepMs: 5000 }, {}] })
     const a = f.start([])
@@ -357,7 +383,8 @@ test('B14: a projects folder that is not shared is refused with the command that
     const r = await f.run([])
     assert.strictEqual(r.code, 0, r.stderr)
     assert.strictEqual(f.starts().length, 1, `${projects}: no relaunch`)
-    const want = `Make ${f.acct}/projects a link to ${f.main}/projects (move or remove ${f.acct}/projects first): ln -s ${f.main}/projects ${f.acct}/projects; not switching`
+    const [from, to] = [path.join(f.main, 'projects'), path.join(f.acct, 'projects')]
+    const want = `Make ${to} a link to ${from} (move or remove ${to} first): ${linkCmd(from, to)}; not switching`
     assert.ok(r.stderr.includes(want), `${projects}: ${r.stderr}`)
   }
 })

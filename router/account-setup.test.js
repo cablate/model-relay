@@ -9,6 +9,7 @@ const net = require('node:net')
 const os = require('node:os')
 const path = require('node:path')
 const { execFile } = require('node:child_process')
+const { loginCmd, win } = require('./test-shell')
 
 const SETUP = path.join(__dirname, '..', 'tools', 'setup.mjs')
 const MAIN_UUID = '11111111-2222-4333-8444-555555555555'
@@ -144,7 +145,7 @@ test('list 10: account-add makes a 0700 dir with exactly the links the relay dir
       for (const e of fs.readdirSync(d).sort()) {
         const p = path.join(d, e)
         const st = fs.lstatSync(p)
-        out.push(`${path.relative(c.home, p)} ${st.isSymbolicLink() ? `-> ${fs.readlinkSync(p)}` : (st.mode & 0o777).toString(8)}${st.isFile() ? ` ${fs.readFileSync(p, 'utf8')}` : ''}`)
+        out.push(`${path.relative(c.home, p).split(path.sep).join('/')} ${st.isSymbolicLink() ? `-> ${fs.readlinkSync(p)}` : (st.mode & 0o777).toString(8)}${st.isFile() ? ` ${fs.readFileSync(p, 'utf8')}` : ''}`)
         if (st.isDirectory() && !st.isSymbolicLink()) walk(p)
       }
     }
@@ -184,7 +185,7 @@ test('list 10: account-add makes a 0700 dir with exactly the links the relay dir
   const ok = await c.run('account-add', 'team-3', '--link', 'statusline.sh')
   assert.strictEqual(ok.code, 0, ok.out)
   const dir = path.join(c.home, '.claude-team-3')
-  assert.strictEqual(fs.statSync(dir).mode & 0o777, 0o700)
+  if (!win) assert.strictEqual(fs.statSync(dir).mode & 0o777, 0o700) // Windows has no such modes: it reports 0o666 for every folder
   assert.deepStrictEqual(fs.readdirSync(dir).sort(), ['CLAUDE.md', 'agents', 'projects', 'settings.json', 'statusline.sh'])
   for (const n of fs.readdirSync(dir)) assert.strictEqual(fs.readlinkSync(path.join(dir, n)), path.join(c.relayDir, n))
   const changed = tree().filter((l) => !before.includes(l)).filter((l) => !l.startsWith('.claude-team-3') && !l.startsWith('.claude/model-relay.json '))
@@ -195,7 +196,7 @@ test('list 10: account-add makes a 0700 dir with exactly the links the relay dir
   // the steps: the mode first (the plugin registers a window only in mode switch), then the login (pointed at the relay, so
   // the plugin registers that window), the account and the launcher; and a plain Terms note quoting the OAuth sentence
   assert.match(ok.out, /1\. node \S+ set accountFallback\.mode switch {3}\(first: /)
-  assert.match(ok.out, new RegExp(`2\\. CLAUDE_CONFIG_DIR=${esc(dir)} MODEL_RELAY_CONFIG_DIR=${esc(c.relayDir)} claude, then /login as that account`))
+  assert.match(ok.out, new RegExp(`2\\. ${esc(loginCmd(dir, c.relayDir))}, then /login as that account`))
   assert.match(ok.out, /3\. node \S+ set accountFallback\.account team-3\n/)
   assert.match(ok.out, /4\. node \S+ launcher {3}\(prints the command to start Claude Code with in place of claude\)/)
   assert.match(ok.out, /\n {2}Terms: Anthropic's terms, not this project, decide what you may do with several accounts\. .*"OAuth authentication is intended exclusively for purchasers of Claude Free, Pro, Max, Ultra, Team, and Enterprise subscription plans and is designed to support ordinary use of Claude Code and other native Anthropic applications\."/)
@@ -206,7 +207,7 @@ test('list 10: account-add makes a 0700 dir with exactly the links the relay dir
   fs.chmodSync(path.join(c.home, 'empty'), 0o755)
   const reuse = await c.run('account-add', 'team-4', '--dir', '~/empty')
   assert.strictEqual(reuse.code, 0, reuse.out)
-  assert.strictEqual(fs.statSync(path.join(c.home, 'empty')).mode & 0o777, 0o700)
+  if (!win) assert.strictEqual(fs.statSync(path.join(c.home, 'empty')).mode & 0o777, 0o700)
   assert.strictEqual(JSON.parse(cfgText()).accounts['team-4'].configDir, '~/empty')
 })
 
