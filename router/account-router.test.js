@@ -2137,9 +2137,10 @@ test('list 18: the plan\'s config: providers and doctor see other-org as team-3\
   const old = await cli(t, { cfg: { accountFallback: { mode: 'switch', account: 'spare' }, accounts: { 'team-1': { configDir: '/nowhere-1', fallback: 'spare' }, spare: { configDir: '/nowhere-2' } }, failover: { enabled: true, chain: ['other'] } } })
   const unreadable = await old.run('doctor')
   // W-8: a login that is not there yet says to log in, with the command, not that the organizations differ
-  // the dirs given as /nowhere-1 and /nowhere-2 are resolved by the platform (C:\nowhere-1 on Windows), and quoted for the shell
+  // the dirs given as /nowhere-1 and /nowhere-2 are resolved by the platform in the setup CLI's own folder (on Windows
+  // that folder's drive: C:\nowhere-1 whatever drive the test runs on), and quoted for the shell
   const esc = (x) => x.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-  const [n1, n2] = ['/nowhere-1', '/nowhere-2'].map((d) => esc(sh(path.resolve(d))))
+  const [n1, n2] = ['/nowhere-1', '/nowhere-2'].map((d) => esc(sh(path.resolve(path.dirname(old.file), d))))
   assert.match(unreadable.out, new RegExp(`Fallback of team-1: ✗ spare \\(team-1 is not logged in yet: run CLAUDE_CONFIG_DIR=${n1} MODEL_RELAY_CONFIG_DIR=\\S+ claude, then /login there; spare is not logged in yet: run CLAUDE_CONFIG_DIR=${n2} MODEL_RELAY_CONFIG_DIR=\\S+ claude, then /login there\\)`))
   assert.match(unreadable.out, /⚠ team-1's fallback spare is skipped: team-1 is not logged in yet/)
   assert.ok(!unreadable.out.includes('not in one organization'), unreadable.out)
