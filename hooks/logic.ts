@@ -1010,6 +1010,9 @@ const notPlain = (account: string, cli: (...words: string[]) => string, en: bool
   ? `accountFallback.account is "${account}", which the launcher wrapper refuses (a plain name is lower-case letters, digits, "_", "." and "-", starting with a letter or digit): ${cli('set', 'accountFallback.account', '<name>')}; nothing was changed.`
   : `accountFallback.account 是 "${account}"，啟動器包裝程式不接受這個名稱（單純的名稱只用小寫字母、數字、"_"、"." 與 "-"，並以字母或數字開頭）：${cli('set', 'accountFallback.account', '<name>')}；沒有做任何變更。`
 
+// A folder's real path as a comparison key: slashes alike and no trailing one, and without regard to case on Windows (NTFS)
+export const dirKey = (p: string, isWin?: boolean) => (isWin ? p.replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase() : p.replace(/\/+$/, ''))
+
 // What /provider switch checks before it writes a handoff, which the wrapper would otherwise refuse only after /exit
 // (tools/launch.mjs): the account's folder is there, it is not this window's own, and its projects folder is this one's.
 // real: where each path resolves to; undefined when it does not exist. null: nothing to refuse.
@@ -1017,7 +1020,7 @@ export type SwitchReal = { own?: string; account?: string; ownProjects?: string;
 export function switchRefusal(o: { account: string; ownDir: string; accountDir: string; real: SwitchReal; isWin?: boolean; setup?: string }, lang: 'zh' | 'en' = 'zh'): string | null {
   const en = lang === 'en'
   if (!SAFE_NAME.test(o.account)) return notPlain(o.account, (...words: string[]) => `node ${(o.isWin ? psWord : shWord)(o.setup ?? 'setup.mjs')} ${words.join(' ')}`, en)
-  const key = (p: string) => (o.isWin ? p.replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase() : p.replace(/\/+$/, ''))
+  const key = (p: string) => dirKey(p, o.isWin)
   const { account, ownDir, accountDir, real } = o
   if (!real.account) {
     return en

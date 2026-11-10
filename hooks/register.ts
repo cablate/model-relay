@@ -21,6 +21,7 @@ import {
   avatarWanted,
   base64ToBytes,
   buildPanelData,
+  dirKey,
   elsewhereText,
   expandHome,
   foreignConfigDir,
@@ -216,10 +217,12 @@ async function findWindowAccount($: EngineInterface, cfg: LocalCfg): Promise<str
   const own = (ownReal ||= await realPathOf($, await ownConfigDir($)))
   if (!own) return null
   const relay = (relayReal ||= await realPathOf($, await configDir($)))
+  const win = await isWindows($)
   const home = await homeDir($)
+  const key = (p?: string) => (p === undefined ? p : dirKey(p, win))
   for (const [name, dir] of Object.entries(cfg.fallback.accounts)) {
-    const real = await realPathOf($, expandHome(dir, home))
-    if (real === own && real !== relay) return name
+    const real = key(await realPathOf($, expandHome(dir, home)))
+    if (real === key(own) && real !== key(relay)) return name
   }
   return null
 }

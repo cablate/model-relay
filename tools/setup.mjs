@@ -719,17 +719,13 @@ if (cmd === 'account-add') {
   const given = getOpt('--dir') ?? `~/.claude-${name}`
   if (!(path.isAbsolute(given) || given.startsWith('~/')) || given.includes('\0')) stop('--dir must be an absolute path or start with ~/', 2)
   const dir = L.expandHome(given, home)
-  // Where a path really points, though its last parts do not exist yet: the realpath of its nearest existing ancestor
-  const real = (p) => {
-    const rest = []
-    let cur = path.resolve(p)
-    while (!fs.existsSync(cur) && path.dirname(cur) !== cur) {
-      rest.unshift(path.basename(cur))
-      cur = path.dirname(cur)
-    }
-    return path.join(L.realDir(cur), ...rest)
+  // Where a path really points, though its last parts do not exist yet (L.realDir), compared without regard to case on Windows
+  const real = (p) => L.realDir(p)
+  const key = (p) => (process.platform === 'win32' ? p.toLowerCase() : p)
+  const within = (a, b) => {
+    const [x, y] = [key(a), key(b)]
+    return x === y || x.startsWith(y.endsWith(path.sep) ? y : y + path.sep)
   }
-  const within = (a, b) => a === b || a.startsWith(b.endsWith(path.sep) ? b : b + path.sep)
   const target = real(dir)
   const others = [['the relay dir', cfgDir], ...Object.entries(accounts).filter(([, v]) => isObj(v) && typeof v.configDir === 'string' && v.configDir.trim()).map(([k, v]) => [`the dir of accounts.${k.trim().toLowerCase()}`, L.expandHome(v.configDir.trim(), home)])]
   for (const [what, d] of others) if (within(target, real(d)) || within(real(d), target)) stop(`${dir} is, holds or lies inside ${what}`)

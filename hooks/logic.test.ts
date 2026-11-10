@@ -4,6 +4,7 @@ import {
   accountLimitedText,
   accountRefusedText,
   claudeAs,
+  dirKey,
   sessionAnswer,
   sessionRefusedText,
   switchRefusal,
@@ -684,6 +685,7 @@ test('B4: /provider switch is refused before the handoff is written when the acc
   const ps = switchRefusal({ account: 'second', ownDir: 'C:/Users/me/.claude', accountDir: "C:/Users/me/it's", isWin: true, real: { ...ok, ownProjects: 'C:/A', accountProjects: 'C:/B' } }, 'en')!
   assert(ps.includes("New-Item -ItemType SymbolicLink -Path 'C:/Users/me/it''s/projects' -Target 'C:/Users/me/.claude/projects'"), ps)
   assert(switchRefusal({ ...base, real: { ...ok, account: '/H/.CLAUDE', own: '/h/.claude' }, isWin: true }, 'en')!.startsWith('accounts.second.configDir is this window'), 'Windows paths compare without case')
+  assert(dirKey('C:\\Users\\Me\\', true) === dirKey('c:/users/me', true) && dirKey('/H/x', false) !== dirKey('/h/x', false), 'dirKey: case, slashes and a trailing one only on Windows, a trailing one anywhere')
   assert(switchRefusal({ ...base, real: { ...ok, accountProjects: '/x' } }, 'zh')!.includes('沒有做任何變更'), 'zh')
 })
 
