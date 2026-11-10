@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// The launcher wrapper for accountFallback mode "switch".
+// The launcher wrapper for accountFallback mode "switch" (and the window side of "api-only").
 // Usage: node tools/launch.mjs [args…]                  runs claude [args…]
 //        node tools/launch.mjs -- <launcher> [args…]     runs <launcher> [args…] (a missing launcher is claude)
 // CLAUDE_CONFIG_DIR, when the window uses its own config dir, must be in this wrapper's environment already.
@@ -8,7 +8,8 @@
 // model-relay-handoff folder. With no model-relay.json there, or a mode that is off (or unknown), the launcher runs with
 // exactly the argv and environment it was given: nothing added, nothing read afterwards.
 // Otherwise:
-// - the first launch gets the same argv plus MODEL_RELAY_WRAPPER_ID (a fresh UUID);
+// - the first launch gets the same argv plus MODEL_RELAY_WRAPPER_ID (a fresh UUID); in api-only also
+//   --settings '{"disableRemoteControl":true}', and a --settings of the person's own then stops it (no merging);
 // - in switch, after the child exits 0, <dir>/model-relay-handoff/<that id>.json (written by /provider switch) may name
 //   the session to resume. It must be a regular file (lstat, no symlink) written after the child started, holding a
 //   UUID sid. The account comes from accountFallback.account and its configDir from accounts.<account>, never from the
@@ -110,6 +111,7 @@ export function wrapperMode(dir) {
 
 // The options before a lone "--" (after it everything is the prompt)
 const optionsPart = (args) => (args.includes('--') ? args.slice(0, args.indexOf('--')) : args)
+export const hasUserSettings = (args) => optionsPart(args).some((a) => a === '--settings' || a.startsWith('--settings='))
 
 // --model, --permission-mode and --effort with their values, in either form; a value that looks like an option is dropped
 export function keptFlags(args) {
@@ -310,11 +312,16 @@ export async function main(argv, env = process.env, cwd = process.cwd()) {
     const { mode, cfg } = wrapperMode(dir)
     if (mode === 'pass' || isAccountDir(dir, env)) return (await runChild(launcher, args, env)).code
 
+    if (mode === 'api-only' && hasUserSettings(args)) {
+      say('accountFallback.mode "api-only" adds its own --settings, and a --settings of yours is not merged into it: remove yours, or start the launcher directly. Nothing was started.')
+      return 2
+    }
     const id = randomUUID()
     const handoff = path.join(dir, 'model-relay-handoff', `${id}.json`)
     process.on('exit', () => rmQuiet(handoff))
+    const first = mode === 'api-only' ? ['--settings', '{"disableRemoteControl":true}', ...args] : args
     const startedAt = Date.now()
-    const ran = await runChild(launcher, args, { ...env, MODEL_RELAY_WRAPPER_ID: id })
+    const ran = await runChild(launcher, first, { ...env, MODEL_RELAY_WRAPPER_ID: id })
     code = ran.code
     if (mode !== 'switch' || code !== 0) return code // the exit handler deletes any handoff
     if (ran.forwarded) {

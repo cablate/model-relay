@@ -237,12 +237,32 @@ test('A4: accounts.<name> is found as providers.<name> is: own keys, trimmed, an
   assert.strictEqual(f.starts()[1].env.CLAUDE_CONFIG_DIR, f.acct)
 })
 
-test('A4: a non-zero exit gives no relaunch, and no handoff is left behind', async (t) => {
+test('A4: a non-zero exit gives no relaunch; api-only adds disableRemoteControl and refuses a --settings of the person\'s', async (t) => {
   const f = await fixture(t, { cfg: cfgOf('switch'), plan: [{ handoff: { sid: SID }, exit: 3 }] })
   const r = await f.run([])
   assert.strictEqual(r.code, 3)
   assert.strictEqual(f.starts().length, 1)
   assert.deepStrictEqual(handoffLeft(f), [], 'deleted on this way out too')
+  for (const mode of ['rc-keep', 'api-only']) {
+    const g = await fixture(t, { cfg: cfgOf(mode), plan: [{ handoff: { sid: SID } }] })
+    assert.strictEqual((await g.run(['--model', 'opus'])).code, 0)
+    const s = g.starts()
+    assert.strictEqual(s.length, 1, `${mode}: no switching`)
+    assert.match(s[0].env.MODEL_RELAY_WRAPPER_ID, UUID, mode)
+    assert.deepStrictEqual(s[0].argv, mode === 'api-only' ? ['--settings', '{"disableRemoteControl":true}', '--model', 'opus'] : ['--model', 'opus'])
+    assert.deepStrictEqual(handoffLeft(g), [], `${mode}: no handoff left behind`)
+  }
+  for (const own of [['--settings', '{"autoMemoryDirectory":"/x"}'], ['--settings={"a":1}']]) {
+    const h = await fixture(t, { cfg: cfgOf('api-only') })
+    const x = await h.run(own)
+    assert.strictEqual(x.code, 2, x.stderr)
+    assert.match(x.stderr, /a --settings of yours is not merged into it/)
+    assert.strictEqual(h.starts().length, 0, 'nothing started')
+  }
+  // after a lone "--" it is the prompt, not an option
+  const p = await fixture(t, { cfg: cfgOf('api-only') })
+  assert.strictEqual((await p.run(['--', '--settings'])).code, 0)
+  assert.strictEqual(p.starts().length, 1)
 })
 
 test('A4: SIGINT leaves the wrapper alive; a child killed by SIGTERM gives 143; SIGHUP is passed on', async (t) => {
@@ -324,10 +344,10 @@ test('A11-F1, A11: a custom claudeUrl, or main\'s config gone by the relaunch: t
 
 test('A11: a window on an account\'s config dir passes through byte-identical in every mode, its own --settings included', async (t) => {
   const own = ['--settings', '{"autoMemoryDirectory":"/Users/x/.claude/projects/-k/memory"}', '--model', 'opus', 'do X']
-  for (const mode of ['switch', 'off']) {
+  for (const mode of ['switch', 'api-only', 'rc-keep']) {
     const f = await fixture(t, { cfg: cfgOf(mode), plan: [{ handoff: { sid: SID } }] })
     // even with a model-relay.json of its own that would wrap it
-    fs.writeFileSync(path.join(f.acct, 'model-relay.json'), JSON.stringify(cfgOf('switch')))
+    fs.writeFileSync(path.join(f.acct, 'model-relay.json'), JSON.stringify(cfgOf('api-only')))
     const r = await f.run(own, { CLAUDE_CONFIG_DIR: f.acct, MODEL_RELAY_CONFIG_DIR: f.main, ...SHELL })
     assert.strictEqual(r.code, 0, `${mode}: ${r.stderr}`)
     const s = f.starts()

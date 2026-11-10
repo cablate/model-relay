@@ -615,6 +615,30 @@ test('the router never reads the keychain item of a Claude account it refuses', 
   assert.deepStrictEqual(r.calls().map((c) => c.args[2] + '/' + c.args[4]), ['relay-test/spare'], 'only the usable account was read')
 })
 
+test('a malformed keychain: reference, which may be a pasted secret, is never echoed', async (t) => {
+  const pasted = `keychain:${tokenLike('oat01', 'FAKESECRET')}`
+  const r = await relay(t, { providers: {
+    odd: { kind: 'anthropic', token: pasted, accountUuid: SPARE_UUID, ...IDS },
+    odd2: { baseUrl: 'http://127.0.0.1:9', token: pasted, model: 'odd-model' },
+  } })
+  const bodies = []
+  await ask(r.port)
+  for (let i = 0; i < 2; i++) bodies.push((await control(r.port, '/__health')).body)
+  const h = JSON.parse(bodies[0])
+  assert.deepStrictEqual(h.unresolved, [{ provider: 'odd', keychain: '(malformed)', malformed: true }, { provider: 'odd2', keychain: '(malformed)', malformed: true }])
+  const env = { ...process.env, CLAUDE_CONFIG_DIR: r.dir, RELAY_TEST_KEYCHAIN_LOG: r.log, RELAY_TEST_KEYCHAIN_ITEMS: JSON.stringify({ 'relay-test/spare': SECRET }) }
+  const run = (...args) => new Promise((resolve) => execFile(process.execPath, ['--require', r.stub, SETUP, ...args], { env }, (e, so, se) => resolve(`${so}${se}`)))
+  const doc = await run('doctor')
+  // (the CLI has no test-only claudeUrl override, so there the account is refused for its claudeUrl first)
+  assert.match(doc, /provider odd2 is skipped: its keychain: reference is malformed; write it as keychain:<service>\/<account>/)
+  const listed = await run('providers')
+  assert.match(listed, /✗ odd2: not usable \(token keychain:\(malformed\) did not resolve/, 'labelled as a malformed reference, not "inline"')
+  const outs = [doc, await run('doctor', '--json'), listed]
+  const logs = fs.readdirSync(r.dir).filter((f) => /^model-relay.*\.(log|json)$/.test(f) && f !== 'model-relay.json').map((f) => fs.readFileSync(path.join(r.dir, f), 'utf8'))
+  assert.ok(logs.length >= 2, 'the logs were written')
+  for (const text of [...bodies, ...outs, ...logs, ...r.calls().map((c) => JSON.stringify(c))]) assert.ok(!text.includes('FAKESECRET'), text.slice(0, 300))
+})
+
 test('A9: /__ping tests every provider but the account', async (t) => {
   const r = await relay(t)
   for (const target of [undefined, 'spare']) {
@@ -658,9 +682,257 @@ async function cli(t, { items = { 'relay-test/spare': SECRET }, cfg = {}, settin
 }
 const OPUS_ID = 'claude-opus-5-5'
 
+test('A7, A8, A9, A12: doctor, providers and set never read the secret, and check each item at most once', async (t) => {
+  const c = await cli(t)
+  const doc = await c.run('doctor')
+  assert.strictEqual(doc.code, 0, doc.out)
+  assert.match(doc.out, /Providers: spare -> anthropic-account, other -> other-model/)
+  assert.match(doc.out, /availableModels does not list other-model;/, 'availableModels is checked for the others only')
+  assert.deepStrictEqual([doc.reads, doc.checks], [0, 1])
+
+  const js = await c.run('doctor', '--json')
+  assert.strictEqual(js.code, 0, js.out)
+  const report = JSON.parse(js.stdout)
+  assert.strictEqual(report.providers.spare, 'anthropic-account')
+  assert.ok(!report.findings.some((f) => /anthropic-account|spare/.test(f.text)), JSON.stringify(report.findings))
+  assert.deepStrictEqual([js.reads, js.checks], [0, 1])
+
+  const ping = await c.run('doctor', '--ping')
+  assert.strictEqual(ping.code, 0, ping.out)
+  assert.match(ping.out, /- spare\s+\(anthropic-account\) -> not pinged \(anthropic account\)/)
+  assert.match(ping.out, /✓ other\s+\(other-model\) -> answers/)
+  assert.ok(c.o.seen.length >= 1)
+
+  const list = await c.run('providers')
+  assert.strictEqual(list.code, 0, list.out)
+  assert.match(list.out, /● spare\s+anthropic-account {2}https:\/\/api\.anthropic\.com/)
+  assert.match(list.out, /routes: \(a Claude account: only failover and \/provider\)\s+token: keychain:relay-test\/spare/)
+  assert.match(list.out, /spare[^\n]*\n[^\n]*hands over to: the chain \(spare → other\) on a usage limit only \(retry\.failover is off\)/)
+  assert.match(list.out, /other[^\n]*\n[^\n]*hands over to: off \(retry\.failover is off\)/, 'any other provider reads as before')
+  assert.deepStrictEqual([list.reads, list.checks], [0, 1])
+
+  const set = await c.run('set', 'failover.chain', 'other,spare')
+  assert.strictEqual(set.code, 0, set.out)
+  assert.deepStrictEqual([set.reads, set.checks], [0, 0])
+
+  const alias = await c.run('alias', 'haiku', 'spare')
+  assert.strictEqual(alias.code, 1)
+  assert.match(alias.out, /is a Claude account \(kind "anthropic"\): it has no model of its own/)
+  assert.strictEqual(alias.reads, 0)
+
+  for (const x of [doc, js, ping, list, set, alias]) assert.ok(!x.out.includes(SECRET))
+})
+
+test('A13 and a missing item: doctor says why the account is skipped', async (t) => {
+  const elsewhere = await cli(t, { cfg: { claudeUrl: 'https://proxy.example' } })
+  const a = await elsewhere.run('doctor')
+  assert.match(a.out, /provider spare is skipped: claudeUrl is https:\/\/proxy\.example, and kind "anthropic" sends its account token to https:\/\/api\.anthropic\.com only/)
+  assert.match(a.out, /Providers: other -> other-model/)
+  const refusedAlias = await elsewhere.run('alias', 'haiku', 'spare')
+  assert.strictEqual(refusedAlias.code, 1)
+  assert.match(refusedAlias.out, /is a Claude account \(kind "anthropic"\): it has no model of its own/)
+  assert.ok(!refusedAlias.out.includes('--model'), 'no advice to give it a model')
+  const listed = await elsewhere.run('providers')
+  assert.match(listed.out, /✗ spare: skipped: claudeUrl is https:\/\/proxy\.example/)
+  assert.ok(!/spare: not usable \(token/.test(listed.out), 'not blamed on its token')
+  const off = await cli(t, { cfg: { failover: { enabled: false, chain: ['spare', 'other'] } } })
+  assert.match((await off.run('providers')).out, /spare[^\n]*\n[^\n]*hands over to: off \(failover is off\)/)
+  const bare = await cli(t, { cfg: { providers: { spare: { kind: 'anthropic', token: 'keychain: ', accountUuid: SPARE_UUID, ...IDS }, other: { baseUrl: 'http://127.0.0.1:9', token: 'k', model: 'other-model' } } } })
+  const c = await bare.run('doctor')
+  assert.match(c.out, /provider spare is skipped: its token "keychain:" names no item/)
+  assert.strictEqual(c.checks, 0, 'nothing to look up')
+  const missing = await cli(t, { items: {} })
+  const b = await missing.run('doctor')
+  assert.match(b.out, /provider spare is skipped: keychain item relay-test\/spare \(service\/account\) is not in the login keychain/)
+  assert.deepStrictEqual([b.reads, b.checks], [0, 1])
+})
+
 // ---------- account-sync: the three values from that account's own .claude.json, and nothing else ----------
 
+test('A5: account-sync copies accountUuid, deviceId and email and prints none of them, nor any other key', async (t) => {
+  const s = scratch(t, 'relay-acct-sync-')
+  const home = path.join(s.dir, 'home')
+  const acctDir = path.join(home, '.claude-spare')
+  fs.mkdirSync(acctDir, { recursive: true })
+  const FAKE = tokenLike('oat01', 'FAKE-SECRET-5e6f')
+  const login = {
+    numStartups: 12,
+    userID: SPARE_DEV,
+    primaryApiKey: FAKE,
+    oauthAccount: { accountUuid: SPARE_UUID.toUpperCase(), emailAddress: IDS.email, organizationUuid: '99999999-8888-4777-8666-555555555555', displayName: 'Spare Cat' },
+    projects: { '/Users/x/secret-project': { allowedTools: [] } },
+  }
+  const writeLogin = (dir, j) => fs.writeFileSync(path.join(dir, '.claude.json'), typeof j === 'string' ? j : JSON.stringify(j))
+  writeLogin(acctDir, login)
+  writeLogin(s.dir, { userID: 'a'.repeat(64), oauthAccount: { accountUuid: MAIN_UUID, emailAddress: 'main@example.test' } })
+  const file = path.join(s.dir, 'model-relay.json')
+  const port = await freePort() // nothing listens there
+  const write = (extra = {}) => fs.writeFileSync(file, JSON.stringify({ format: 2, port, accounts: { spare: { configDir: '~/.claude-spare' } }, providers: { other: { baseUrl: 'http://127.0.0.1:9', token: 'k', model: 'other-model' } }, ...extra }))
+  write()
+  const env = { ...process.env, HOME: home, USERPROFILE: home, CLAUDE_CONFIG_DIR: s.dir, RELAY_TEST_KEYCHAIN_LOG: s.log, RELAY_TEST_KEYCHAIN_ITEMS: '{}' }
+  const run = (...args) => new Promise((resolve) => execFile(process.execPath, ['--require', s.stub, SETUP, ...args], { cwd: s.dir, env }, (e, so, se) => resolve({ code: e ? e.code : 0, out: `${so}${se}` })))
+  const values = [SPARE_UUID, SPARE_UUID.toUpperCase(), SPARE_DEV, IDS.email, FAKE, 'Spare Cat', '99999999-8888', 'secret-project', MAIN_UUID]
+  const otherKeys = ['numStartups', 'primaryApiKey', 'organizationUuid', 'displayName', 'projects']
+  const clean = (x, why) => {
+    for (const v of [...values, ...otherKeys]) assert.ok(!x.out.includes(v), `${why}: printed ${v}`)
+  }
+
+  const ok = await run('account-sync', 'spare')
+  assert.strictEqual(ok.code, 0, ok.out)
+  assert.match(ok.out, /providers\.spare: accountUuid, deviceId and email written from /)
+  clean(ok, 'success')
+  const spare = JSON.parse(fs.readFileSync(file, 'utf8')).providers.spare
+  assert.deepStrictEqual(spare, { kind: 'anthropic', accountUuid: SPARE_UUID, deviceId: SPARE_DEV, email: IDS.email }, 'the three values and nothing else from the file')
+  // a second run keeps what the entry already had (its token)
+  const cfg = JSON.parse(fs.readFileSync(file, 'utf8'))
+  cfg.providers.spare.token = 'keychain:relay-test/spare'
+  fs.writeFileSync(file, JSON.stringify(cfg))
+  assert.strictEqual((await run('account-sync', 'spare')).code, 0)
+  assert.strictEqual(JSON.parse(fs.readFileSync(file, 'utf8')).providers.spare.token, 'keychain:relay-test/spare')
+
+  // refused: the router's own config dir (by any spelling), the same account as yours, a file that is not JSON or lacks a value
+  const link = path.join(s.dir, 'same-dir-link')
+  fs.symlinkSync(s.dir, link)
+  for (const dir of [s.dir, link]) {
+    write({ accounts: { spare: { configDir: dir } } })
+    const x = await run('account-sync', 'spare')
+    assert.strictEqual(x.code, 1, x.out)
+    assert.match(x.out, /this router's own config directory/)
+  }
+  write()
+  writeLogin(s.dir, { oauthAccount: { accountUuid: SPARE_UUID } })
+  const same = await run('account-sync', 'spare')
+  assert.strictEqual(same.code, 1)
+  assert.match(same.out, /logged in to your own account/)
+  clean(same, 'same account')
+  writeLogin(s.dir, { userID: SPARE_DEV, oauthAccount: { accountUuid: MAIN_UUID } })
+  const sameDevice = await run('account-sync', 'spare')
+  assert.strictEqual(sameDevice.code, 1)
+  assert.match(sameDevice.out, /has the same userID as your own login/)
+  clean(sameDevice, 'same userID')
+  writeLogin(s.dir, { oauthAccount: { accountUuid: MAIN_UUID } })
+  writeLogin(acctDir, `{"primaryApiKey": "${FAKE}", oops`)
+  const broken = await run('account-sync', 'spare')
+  assert.strictEqual(broken.code, 1)
+  assert.match(broken.out, /\.claude-spare\/\.claude\.json could not be read as a JSON object\. Nothing was changed\./)
+  clean(broken, 'parse error')
+  writeLogin(acctDir, { ...login, userID: 'x' })
+  const lacking = await run('account-sync', 'spare')
+  assert.strictEqual(lacking.code, 1)
+  assert.match(lacking.out, /has no usable userID \(64 hex digits\)/)
+  clean(lacking, 'a missing value')
+  writeLogin(acctDir, login)
+  write({ providers: { spare: { baseUrl: 'http://127.0.0.1:9', token: 'k', model: 'm' } } })
+  assert.match((await run('account-sync', 'spare')).out, /providers\.spare is not a Claude account/)
+  write({ accounts: { constructor: {} } })
+  assert.match((await run('account-sync', 'constructor')).out, /accounts\.constructor\.configDir is not set/)
+  // accounts.<name> is found as providers.<name> is: trimmed and in any case
+  write({ accounts: { ' Spare ': { configDir: '~/.claude-spare' } } })
+  const cased = await run('account-sync', 'spare')
+  assert.strictEqual(cased.code, 0, cased.out)
+  assert.strictEqual(JSON.parse(fs.readFileSync(file, 'utf8')).providers.spare.deviceId, SPARE_DEV)
+  assert.deepStrictEqual(s.calls(), [], 'no keychain access at all')
+})
+
+test('setup refuses a provider named switch', async (t) => {
+  const c = await cli(t)
+  for (const args of [['add', 'switch', '--model', 'm', '--token', 'k', '--url', 'http://127.0.0.1:9'], ['account-sync', 'switch']]) {
+    const x = await c.run(...args)
+    assert.strictEqual(x.code, 2, x.out)
+    assert.match(x.out, /"switch" is the name of a \/provider command/)
+  }
+  assert.ok(!('switch' in JSON.parse(fs.readFileSync(c.file, 'utf8')).providers))
+})
+
+test('A1: the CLI in off reads no keychain item, and says why the account is not used; doctor flags a mode it does not know', async (t) => {
+  for (const mode of ['off', 'rc_keep']) {
+    const c = await cli(t, { cfg: { accountFallback: { mode } } })
+    const list = await c.run('providers')
+    assert.match(list.out, new RegExp(`- spare: a Claude account, not used: accountFallback.mode is "${mode}" \\(only rc-keep and api-only send with its token\\)`))
+    const doc = await c.run('doctor')
+    assert.match(doc.out, /Providers: other -> other-model\n/)
+    assert.strictEqual(/accountFallback\.mode is not one of off, switch, rc-keep, api-only/.test(doc.out), mode === 'rc_keep', doc.out)
+    assert.match(doc.out, new RegExp(`failover names spare, a Claude account that accountFallback.mode "${mode}" leaves unused`))
+    assert.ok(!/failover names[^\n]*spare[^\n]*no such usable provider/.test(doc.out), 'not reported as an unknown name')
+    for (const x of [list, doc]) assert.deepStrictEqual([x.reads, x.checks], [0, 0], 'the keychain was not asked')
+  }
+})
+
 // ---------- handoff: what /provider switch leaves the launcher wrapper ----------
+
+test('A3: handoff writes {sid} 0600 in a 0700 folder, exclusively and atomically; bad ids and a symlinked folder are refused', async (t) => {
+  const s = scratch(t, 'relay-handoff-')
+  // the config dir sits one level down, so a path that climbs out of it still lands inside the scratch dir
+  const cfgDir = path.join(s.dir, 'cfg')
+  fs.mkdirSync(cfgDir)
+  const env = { ...process.env, CLAUDE_CONFIG_DIR: cfgDir, RELAY_TEST_KEYCHAIN_LOG: s.log, RELAY_TEST_KEYCHAIN_ITEMS: '{}' }
+  const run = (...args) => new Promise((resolve) => execFile(process.execPath, ['--require', s.stub, SETUP, ...args], { cwd: s.dir, env }, (e, so, se) => resolve({ code: e ? e.code : 0, out: `${so}${se}` })))
+  const ID = '0f1e2d3c-4b5a-4968-8776-5a4b3c2d1e0f'
+  const SID = '22222222-3333-4444-8555-666666666666'
+  const dir = path.join(cfgDir, 'model-relay-handoff')
+  const file = path.join(dir, `${ID}.json`)
+  fs.mkdirSync(dir, { mode: 0o755 }) // a folder already there, too open: tightened
+  fs.chmodSync(dir, 0o755)
+  const ok = await run('handoff', ID.toUpperCase(), SID)
+  assert.strictEqual(ok.code, 0, ok.out)
+  assert.deepStrictEqual(JSON.parse(fs.readFileSync(file, 'utf8')), { sid: SID })
+  if (process.platform !== 'win32') {
+    assert.strictEqual(fs.statSync(dir).mode & 0o777, 0o700)
+    assert.strictEqual(fs.statSync(file).mode & 0o777, 0o600)
+  }
+  // A second handoff replaces the file whole (a new inode), never writing into the old one, and leaves no temp file
+  const ino = fs.statSync(file).ino
+  const SID2 = '33333333-4444-4555-8666-777777777777'
+  assert.strictEqual((await run('handoff', ID, SID2)).code, 0)
+  assert.deepStrictEqual(JSON.parse(fs.readFileSync(file, 'utf8')), { sid: SID2 })
+  assert.notStrictEqual(fs.statSync(file).ino, ino)
+  assert.deepStrictEqual(fs.readdirSync(dir), [`${ID}.json`])
+  // a symlink where the file goes is replaced, not followed
+  const outside = path.join(s.dir, 'outside.txt')
+  fs.writeFileSync(outside, 'keep')
+  fs.rmSync(file)
+  fs.symlinkSync(outside, file)
+  assert.strictEqual((await run('handoff', ID, SID)).code, 0)
+  assert.strictEqual(fs.readFileSync(outside, 'utf8'), 'keep')
+  assert.ok(!fs.lstatSync(file).isSymbolicLink())
+  // ids that are no UUID never name a path
+  for (const [id, sid] of [['../../x', SID], [ID, '--dangerously-skip-permissions'], [ID, '../x'], ['', SID]]) {
+    const x = await run('handoff', id, sid)
+    assert.strictEqual(x.code, 2, `${id} ${sid}`)
+  }
+  assert.ok(!fs.existsSync(path.join(s.dir, 'x.json')) && !fs.existsSync(path.join(cfgDir, 'x.json')), 'nothing written outside the folder')
+  // a folder that is a symlink is refused, and nothing is written through it
+  const s2 = scratch(t, 'relay-handoff-link-')
+  const elsewhere = path.join(s2.dir, 'elsewhere')
+  fs.mkdirSync(elsewhere)
+  fs.rmSync(dir, { recursive: true })
+  fs.symlinkSync(elsewhere, dir)
+  const linked = await run('handoff', ID, SID)
+  assert.strictEqual(linked.code, 1, linked.out)
+  assert.match(linked.out, /is not a folder \(a symlink is refused\)\. Nothing was written\./)
+  assert.deepStrictEqual(fs.readdirSync(elsewhere), [])
+  assert.deepStrictEqual(s.calls(), [], 'no keychain access')
+})
+
+test('account-sync and add refuse the name __proto__ instead of reporting a write that never lands', async (t) => {
+  const c = await cli(t)
+  // a login that account-sync would accept, so only the name stands in the way
+  const base = path.dirname(c.file)
+  const acct = path.join(base, 'acct')
+  fs.mkdirSync(acct)
+  fs.writeFileSync(path.join(acct, '.claude.json'), JSON.stringify({ userID: SPARE_DEV, oauthAccount: { accountUuid: SPARE_UUID, emailAddress: IDS.email } }))
+  fs.writeFileSync(path.join(base, '.claude.json'), JSON.stringify({ userID: 'a'.repeat(64), oauthAccount: { accountUuid: MAIN_UUID } }))
+  const cfg = JSON.parse(fs.readFileSync(c.file, 'utf8'))
+  fs.writeFileSync(c.file, JSON.stringify(cfg).replace('"providers":{', `"accounts":{"__proto__":{"configDir":${JSON.stringify(acct)}}},"providers":{`))
+  const before = fs.readFileSync(c.file, 'utf8')
+  for (const args of [['account-sync', '__proto__'], ['add', '__proto__', '--model', 'm', '--token', 'k', '--url', 'http://127.0.0.1:9']]) {
+    const x = await c.run(...args)
+    assert.strictEqual(x.code, 2, x.out)
+    assert.match(x.out, /"__proto__" cannot be a name in model-relay\.json/)
+    assert.ok(!x.out.includes('✓'))
+  }
+  assert.strictEqual(fs.readFileSync(c.file, 'utf8'), before, 'the file is untouched')
+})
 
 test('A3: /__health reports when Claude last answered its usage limit, with an empty chain too; failover state stays as it was', async (t) => {
   let answer = [429, { 'retry-after': '1' }, '{"type":"error","error":{"type":"rate_limit_error","message":"slow down"}}']
@@ -896,6 +1168,43 @@ test('fallback 8: the protected routing functions are byte-identical to 96fa186'
   assert.deepStrictEqual(got, want)
 })
 
+test('fallback 9: a main window never reaches spare: not through the chain, a pin, /__health or a stale pin; doctor names it', async (t) => {
+  const r = await chained(t, { chain: ['spare', 'other'] })
+  await r.register(W1)
+  await r.ready(W1)
+  r.state.limited = true
+  const x = await ask(r.port, { sid: 'main-1' })
+  assert.strictEqual(JSON.parse(x.body).from, 'other', 'the chain skips spare')
+  assert.strictEqual(byToken(r.a.seen, SECRET).length, 0)
+  const pin = await control(r.port, '/__session', { sid: 'main-1', on: 'spare' })
+  assert.strictEqual(pin.status, 400)
+  assert.match(JSON.parse(pin.body).error.message, /provider "spare" is the fallback of another account's windows; this session cannot use it \(configured: other\)/)
+  const unknown = await control(r.port, '/__session', { sid: 'main-1', on: 'nobody' })
+  assert.match(JSON.parse(unknown.body).error.message, /\(configured: other\)$/, 'spare is not offered')
+  const h = await r.health('main-1')
+  assert.deepStrictEqual([h.providers, h.kinds, h.failoverChain, h.failoverProvider], [{ other: 'other-model' }, {}, ['other'], 'other'])
+  assert.ok(!('spare' in h.stats))
+  // a pin made in rc-keep, before the mode became switch, does not take a main window there
+  const rc = await chained(t, { mode: 'rc-keep' })
+  assert.strictEqual((await control(rc.port, '/__session', { sid: 'main-2', on: 'spare' })).status, 200)
+  assert.strictEqual(JSON.parse((await ask(rc.port, { sid: 'main-2' })).body).from, 'spare', 'rc-keep: the pin holds')
+  rc.setCfg({ accountFallback: { mode: 'switch', account: 'spare' } })
+  const after = await ask(rc.port, { sid: 'main-2' })
+  assert.strictEqual(JSON.parse(after.body).from, 'claude')
+  assert.strictEqual(rc.a.seen.at(-1).headers.authorization, `Bearer ${MAIN}`)
+  assert.strictEqual(rc.a.seen.at(-1).body.toString(), bodyFor('main-2'), 'as sent, to Claude')
+  assert.strictEqual(byToken(rc.a.seen, SECRET).length, 1, 'only the request made in rc-keep')
+  const h2 = await rc.health('main-2')
+  assert.deepStrictEqual([h2.session, h2.providers.spare], ['claude', undefined])
+  // doctor (claudeUrl is Anthropic there): the chain names an account that only team-1's windows use
+  const c = await cli(t, { cfg: { accountFallback: { mode: 'switch', account: 'spare' }, accounts: { 'team-1': { configDir: '/nowhere-1', fallback: 'spare' }, spare: { configDir: '/nowhere-2' } } } })
+  const doc = await c.run('doctor')
+  assert.match(doc.out, /failover names spare, the fallback account of team-1's windows \(accounts\.<name>\.fallback\); your failover skips it/)
+  assert.match(doc.out, /Failover: other /, 'the chain doctor shows has no spare')
+  assert.ok(!doc.out.includes(SECRET))
+  assert.deepStrictEqual([doc.reads, doc.checks], [0, 1], 'the item is only checked for, never read')
+})
+
 test('fallback 9b: a main window whose provider lists spare as its own fallback never reaches it', async (t) => {
   const third = { baseUrl: 'http://127.0.0.1:1', token: 'THIRD-KEY', model: 'third-model' }
   const run = async (fallback) => {
@@ -1086,6 +1395,34 @@ test('fallback F5 and F6: no model name, "[1m]" included, picks an account; fall
   assert.deepStrictEqual(L.unresolvedEnv(bad, {}, () => { asked++; return null }, true), [])
   assert.strictEqual(asked, 0)
   assert.match(L.fallbackProblems(bad).find((p) => p.account === 'team-1').why, /^accounts\.team-1\.fallback names spare, whose providers entry is skipped: accountUuid must be/)
+})
+
+test('fallback 9 (setup CLI): providers and doctor read accounts.<name>.fallback as the router does, and print names only', async (t) => {
+  // team-1's and spare's logins, in one organization, so the clean case below is clean for the org rule too
+  const logins = scratch(t, 'relay-acct-logins-').dir
+  for (const [d, uuid] of [['team-1', MAIN_UUID], ['spare', SPARE_UUID]]) {
+    fs.mkdirSync(path.join(logins, d))
+    fs.writeFileSync(path.join(logins, d, '.claude.json'), JSON.stringify({ oauthAccount: { accountUuid: uuid, organizationUuid: ORG } }))
+  }
+  const accounts = (fallback) => ({ accountFallback: { mode: 'switch', account: 'spare' }, accounts: { 'team-1': { configDir: path.join(logins, 'team-1'), fallback }, spare: { configDir: path.join(logins, 'spare') } }, failover: { enabled: true, chain: ['other'] } })
+  const c = await cli(t, { cfg: accounts('spare') })
+  const list = await c.run('providers')
+  assert.match(list.out, /● spare\s+anthropic-account/)
+  assert.match(list.out, /routes: \(a Claude account: only the windows of team-1, at its usage limit or by \/provider\)\s+token: keychain:relay-test\/spare[^\n]*hands over to: nobody \(it answers for team-1 or returns its error\)/)
+  assert.deepStrictEqual([list.reads, list.checks], [0, 1])
+  const clean = await c.run('doctor')
+  assert.ok(!/accounts\.team-1\.fallback|fallback account of/.test(clean.out), clean.out)
+  // a fallback that names nothing usable: doctor says why, and the router's keychain item is never looked up
+  for (const [fallback, why] of [['ghost', /accounts\.team-1\.fallback names no account in accounts \(with a configDir\); that account's windows get its usage-limit 429 as it comes/], ['team-1', /accounts\.team-1\.fallback names the account itself/], [tokenLike('oat01', 'PASTED'), /accounts\.team-1\.fallback names no account in accounts/], ['../x', /accounts\.team-1\.fallback is not the name of an account/]]) {
+    const x = await cli(t, { cfg: accounts(fallback) })
+    const doc = await x.run('doctor')
+    assert.match(doc.out, why)
+    assert.ok(!doc.out.toLowerCase().includes('pasted') && !doc.out.includes('../x'), 'a value that names no account is never echoed')
+    assert.deepStrictEqual([doc.reads, doc.checks], [0, 0], `${fallback}: spare is no fallback, so its item is not looked up`)
+  }
+  // the item missing: named like any provider's
+  const missing = await cli(t, { cfg: accounts('spare'), items: {} })
+  assert.match((await missing.run('doctor')).out, /provider spare is skipped: keychain item relay-test\/spare \(service\/account\) is not in the login keychain/)
 })
 
 // ---------- RELAY-ACCT-LIST: accounts.<name>.fallback as an ordered list, the relay's own account, the org rule ----------
@@ -1487,6 +1824,138 @@ test('list 7c: the other-login rule holds in rc-keep and api-only (an unregister
   }
 })
 
+test('list 8: the default dir\'s login is <home>/.claude.json: the router finds the relay\'s own account there, and account-sync works with CLAUDE_CONFIG_DIR set to the relay dir', async (t) => {
+  const r = await listed(t, { home: true, accounts: selfAccounts(['team-2']), env: { CLAUDE_CONFIG_DIR: undefined } })
+  assert.ok(fs.existsSync(path.join(r.home, '.claude.json')) && !fs.existsSync(path.join(r.dir, '.claude.json')), 'only <home>/.claude.json')
+  r.limited.add('main')
+  assert.strictEqual(from(await ask(r.port, { sid: M1, body: chainBody(M1) })), 'team-2')
+  // account-sync from the relay dir: your own login is <home>/.claude.json, not <home>/.claude/.claude.json
+  const c = await homeCli(t, { accountFallback: { mode: 'switch' }, accounts: { 'team-2': { configDir: '~/.claude-team-2' } }, providers: {} })
+  c.login(c.home, MAIN_UUID, ORG, { userID: MAIN_DEV })
+  c.login(path.join(c.home, '.claude-team-2'), ACCTS['team-2'].uuid, ORG, { userID: ACCTS['team-2'].dev })
+  // a stale copy inside the relay dir naming team-2 would make account-sync refuse "your own account" if it were read
+  c.login(c.relayDir, ACCTS['team-2'].uuid, ORG, { userID: 'f'.repeat(64) })
+  const x = await c.run('account-sync', 'team-2')
+  assert.strictEqual(x.code, 0, x.out)
+  assert.strictEqual(JSON.parse(fs.readFileSync(c.file, 'utf8')).providers['team-2'].accountUuid, ACCTS['team-2'].uuid)
+  assert.strictEqual(x.out.includes(ACCTS['team-2'].uuid), false)
+})
+
+test('list 9: doctor lists each fallback entry with why, names each login file read, and errors on two own accounts or one login shared; /__account refuses the relay\'s own account; no uuid or email printed', async (t) => {
+  const items = { 'relay-test/team-2': 'x', 'relay-test/team-3': 'x' }
+  const providers = { 'team-2': acctEntry('team-2'), 'team-3': acctEntry('team-3'), 'other-org': acctEntry('other-org') }
+  const c = await homeCli(t, { accountFallback: { mode: 'switch' }, accounts: { own: { configDir: '~/.claude', fallback: ['team-2', 'team-3', 'other-org', tokenLike('oat01', 'PASTED'), 'own', 'team-2'] }, 'team-1': { configDir: '~/.claude-team-1', fallback: ['own'] }, 'team-2': { configDir: '~/.claude-team-2' }, 'team-3': { configDir: '~/.claude-team-3' }, 'other-org': { configDir: '~/.claude-other-org' } }, providers }, { items })
+  c.login(c.home, MAIN_UUID, ORG)
+  c.login(c.relayDir, ACCTS['other-org'].uuid, ORG) // a stale copy inside the default dir, another account
+  c.login(path.join(c.home, '.claude-team-1'), ACCTS['team-1'].uuid, ORG)
+  c.login(path.join(c.home, '.claude-team-2'), ACCTS['team-2'].uuid, ORG)
+  c.login(path.join(c.home, '.claude-team-3'), ACCTS['team-3'].uuid, ORG2)
+  fs.writeFileSync(path.join(c.home, '.claude-team-2', '.config.json'), '{}')
+  const doc = await c.run('doctor')
+  assert.strictEqual(doc.code, 0, doc.out)
+  const lines = doc.out.split('\n')
+  const line = (re) => lines.find((l) => re.test(l)) || ''
+  assert.strictEqual(line(/Fallback of own/), '  Fallback of own (the relay\'s own account): ✓ team-2 (same organization), ✗ team-3 (the two logins are not in one organization (or one cannot be read), and the entry has no allowCrossOrg: true), ✗ other-org (its token does not resolve, see above), ✗ (an entry that names no account) (names no account in accounts (with a configDir)), ✗ own (names the account itself), ✗ team-2 (names team-2 twice; the first one counts)')
+  assert.strictEqual(line(/Fallback of team-1/), '  Fallback of team-1: ✗ own (names own, the relay\'s own account, which is never a fallback)')
+  assert.strictEqual(line(/Login of own/), `  Login of own (the relay's own account): ${path.join(c.home, '.claude.json')} (an accountUuid found)`)
+  assert.strictEqual(line(/Login of other-org/), `  Login of other-org: ${path.join(c.home, '.claude-other-org', '.claude.json')} (not readable)`)
+  assert.match(doc.out, /⚠ own's fallback team-3 is skipped: the two logins are not in one organization/)
+  assert.ok(doc.out.includes(`⚠ ${path.join(c.home, '.claude', '.claude.json')} names another account than ${path.join(c.home, '.claude.json')}`), doc.out)
+  assert.ok(doc.out.includes(`⚠ ${path.join(c.home, '.claude-team-2', '.config.json')} exists; the relay reads ${path.join(c.home, '.claude-team-2', '.claude.json')} only for team-2's login`), doc.out)
+  leakFree(doc.out, 'doctor')
+  assert.ok(!doc.out.toLowerCase().includes('pasted') && !doc.out.includes('who@example'), 'no value that names no account, no email')
+  const js = await c.run('doctor', '--json')
+  leakFree(js.stdout, 'doctor --json')
+  assert.ok(JSON.parse(js.stdout).findings.some((f) => f.id === 'account-fallback-skipped' && f.provider === 'team-3'))
+  // two accounts on the relay dir (by two spellings), and two accounts sharing one login (a symlinked dir, one uuid)
+  fs.symlinkSync(path.join(c.home, '.claude-team-2'), path.join(c.home, 'team-2-link'))
+  c.login(path.join(c.home, '.claude-copy'), ACCTS['team-3'].uuid, ORG2)
+  fs.writeFileSync(c.file, JSON.stringify({ format: 2, port: 9, accountFallback: { mode: 'switch' }, accounts: { a: { configDir: '~/.claude' }, b: { configDir: c.relayDir }, 'team-2': { configDir: '~/.claude-team-2' }, link: { configDir: '~/team-2-link' }, 'team-3': { configDir: '~/.claude-team-3' }, copy: { configDir: '~/.claude-copy' } }, providers }))
+  const bad = await c.run('doctor')
+  assert.strictEqual(bad.code, 1, bad.out)
+  assert.match(bad.out, /✗ accounts a, b all have this relay's own config directory as configDir; at most one may \(the relay's own account\), so none counts/)
+  assert.match(bad.out, /✗ accounts team-2, link read one login file; each account needs a login of its own/)
+  assert.match(bad.out, /✗ accounts team-3, copy are logged in to one account; each needs a login of its own/)
+  leakFree(bad.out, 'doctor errors')
+  // the router refuses to register a window as the relay's own account
+  const r = await listed(t, { home: true, accounts: selfAccounts(['team-2']) })
+  const reg = await control(r.port, '/__account', { sid: W1, account: 'own' })
+  assert.strictEqual(reg.status, 400)
+  assert.match(JSON.parse(reg.body).error.message, /that account is the relay's own; its windows are your own windows and are not registered/)
+})
+
+test('list 10: account-add makes a 0700 dir with exactly the links the relay dir has, writes the entry with a backup, prints the manual steps, and refuses everything else untouched', async (t) => {
+  const c = await homeCli(t, { accountFallback: { mode: 'switch' }, accounts: { 'team-2': { configDir: '~/.claude-team-2' } }, providers: {} })
+  for (const f of ['CLAUDE.md', 'history.jsonl', '.config.json', 'statusline.sh']) fs.writeFileSync(path.join(c.relayDir, f), 'x')
+  for (const d of ['agents', 'projects', 'ide', 'backups', 'shell-snapshots', 'session-env']) fs.mkdirSync(path.join(c.relayDir, d))
+  const tree = () => {
+    const out = []
+    const walk = (d) => {
+      for (const e of fs.readdirSync(d).sort()) {
+        const p = path.join(d, e)
+        const st = fs.lstatSync(p)
+        out.push(`${path.relative(c.home, p)} ${st.isSymbolicLink() ? `-> ${fs.readlinkSync(p)}` : (st.mode & 0o777).toString(8)}${st.isFile() ? ` ${fs.readFileSync(p, 'utf8')}` : ''}`)
+        if (st.isDirectory() && !st.isSymbolicLink()) walk(p)
+      }
+    }
+    walk(c.home)
+    return out
+  }
+  const cfgText = () => fs.readFileSync(c.file, 'utf8')
+  const refused = async (args, code, re) => {
+    const before = tree()
+    const x = await c.run('account-add', ...args)
+    assert.strictEqual(x.code, code, `${args.join(' ')}: ${x.out}`)
+    assert.match(x.out, re, args.join(' '))
+    assert.match(x.out, /Nothing was changed\./)
+    assert.deepStrictEqual(tree(), before, `${args.join(' ')}: nothing touched`)
+  }
+  for (const n of ['.config.json', '../x', 'ide', 'history.jsonl', 'shell-snapshots', 'session-env', 'backups', '.claude.json', '.credentials.json', 'model-relay.json', 'a/b', '']) {
+    await refused(['team-3', '--link', n], 2, /--link .* is refused: only a plain name in the relay dir/)
+  }
+  await refused(['team-3', '--link', 'nothing-here'], 2, /the relay dir .* has no such entry/)
+  await refused(['team-2'], 1, /accounts\.team-2 already exists/)
+  await refused(['Team-2'], 1, /accounts\.team-2 already exists/)
+  for (const n of ['claude', 'x/y', '-x']) await refused([n], 2, /Usage: node tools\/setup\.mjs account-add/)
+  await refused(['__proto__'], 2, /"__proto__" cannot be a name/)
+  await refused(['team-3', '--dir', 'relative/dir'], 2, /--dir must be an absolute path or start with ~\//)
+  fs.mkdirSync(path.join(c.home, 'real-empty'))
+  fs.symlinkSync(path.join(c.home, 'real-empty'), path.join(c.home, 'linked'))
+  await refused(['team-3', '--dir', '~/linked'], 1, /is a symlink/)
+  fs.mkdirSync(path.join(c.home, 'full'))
+  fs.writeFileSync(path.join(c.home, 'full', 'f'), 'x')
+  await refused(['team-3', '--dir', path.join(c.home, 'full')], 1, /exists and is not empty/)
+  await refused(['team-3', '--dir', '~/.claude/inside'], 1, /is, holds or lies inside the relay dir/)
+  await refused(['team-3', '--dir', '~/'], 1, /is, holds or lies inside the relay dir/)
+  await refused(['team-3', '--dir', '~/.claude-team-2/sub'], 1, /is, holds or lies inside the dir of accounts\.team-2/)
+  await refused(['team-3', '--dir', '~/no-parent/dir'], 1, /does not exist/)
+  // the default dir: the four default entries the relay dir has, plus --link statusline.sh; nothing else changes
+  const before = tree()
+  const ok = await c.run('account-add', 'team-3', '--link', 'statusline.sh')
+  assert.strictEqual(ok.code, 0, ok.out)
+  const dir = path.join(c.home, '.claude-team-3')
+  assert.strictEqual(fs.statSync(dir).mode & 0o777, 0o700)
+  assert.deepStrictEqual(fs.readdirSync(dir).sort(), ['CLAUDE.md', 'agents', 'projects', 'settings.json', 'statusline.sh'])
+  for (const n of fs.readdirSync(dir)) assert.strictEqual(fs.readlinkSync(path.join(dir, n)), path.join(c.relayDir, n))
+  const changed = tree().filter((l) => !before.includes(l)).filter((l) => !l.startsWith('.claude-team-3') && !l.startsWith('.claude/model-relay.json '))
+  assert.deepStrictEqual(changed.map((l) => l.split(' ')[0]), ['.claude/model-relay.json.model-relay-backup'], 'only the dir, the config and its backup')
+  assert.deepStrictEqual(JSON.parse(fs.readFileSync(`${c.file}.model-relay-backup`, 'utf8')).accounts, { 'team-2': { configDir: '~/.claude-team-2' } })
+  assert.deepStrictEqual(JSON.parse(cfgText()).accounts, { 'team-2': { configDir: '~/.claude-team-2' }, 'team-3': { configDir: '~/.claude-team-3' } })
+  assert.match(ok.out, /4\. step 5 adds to your default keychain, and the router reads only login\.keychain-db: `security default-keychain` must print it \(if it does not, run `security default-keychain -s ~\/Library\/Keychains\/login\.keychain-db` first\)/)
+  assert.match(ok.out, /security add-generic-password -s model-relay-team-3 -a team-3 -w {3}\(-w last, so it asks for the token/)
+  assert.match(ok.out, /claude setup-token, then clear the terminal scrollback: it printed the token/)
+  // B1: the token step is the account-token command itself
+  assert.match(ok.out, /account-sync team-3, then node \S+ account-token team-3 keychain:model-relay-team-3\/team-3/)
+  assert.deepStrictEqual([ok.reads, ok.checks], [0, 0], 'the keychain is never touched')
+  // a reused empty dir ends 0700
+  fs.mkdirSync(path.join(c.home, 'empty'))
+  fs.chmodSync(path.join(c.home, 'empty'), 0o755)
+  const reuse = await c.run('account-add', 'team-4', '--dir', '~/empty')
+  assert.strictEqual(reuse.code, 0, reuse.out)
+  assert.strictEqual(fs.statSync(path.join(c.home, 'empty')).mode & 0o777, 0o700)
+  assert.strictEqual(JSON.parse(cfgText()).accounts['team-4'].configDir, '~/empty')
+})
+
 test('list 12: the protected routing functions are byte-identical to 96fa186 (decide and onLimited included)', () => {
   const want = {
     decide: '5ac91de82dfca603b1a641fa39c8a8f4d293e148aed52fda29bbd120a646026f',
@@ -1568,6 +2037,41 @@ test('list 14: the relay\'s own account limited, its serving fallback answering 
   assert.strictEqual(from(await ask(r.port, { sid: M1, body: chainBody(M1) })), 'other', 'the cooldown: decide, as before')
 })
 
+test('list 15: the relay\'s own uuid comes from <home>/.claude.json whatever CLAUDE_CONFIG_DIR the router or account-sync has; a stale <home>/.claude/.claude.json is ignored', async (t) => {
+  const run = async (opts) => {
+    const r = await listed(t, { home: true, accounts: selfAccounts(['team-2']), ...opts })
+    // a stale login inside the relay dir, naming another account
+    fs.writeFileSync(path.join(r.dir, '.claude.json'), JSON.stringify({ oauthAccount: { accountUuid: SPARE_UUID, organizationUuid: ORG } }))
+    r.limited.add('main')
+    return from(await ask(r.port, { sid: M1, body: chainBody(M1) }))
+  }
+  assert.strictEqual(await run({ dirArg: false }), 'team-2', 'started with CLAUDE_CONFIG_DIR = the relay dir and no argument')
+  assert.strictEqual(await run({ env: { CLAUDE_CONFIG_DIR: path.join(os.tmpdir(), 'relay-list-an-account-dir') } }), 'team-2', 'CLAUDE_CONFIG_DIR = an account dir')
+  // account-sync with CLAUDE_CONFIG_DIR = the relay dir compares with <home>/.claude.json: a stale inner copy with team-2's
+  // userID would make it refuse ("the same userID as your own login") if it were read
+  const c = await homeCli(t, { accountFallback: { mode: 'switch' }, accounts: { 'team-2': { configDir: '~/.claude-team-2' } }, providers: {} })
+  c.login(c.home, MAIN_UUID, ORG, { userID: MAIN_DEV })
+  c.login(path.join(c.home, '.claude-team-2'), ACCTS['team-2'].uuid, ORG, { userID: ACCTS['team-2'].dev })
+  c.login(c.relayDir, MAIN_UUID, ORG, { userID: ACCTS['team-2'].dev })
+  const x = await c.run('account-sync', 'team-2')
+  assert.strictEqual(x.code, 0, x.out)
+  assert.ok(x.out.includes(`written from ${path.join(c.home, '.claude-team-2', '.claude.json')}`), x.out)
+})
+
+test('list 16: account-add and doctor name, by key only, settings.json keys that would send with something other than the login', async (t) => {
+  const settings = { env: { ANTHROPIC_API_KEY: tokenLike('api03', 'FAKE-VALUE'), CLAUDE_CODE_OAUTH_TOKEN: tokenLike('oat01', 'FAKE-VALUE'), OTHER: 'x' }, apiKeyHelper: '/usr/local/bin/fake-helper' }
+  const c = await homeCli(t, { accountFallback: { mode: 'switch' }, accounts: { 'team-2': { configDir: '~/.claude-team-2' } }, providers: {} }, { settings })
+  const want = `${path.join(c.relayDir, 'settings.json')} sets env.ANTHROPIC_API_KEY, env.CLAUDE_CODE_OAUTH_TOKEN, apiKeyHelper: an account dir that links this settings.json sends with that instead of its own login`
+  const add = await c.run('account-add', 'team-3')
+  assert.strictEqual(add.code, 0, add.out)
+  const doc = await c.run('doctor')
+  for (const x of [add, doc]) {
+    assert.ok(x.out.includes(`⚠ ${want}`), x.out)
+    assert.ok(!x.out.includes('FAKE-VALUE') && !x.out.includes('fake-helper'), 'no value printed')
+  }
+  assert.ok(!doc.out.includes('ANTHROPIC_AUTH_TOKEN') && !doc.out.includes('env.OTHER'), 'only the keys set, and only those three')
+})
+
 test('list 17: a .claude.json that is a directory or a FIFO is never read: it counts as unreadable, with no fallback and no hang', async (t) => {
   const s = scratch(t, 'relay-acct-fifo-')
   const fifo = path.join(s.dir, 'fifo.json')
@@ -1595,6 +2099,46 @@ test('list 17: a .claude.json that is a directory or a FIFO is never read: it co
   const y = await ask(r.port, { sid: W1, body: chainBody(W1) })
   assert.strictEqual(y.status, 429)
   assert.deepStrictEqual(r.seen(), ['main', 'main', 'main'])
+})
+
+test('list 18: the plan\'s config: providers and doctor see other-org as team-3\'s fallback only, and the router reads its item and reaches it as team-3\'s second entry; an unreadable org shows doctor\'s org line', async (t) => {
+  const example = {
+    own: { configDir: '~/.claude' },
+    'team-1': { configDir: '~/.claude-team-1', fallback: ['team-2', 'team-3'] },
+    'team-2': { configDir: '~/.claude-team-2', fallback: ['team-3', 'team-1'] },
+    'team-3': { configDir: '~/.claude-team-3', fallback: ['team-1', { account: 'other-org', allowCrossOrg: true }] },
+    'other-org': { configDir: '~/.claude-other-org' },
+  }
+  const providers = Object.fromEntries(Object.keys(ACCTS).map((n) => [n, acctEntry(n)]))
+  const items = Object.fromEntries(Object.keys(ACCTS).map((n) => [`relay-test/${n}`, 'x']))
+  const c = await homeCli(t, { accountFallback: { mode: 'switch' }, accounts: example, providers, failover: { enabled: true, chain: [] } }, { items })
+  c.login(c.home, MAIN_UUID, ORG)
+  for (const n of Object.keys(ACCTS)) c.login(path.join(c.home, `.claude-${n}`), ACCTS[n].uuid, n === 'other-org' ? ORG2 : ORG)
+  const list = await c.run('providers')
+  assert.strictEqual(list.code, 0, list.out)
+  assert.match(list.out, /● other-org\s+anthropic-account[^\n]*\n\s+routes: \(a Claude account: only the windows of team-3, at its usage limit or by \/provider\)/)
+  assert.match(list.out, /● team-1\s+anthropic-account[^\n]*\n\s+routes: \(a Claude account: only the windows of team-2, team-3,/)
+  const doc = await c.run('doctor')
+  assert.ok(!/other-org[^\n]*(unused|no such usable provider)|(unused|no such usable provider)[^\n]*other-org/.test(doc.out), doc.out)
+  assert.match(doc.out, /Fallback of team-3: ✓ team-1 \(same organization\), ✓ other-org \(allowCrossOrg\)/)
+  assert.match(doc.out, /Fallback of team-1: ✓ team-2 \(same organization\), ✓ team-3 \(same organization\)/)
+  leakFree(doc.out, 'doctor')
+  // the router: a team-3 window at its limit, team-1 at its own: other-org, read from the keychain stand-in, serves
+  const r = await listed(t, { accounts: { 'team-3': { fallback: ['team-1', { account: 'other-org', allowCrossOrg: true }] }, 'team-1': {}, 'other-org': {} }, logins: { 'team-3': { accountUuid: MAIN_UUID, organizationUuid: ORG }, 'team-1': { accountUuid: ACCTS['team-1'].uuid, organizationUuid: ORG }, 'other-org': { accountUuid: ACCTS['other-org'].uuid, organizationUuid: ORG2 } } })
+  await r.register(W1, 'team-3')
+  r.limited.add('main')
+  r.limited.add('team-1')
+  const x = await ask(r.port, { sid: W1, body: chainBody(W1) })
+  assert.deepStrictEqual([x.status, from(x)], [200, 'other-org'], x.body)
+  assert.deepStrictEqual(r.seen(), ['main', 'team-1', 'other-org'])
+  assert.ok(r.calls().some((q) => q.args[4] === 'other-org' && q.args.includes('-w')), 'other-org\'s item read by the router')
+  // the "fallback 9 (setup CLI)" config with dirs that hold no login: doctor's org line for team-1 -> spare
+  const old = await cli(t, { cfg: { accountFallback: { mode: 'switch', account: 'spare' }, accounts: { 'team-1': { configDir: '/nowhere-1', fallback: 'spare' }, spare: { configDir: '/nowhere-2' } }, failover: { enabled: true, chain: ['other'] } } })
+  const unreadable = await old.run('doctor')
+  // W-8: a login that is not there yet says to log in, with the command, not that the organizations differ
+  assert.match(unreadable.out, /Fallback of team-1: ✗ spare \(team-1 is not logged in yet: run CLAUDE_CONFIG_DIR=\/nowhere-1 MODEL_RELAY_CONFIG_DIR=\S+ claude, then \/login there; spare is not logged in yet: run CLAUDE_CONFIG_DIR=\/nowhere-2 MODEL_RELAY_CONFIG_DIR=\S+ claude, then \/login there\)/)
+  assert.match(unreadable.out, /⚠ team-1's fallback spare is skipped: team-1 is not logged in yet/)
+  assert.ok(!unreadable.out.includes('not in one organization'), unreadable.out)
 })
 
 // ---------- guidance on the account paths ----------
@@ -1677,3 +2221,21 @@ test('selfServing P3: no selfServing for a main window that decide sends to a pr
   assert.strictEqual(from(await ask(r.port, { sid: M3, body: chainBody(M3) })), 'other', 'and its request really goes there')
 })
 
+test('B16, A10: account-add\'s keychain step says why the default keychain matters and what to do, and the output carries the risk line', async (t) => {
+  const c = await homeCli(t, { accountFallback: { mode: 'switch' }, accounts: {}, providers: {} })
+  fs.mkdirSync(path.join(c.relayDir, 'projects'))
+  const x = await c.run('account-add', 'team-3')
+  assert.strictEqual(x.code, 0, x.out)
+  assert.match(x.out, /4\. step 5 adds to your default keychain, and the router reads only login\.keychain-db: `security default-keychain` must print it \(if it does not, run `security default-keychain -s ~\/Library\/Keychains\/login\.keychain-db` first\)/)
+  assert.ok(!x.out.includes('the keychain the router reads'), 'the old reason is gone')
+  assert.match(x.out, /Terms: moving a window to team-3 \(mode "switch"\) uses team-3's own login and replaces nothing\. Only the token steps below \(rc-keep, api-only, fallback lists\) send your requests with team-3's token and its identity values in place of yours, which can conflict with Anthropic's terms of use; that risk is yours\./) // W-3
+})
+
+test('C7: the keychain service the printed steps name is model-relay-<name>, in the item to add and in the account-token command', async (t) => {
+  const c = await homeCli(t, { accountFallback: { mode: 'switch' }, accounts: {}, providers: {} })
+  fs.mkdirSync(path.join(c.relayDir, 'projects'))
+  const x = await c.run('account-add', 'team-3')
+  assert.match(x.out, /security add-generic-password -s model-relay-team-3 -a team-3 -w /)
+  assert.match(x.out, /account-token team-3 keychain:model-relay-team-3\/team-3/)
+  assert.ok(!x.out.includes('claude-oauth'), x.out)
+})

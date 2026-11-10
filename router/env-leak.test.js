@@ -14,7 +14,7 @@ const path = require('node:path')
 const { spawnSync } = require('node:child_process')
 
 // the setup CLI (config, settings), a router started through setup.mjs, and the handoff written for the wrapper id
-const FILES = ['setup-config.test.js', 'install-flow.test.js', 'account-setup.test.js']
+const FILES = ['setup-config.test.js', 'install-flow.test.js', 'account-router.test.js']
 
 const snapshot = (dir) => {
   const out = []

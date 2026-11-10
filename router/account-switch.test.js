@@ -278,6 +278,37 @@ test('A9-F3: a pinned provider removed during a trial: the registered sid goes t
 
 // ---------- setup.mjs: one place decides its config dir ----------
 
+test('A10-F4: setup.mjs works on MODEL_RELAY_CONFIG_DIR when it is absolute and exists, and account-sync refuses to run under it', async (t) => {
+  const { execFile } = require('node:child_process')
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'relay-switch-setup-'))
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }))
+  const main = path.join(root, 'main')
+  const acct = path.join(root, 'acct')
+  for (const d of [main, acct]) fs.mkdirSync(d)
+  const port = await freePort() // nothing listens there
+  const cfg = (name) => JSON.stringify({ format: 2, port, accountFallback: { mode: 'switch', account: 'second' }, accounts: { second: { configDir: acct } }, providers: { [name]: { baseUrl: 'http://127.0.0.1:9', token: 'k', model: `${name}-model` } } })
+  fs.writeFileSync(path.join(main, 'model-relay.json'), cfg('mainprov'))
+  fs.writeFileSync(path.join(acct, 'model-relay.json'), cfg('acctprov'))
+  const SETUP = path.join(__dirname, '..', 'tools', 'setup.mjs')
+  const run = (env, ...args) => new Promise((resolve) => execFile(process.execPath, [SETUP, ...args], { cwd: root, env: { ...process.env, HOME: root, ...env } }, (e, so, se) => resolve({ code: e ? e.code : 0, out: `${so}${se}` })))
+  const listed = await run({ CLAUDE_CONFIG_DIR: acct, MODEL_RELAY_CONFIG_DIR: main }, 'providers')
+  assert.match(listed.out, /mainprov/)
+  assert.ok(!listed.out.includes('acctprov'), 'main\'s config, not the window\'s own')
+  for (const given of ['relative/dir', path.join(root, 'nowhere'), '']) {
+    const x = await run({ CLAUDE_CONFIG_DIR: acct, MODEL_RELAY_CONFIG_DIR: given }, 'providers')
+    assert.match(x.out, /acctprov/, `${given}: treated as unset`)
+  }
+  const sync = await run({ CLAUDE_CONFIG_DIR: main, MODEL_RELAY_CONFIG_DIR: main }, 'account-sync', 'second')
+  assert.strictEqual(sync.code, 2, sync.out)
+  assert.match(sync.out, /account-sync does not run while MODEL_RELAY_CONFIG_DIR is set/)
+  // fix 10: only a value that counts (absolute and present) stops it; any other goes on to the usual checks
+  for (const given of ['relative/dir', path.join(root, 'nowhere')]) {
+    const x = await run({ CLAUDE_CONFIG_DIR: main, MODEL_RELAY_CONFIG_DIR: given }, 'account-sync', 'second')
+    assert.ok(!/does not run while MODEL_RELAY_CONFIG_DIR/.test(x.out), `${given}: ${x.out}`)
+    assert.match(x.out, /could not be read as a JSON object/, 'it went on to read the account\'s login')
+  }
+})
+
 test('fix 1: a registration the config no longer allows is dropped on the next request: the account removed, or claudeUrl moved away', async (t) => {
   const r = await relay(t, { anthropic: (q) => (q.auth === `Bearer ${MAIN}` ? USAGE_LIMIT : OK(q.auth === `Bearer ${ACCT}` ? 'account' : 'claude')) })
   assert.strictEqual(from(await r.ask(S2)), 'other', 'main\'s limit: the cooldown starts')
