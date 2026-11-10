@@ -138,6 +138,91 @@ function parseProvider(name, raw, env = process.env, baseRetry = parseRetryCfg(u
   }
 }
 
+// accountFallback.mode: "off" (the default: 0.7.5, no account window is registered) or "switch" (the launcher wrapper
+// moves the whole window to another account's own login, and the router keeps that window's Claude requests out of
+// main's failover). Any other value counts as "off".
+const ACCOUNT_MODES = ['off', 'switch']
+const accountMode = (raw) => (isObj(raw) && isObj(raw.accountFallback) && typeof raw.accountFallback.mode === 'string' ? raw.accountFallback.mode : 'off')
+const ANTHROPIC_API = 'https://api.anthropic.com/'
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+// A name in accounts that is an ordinary own key of an object ("__proto__" and "../x" are not)
+const SAFE_NAME = /^[a-z0-9][a-z0-9_.-]*$/
+
+// accounts.<name>.configDir by name (own keys with a configDir, trimmed and lower case), as written: "~" is expanded by
+// whoever reads the directory
+function accountDirs(raw) {
+  const accounts = isObj(raw) && isObj(raw.accounts) ? raw.accounts : {}
+  return new Map(Object.entries(accounts)
+    .filter(([, v]) => isObj(v) && typeof v.configDir === 'string' && v.configDir.trim())
+    .map(([k, v]) => [k.trim().toLowerCase(), v.configDir.trim()]))
+}
+
+// What the router needs for windows of a second account in mode "switch" (/__account): the mode, the names in
+// accounts (/__account also holds a name to SAFE_NAME), their configDir (dirs) and whether claudeUrl is Anthropic itself.
+// anyClaudeUrl is for tests only: the router sets it from a global that only a `node --require` preload can define.
+function accountView(raw, anyClaudeUrl = false) {
+  const dirs = accountDirs(raw)
+  let href = ''
+  try {
+    href = new URL(bareCfg(raw).claudeUrl).href
+  } catch {}
+  return { mode: accountMode(raw), names: new Set(dirs.keys()), dirs, claudeIsAnthropic: anyClaudeUrl || href === ANTHROPIC_API }
+}
+
+// "~" and "~/x" from the home directory; anything else resolved as it is
+const expandHome = (given, home) => path.resolve(given === '~' || given.startsWith('~/') ? path.join(home, given.slice(1)) : given)
+
+// The login file Claude Code keeps for a config dir, chosen by path and never by environment: the default dir
+// <home>/.claude keeps it at <home>/.claude.json, any other dir inside itself
+const loginFile = (dir, home) => (home && sameDir(dir, path.join(home, '.claude')) ? path.join(home, '.claude.json') : path.join(dir, '.claude.json'))
+
+// A login file as a JSON object, or null. Only a regular file is read: it is opened without blocking and checked after
+// opening, so a directory or a FIFO put there is never read (and never hangs the caller)
+function readLoginJson(file) {
+  let fd
+  try {
+    fd = fs.openSync(file, fs.constants.O_RDONLY | (fs.constants.O_NONBLOCK || 0))
+    if (!fs.fstatSync(fd).isFile()) return null
+    const j = JSON.parse(fs.readFileSync(fd, 'utf8'))
+    return isObj(j) ? j : null
+  } catch {
+    return null
+  } finally {
+    if (fd !== undefined) fs.closeSync(fd)
+  }
+}
+const uuidOf = (v) => (typeof v === 'string' && UUID_RE.test(v) ? v.toLowerCase() : null)
+// oauthAccount's accountUuid and organizationUuid of a login file (those two fields only, lower case, null when absent),
+// or null when the file cannot be read. cache (file -> { mtimeMs, ids }) skips the parse while the mtime holds.
+function loginIds(file, cache = null) {
+  let mtimeMs
+  try {
+    const st = fs.statSync(file)
+    if (!st.isFile()) return null
+    mtimeMs = st.mtimeMs
+  } catch {
+    return null
+  }
+  const hit = cache && cache.get(file)
+  if (hit && hit.mtimeMs === mtimeMs) return hit.ids
+  const j = readLoginJson(file)
+  const o = j && isObj(j.oauthAccount) ? j.oauthAccount : null
+  const ids = j ? { accountUuid: uuidOf(o && o.accountUuid), orgUuid: uuidOf(o && o.organizationUuid) } : null
+  if (cache) cache.set(file, { mtimeMs, ids })
+  return ids
+}
+
+// metadata.user_id's account_uuid in a request body, lower case, or null: whose request it is
+function bodyAccountUuid(bodyBuf) {
+  try {
+    const uid = JSON.parse(bodyBuf.toString('utf8')).metadata.user_id
+    const u = typeof uid === 'string' ? JSON.parse(uid).account_uuid : undefined
+    return typeof u === 'string' && UUID_RE.test(u) ? u.toLowerCase() : null
+  } catch {
+    return null
+  }
+}
+
 // raw.retry: false (off) | undefined (use global) | { attempts, delayMs, backoff, maxDelayMs, failover } (partial override)
 function resolveProviderRetry(raw, base) {
   if (raw === false) return null
@@ -397,6 +482,20 @@ function getSessionProvider(state, cfg, sid) {
   return 'claude'
 }
 
+// Where a request goes for a sid registered as a second account's window (reg = { account, registeredAt }), in place of
+// decide: the account's own Claude requests never meet main's failover. A provider's model goes to that provider, as
+// in decide; a /provider pin made after this registration goes to that provider; everything else goes to Claude as the
+// caller sent it ({ claude: true }). Automatic pins from before the registration are ignored, not removed, and neither
+// decide's cooldown nor its trial is ever reached.
+function accountRoute(state, cfg, model, sid, reg) {
+  const byModel = matchProviderByModel(cfg, model)
+  if (byModel) return { route: routeLabel(byModel, false) }
+  const pinned = getSessionProvider(state, cfg, sid)
+  const at = state && state.sticky && state.sticky[sid] ? state.sticky[sid].at : 0
+  if (pinned !== 'claude' && at > reg.registeredAt) return { route: routeLabel(pinned, true) }
+  return { claude: true }
+}
+
 function routeLabel(providerName, rewrite) {
   return rewrite ? `${providerName}-rewrite` : providerName
 }
@@ -562,6 +661,17 @@ module.exports = {
   retryWaitMs,
   parseProvider,
   parseCfg,
+  ACCOUNT_MODES,
+  accountMode,
+  SAFE_NAME,
+  UUID_RE,
+  accountView,
+  accountRoute,
+  expandHome,
+  loginFile,
+  readLoginJson,
+  loginIds,
+  bodyAccountUuid,
   unresolvedEnv,
   cfgMissingMessage,
   nextFallback,

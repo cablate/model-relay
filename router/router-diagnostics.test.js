@@ -76,6 +76,20 @@ test('a config file that stops parsing is not blamed on an env var', async (t) =
   assert.deepStrictEqual(JSON.parse((await get(r.port, '/__health')).body).unresolved, [])
 })
 
+test('a config that reads but has no usable provider replaces the last good one, so an unreadable file after it leaves none either', async (t) => {
+  const r = await start(t, { glm: { ...GLM, token: 'literal' } })
+  const file = path.join(r.dir, 'model-relay.json')
+  const providers = async () => JSON.parse((await get(r.port, '/__health')).body).providers
+  assert.deepStrictEqual(Object.keys(await providers()), ['glm'])
+  // the key variable is not set: the file reads fine, and no provider is usable
+  fs.writeFileSync(file, JSON.stringify({ format: 2, port: r.port, providers: { glm: { ...GLM, token: 'env:RELAY_DIAG_KEY' } } }))
+  assert.deepStrictEqual(Object.keys(await providers()), [])
+  // Before this change the router went back to glm here, the last config that had a provider; now the last config read is kept, so a
+  // switch-mode config without providers keeps its accounts through a half-written file
+  fs.writeFileSync(file, '{ not json')
+  assert.deepStrictEqual(Object.keys(await providers()), [])
+})
+
 const doctor = (dir, env) => {
   const d = spawnSync(process.execPath, [path.join(__dirname, '..', 'tools', 'setup.mjs'), 'doctor'], {
     env: { ...process.env, CLAUDE_CONFIG_DIR: dir, ...env },
