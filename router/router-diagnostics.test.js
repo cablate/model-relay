@@ -1,6 +1,7 @@
 'use strict'
 // What the running router tells you when it cannot see something: env:VAR tokens unset in its own process, and a
 // certificate that appears after it started.
+require('./test-env')
 const test = require('node:test')
 const assert = require('node:assert')
 const fs = require('node:fs')

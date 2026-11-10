@@ -3,6 +3,7 @@
 // Node strips the TypeScript types itself; tools/hooks-loader.mjs resolves the engine's imports. The panel (.tsx) is
 // not loaded here: JSX needs the engine, and "claude plugin test" covers it.
 
+import '../router/test-env.js'
 import { execFileSync } from 'node:child_process'
 import fs from 'node:fs'
 import path from 'node:path'
