@@ -134,6 +134,11 @@ try {
   const claudeHits = requests().filter((r) => r.route === 'claude' && /^claude-/.test(String(r.model || '')))
   check(/pong/i.test(out), 'Claude Code answered through the router', out.slice(0, 120))
   check(claudeHits.length > 0, 'the router saw the main conversation and sent it to Claude', `${claudeHits.length} request(s)`)
+  // an API-key login gets no usage windows, so their absence is reported, not failed
+  const statusDir = path.join(dir, 'model-relay-status')
+  const limits = (fs.existsSync(statusDir) ? fs.readdirSync(statusDir) : []).filter((n) => n.endsWith('.limits'))
+  const windows = limits.length ? fs.readFileSync(path.join(statusDir, limits[0]), 'utf8').trim().split('\n').map((l) => l.split('\t').slice(0, 2).join(' ') + '%').join(', ') : ''
+  console.log(`  usage windows written for the session: ${windows || 'none (no rate-limit headers on the answer)'}`)
 
   if (providerArg) {
     const before = requests().length

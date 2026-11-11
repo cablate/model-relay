@@ -307,8 +307,51 @@ function toProvider(provider, req, res, body, rewrite, sid, attempt = 0, tried =
   })
 }
 
+// What each session last saw of its usage windows, and the text last written for it. A session the router does not
+// remember (it restarted, or the map was emptied) starts from its file, so a window that only some answers carry
+// survives. Written only when the text changes, through a temp file so a statusline never reads half a file; after a
+// failed write the windows are kept and the next answer writes again.
+const limitsSeen = new Map()
+function noteLimits(sid, headers) {
+  const target = L.limitsFile(STATUS_DIR, sid, {})
+  if (!target) return
+  let seen = limitsSeen.get(sid)
+  if (!seen) {
+    let onDisk = ''
+    try {
+      onDisk = fs.readFileSync(target.path, 'utf8')
+    } catch {}
+    seen = { windows: L.parseLimits(onDisk), text: onDisk }
+    if (limitsSeen.size >= 256) limitsSeen.clear()
+  }
+  const windows = L.limitWindows(seen.windows, headers, Math.floor(Date.now() / 1000))
+  const { path: file, text } = L.limitsFile(STATUS_DIR, sid, windows)
+  limitsSeen.set(sid, { windows, text })
+  // with no window left the file keeps its last lines, whose resets have passed
+  if (!text || text === seen.text) return
+  const tmp = `${file}.${process.pid}.tmp`
+  const write = () => {
+    fs.writeFileSync(tmp, text)
+    fs.renameSync(tmp, file)
+  }
+  try {
+    write()
+  } catch {
+    try {
+      fs.mkdirSync(STATUS_DIR, { recursive: true })
+      write()
+    } catch {
+      limitsSeen.set(sid, { windows, text: '' })
+      try {
+        fs.unlinkSync(tmp)
+      } catch {}
+    }
+  }
+}
+
 function toClaude(cfg, req, res, body, trial, sid) {
   send(cfg.claudeUrl, req, res, body, { ...req.headers }, (ur) => {
+    noteLimits(sid, ur.headers)
     if (ur.statusCode !== 429) {
       if (trial && ur.statusCode < 400) setState(L.onClaudeOk(state), 'claude ok again: new sessions use Claude')
       res.writeHead(ur.statusCode, ur.headers)

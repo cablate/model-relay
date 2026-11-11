@@ -105,6 +105,28 @@ test('sticky sessions expire after a week', () => {
   assert.deepStrictEqual(L.staleStatusFiles(files, week), ['ended'], 'status files: only a regular file untouched for a week')
 })
 
+test('usage windows are read from the rate-limit headers and kept per session', () => {
+  const h = (o) => Object.fromEntries(Object.entries(o).map(([k, v]) => [`anthropic-ratelimit-unified-${k}`, v]))
+  const fable = h({ '5h-utilization': '0.03', '5h-reset': '2000', '7d_oi-utilization': '0.29', '7d_oi-reset': '9000', '7d_oi-status': 'allowed', status: 'allowed' })
+  const first = L.limitWindows(undefined, fable, 1000)
+  assert.deepStrictEqual({ ...first }, { '5h': { percent: 3, reset: 2000 }, '7d_oi': { percent: 29, reset: 9000 } })
+  // a response from another model carries no 7d_oi: the window seen before stays, the one it does carry moves
+  const haiku = h({ '5h-utilization': '0.04', '5h-reset': '2000' })
+  const second = L.limitWindows(first, haiku, 1500)
+  assert.deepStrictEqual({ ...second }, { '5h': { percent: 4, reset: 2000 }, '7d_oi': { percent: 29, reset: 9000 } })
+  assert.deepStrictEqual({ ...L.limitWindows(second, {}, 2000) }, { '7d_oi': { percent: 29, reset: 9000 } }, 'a window is dropped at its reset')
+  const bad = h({ 'a-utilization': 'x', 'a-reset': '9000', 'b-utilization': '0.5', 'c-utilization': '0.5', 'c-reset': '900', 'd-utilization': '-1', 'd-reset': '9000', 'e-utilization': '', 'e-reset': '9000' })
+  assert.deepStrictEqual({ ...L.limitWindows(null, bad, 1000) }, {}, 'no number, no reset, a reset already past, a negative or empty value')
+  const file = L.limitsFile('/c/s', 'ab-12', second)
+  assert.strictEqual(file.path, require('node:path').join('/c/s', 'ab-12.limits'))
+  assert.strictEqual(file.text, '5h\t4\t2000\n7d_oi\t29\t9000\n')
+  assert.strictEqual(L.limitsFile('/c/s', '../x', second), null, 'a session id that is not a file name')
+  assert.strictEqual(L.limitsFile('/c/s', '', second), null)
+  assert.strictEqual(L.limitsFile('/c/s', 'ab-12', {}).text, '', 'nothing to report')
+  assert.deepStrictEqual({ ...L.parseLimits(file.text) }, { ...second }, 'the file reads back as the windows it was written from')
+  assert.deepStrictEqual({ ...L.parseLimits('x\n7d\tabc\t1\n../a\t1\t2\n5h\t4\n') }, {}, 'lines that are not window, percent, reset')
+})
+
 test('only a usage-limit 429 triggers failover', () => {
   assert.ok(L.isUsageLimit(429, { 'anthropic-ratelimit-unified-status': 'rejected' }, '{}'))
   assert.ok(L.isUsageLimit(429, {}, '{"error":{"message":"You have hit your usage limit"}}'))

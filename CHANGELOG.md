@@ -6,6 +6,10 @@ All notable changes to `model-relay` are documented in this file. Format follows
 
 ## [Unreleased]
 
+### Added
+
+- **Per-window usage file for custom statuslines (`model-relay-status/<session id>.limits`):** Claude Code passes a `statusLine` command only the 5-hour and 7-day usage windows, so the weekly window of a model with its own limit (Fable in `/usage`) cannot be shown there. The router now writes the windows Anthropic reports on each Claude answer to `~/.claude/model-relay-status/<session id>.limits`, one line `window<TAB>percent<TAB>reset` per window. It makes no extra request and reads no credential: the numbers are in the response headers the router already forwards.
+
 ## [0.7.5] - 2026-10-24
 
 A window switched to a provider can call MCP tools that reconnected mid-session again, and an experimental pane can show the picture of the model you are talking to.

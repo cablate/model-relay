@@ -6,6 +6,10 @@
 
 ## [未發布]
 
+### 新增
+
+- **每個視窗寫出用量檔，供自訂 statusline 讀取（`model-relay-status/<session id>.limits`）：** Claude Code 只把 5 小時和 7 天兩個用量視窗傳給 `statusLine` 指令，所以有自己上限的模型的每週視窗（`/usage` 裡的 Fable）沒辦法顯示在那裡。現在轉發站會把 Anthropic 在每次 Claude 回應裡回報的視窗寫進 `~/.claude/model-relay-status/<session id>.limits`，每個視窗一行 `window<TAB>percent<TAB>reset`。它不多發任何請求，也不讀任何憑證：這些數字就在轉發站本來就會轉送的回應標頭裡。
+
 ## [0.7.5] - 2026-10-24
 
 切到供應商的視窗，又能叫用對話中途重新連上的 MCP 工具；另有實驗性的面板，可以顯示你正在對話的模型頭像。
