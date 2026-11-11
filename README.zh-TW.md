@@ -237,6 +237,14 @@ node tools/setup.mjs rc
 
 [coralline](https://github.com/Nanako0129/coralline) 的 `relay` segment 會讀這個檔案。
 
+轉發站也會把 Anthropic 在每次 Claude 回應裡回報的用量視窗，寫進 `~/.claude/model-relay-status/<session id>.limits`，每個視窗一行 `window<TAB>percent<TAB>reset`（`reset` 是 epoch 秒）。Claude Code 只把 5 小時和 7 天兩個視窗傳給 `statusLine` 指令；單一模型的每週視窗（`7d_oi`，也就是 `/usage` 裡 Fable 那一項）只有透過這個檔案才到得了 statusline。Anthropic 只在那個模型的回應裡送這個視窗，所以檔案會保留每個視窗最後一次的數值，直到它的重置時間過去。由供應商回答的請求不會寫入任何東西。
+
+| `window` | 意思 |
+|---|---|
+| `5h` | 5 小時視窗 |
+| `7d` | 7 天視窗 |
+| `7d_oi` | 有自己每週上限的那個模型的 7 天視窗 |
+
 ### 實驗性：在側邊面板顯示模型的頭像
 
 這是實驗性功能，之後可能改變或移除，所以沒有列在 `/provider help` 和上面的表格裡。加上 `avatars`，外掛就會在側邊面板畫出這個視窗正在對話的模型頭像，並在你用 `/provider <name>` 切換、Claude 額度用完交給供應商、或切回 Claude 時換圖。它用有顏色的方塊字元（一格的八分之一與四分之一）畫成，每一格挑最貼近圖形的那一種，所以在沒有圖片協定的終端機（例如 Windows Terminal）也能用；需要 `ffmpeg` 在 `PATH` 上。

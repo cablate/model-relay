@@ -237,6 +237,14 @@ Each window writes its relay state to `~/.claude/model-relay-status/<session id>
 
 [coralline](https://github.com/Nanako0129/coralline)'s `relay` segment reads this file.
 
+The router also writes the usage windows Anthropic reports on each Claude answer to `~/.claude/model-relay-status/<session id>.limits`, one line `window<TAB>percent<TAB>reset` per window (`reset` is in epoch seconds). Claude Code passes a `statusLine` command only the 5-hour and 7-day windows; the per-model weekly window (`7d_oi`, the one `/usage` shows for Fable) reaches a statusline only through this file. Anthropic sends that window only on an answer from that model, so the file keeps the last value each window had until its reset passes. A request answered by a provider writes nothing.
+
+| `window` | Meaning |
+|---|---|
+| `5h` | The 5-hour window |
+| `7d` | The 7-day window |
+| `7d_oi` | The 7-day window of the model with its own weekly limit |
+
 ### Experimental: show the model's picture in a pane
 
 This feature is experimental: it may change or go away, and it is left out of `/provider help` and the tables above. Add `avatars` and the plugin draws the picture of the model this window is talking to in a side pane, swapping it when you switch with `/provider <name>`, when a Claude limit hands the window to a provider, and when it goes back to Claude. It is drawn with colored block characters (eighths and quarters of a cell), picked per cell to follow the picture's shapes, so it also works in terminals without an image protocol, such as Windows Terminal. It needs `ffmpeg` on `PATH`.

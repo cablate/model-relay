@@ -307,8 +307,31 @@ function toProvider(provider, req, res, body, rewrite, sid, attempt = 0, tried =
   })
 }
 
+// What each session last saw of its usage windows, and the text last written for it. Written only when the text
+// changes, through a temp file so a statusline never reads half a file; a failed write is retried on the next change.
+const limitsSeen = new Map()
+function noteLimits(sid, headers) {
+  const seen = limitsSeen.get(sid)
+  const windows = L.limitWindows(seen && seen.windows, headers, Math.floor(Date.now() / 1000))
+  const file = L.limitsFile(STATUS_DIR, sid, windows)
+  if (!file) return
+  // ended sessions are never told apart from idle ones here; a full map starts over and each live one writes once more
+  if (!seen && limitsSeen.size >= 256) limitsSeen.clear()
+  limitsSeen.set(sid, { windows, text: file.text })
+  if (seen && seen.text === file.text) return
+  const tmp = `${file.path}.${process.pid}.tmp`
+  try {
+    fs.mkdirSync(STATUS_DIR, { recursive: true })
+    fs.writeFileSync(tmp, file.text)
+    fs.renameSync(tmp, file.path)
+  } catch {
+    limitsSeen.delete(sid)
+  }
+}
+
 function toClaude(cfg, req, res, body, trial, sid) {
   send(cfg.claudeUrl, req, res, body, { ...req.headers }, (ur) => {
+    noteLimits(sid, ur.headers)
     if (ur.statusCode !== 429) {
       if (trial && ur.statusCode < 400) setState(L.onClaudeOk(state), 'claude ok again: new sessions use Claude')
       res.writeHead(ur.statusCode, ur.headers)

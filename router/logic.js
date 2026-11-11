@@ -486,6 +486,39 @@ function applyToolChanges(j) {
   return true
 }
 
+// The usage windows Anthropic reports on a response, for statusline tools: Claude Code hands its statusline only the
+// 5-hour and 7-day windows, and the per-model weekly one (7d_oi, shown as "Fable" in /usage) arrives only in these
+// headers, and only on a response from that model. So a session's windows are merged over what it saw before, and a
+// window is dropped once its reset passes. utilization is a 0..1 ratio, reset is epoch seconds.
+const LIMIT_UTILIZATION = /^anthropic-ratelimit-unified-([a-z0-9_]+)-utilization$/
+function limitWindows(prev, headers, nowSec) {
+  const next = Object.create(null)
+  for (const [name, w] of Object.entries(prev || {})) {
+    if (w.reset > nowSec) next[name] = w
+  }
+  for (const [key, raw] of Object.entries(headers || {})) {
+    const m = LIMIT_UTILIZATION.exec(key)
+    if (!m || raw === '') continue
+    const utilization = Number(raw)
+    const reset = Number(headers[`anthropic-ratelimit-unified-${m[1]}-reset`])
+    if (!Number.isFinite(utilization) || utilization < 0 || !Number.isInteger(reset) || reset <= nowSec) continue
+    next[m[1]] = { percent: Math.round(utilization * 100), reset }
+  }
+  return next
+}
+
+// The limits file of a session: <status dir>/<session id>.limits, one line "window<TAB>percent<TAB>reset" per window,
+// sorted by name. null for a session id that is not a plain file name, or with no window to report.
+function limitsFile(statusDir, sid, windows) {
+  if (!/^[A-Za-z0-9._-]+$/.test(sid) || sid === '.' || sid === '..') return null
+  const names = Object.keys(windows).sort()
+  if (!names.length) return null
+  return {
+    path: path.join(statusDir, `${sid}.limits`),
+    text: names.map((n) => `${n}\t${windows[n].percent}\t${windows[n].reset}\n`).join(''),
+  }
+}
+
 // A provider's answer with its calls to the alias named ToolSearch again; works line by line, so a name cut across two
 // chunks is still found, and decodes UTF-8 as a stream so a character cut across two chunks stays whole
 function toolSearchRestorer() {
@@ -572,6 +605,8 @@ module.exports = {
   setSticky,
   getSessionProvider,
   isUsageLimit,
+  limitWindows,
+  limitsFile,
   emptyState,
   parseState,
   pruneSticky,

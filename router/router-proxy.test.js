@@ -87,7 +87,7 @@ async function setup(t, opts = {}) {
     req.on('data', (c) => ch.push(c))
     req.on('end', () => {
       seen.anthropic.push({ method: req.method, url: req.url, host: req.headers.host, auth: req.headers.authorization, body: Buffer.concat(ch).toString('utf8') })
-      res.writeHead(200, { 'content-type': 'application/json' })
+      res.writeHead(200, { 'content-type': 'application/json', ...opts.anthropicHeaders })
       res.end(JSON.stringify({ from: 'anthropic', url: req.url }))
     })
   })
@@ -143,6 +143,17 @@ test('a model call for a Claude model goes through the tunnel to Anthropic', asy
   assert.strictEqual(hit.url, '/v1/messages?beta=true')
   assert.strictEqual(hit.auth, 'Bearer oauth', 'the caller credentials reach Anthropic untouched')
   assert.strictEqual(env.seen.provider.length, 0)
+})
+
+test("a Claude answer's usage windows are written to the session's limits file", async (t) => {
+  const reset = Math.floor(Date.now() / 1000) + 3600
+  const env = await setup(t, { anthropicHeaders: { 'anthropic-ratelimit-unified-7d_oi-utilization': '0.29', 'anthropic-ratelimit-unified-7d_oi-reset': String(reset) } })
+  const call = async (sid) => viaTunnel((await connectTunnel(env.port, `${HOST}:443`)).socket, env.ca, { p: '/v1/messages', headers: { 'content-type': 'application/json', 'x-claude-code-session-id': sid }, body: JSON.stringify({ model: 'claude-fable-5-2', messages: [] }) })
+  assert.strictEqual((await call('s1')).status, 200)
+  const dir = path.join(env.dir, 'model-relay-status')
+  assert.strictEqual(fs.readFileSync(path.join(dir, 's1.limits'), 'utf8'), `7d_oi\t29\t${reset}\n`)
+  assert.strictEqual((await call('../s2')).status, 200, 'a session id that is no file name is answered and writes nothing')
+  assert.deepStrictEqual(fs.readdirSync(dir), ['s1.limits'], 'no other file, no temp file left behind')
 })
 
 test('a model call for a custom provider is routed there with the provider token', async (t) => {
