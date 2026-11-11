@@ -237,7 +237,7 @@ Each window writes its relay state to `~/.claude/model-relay-status/<session id>
 
 [coralline](https://github.com/Nanako0129/coralline)'s `relay` segment reads this file.
 
-The router also writes the usage windows Anthropic reports on each Claude answer to `~/.claude/model-relay-status/<session id>.limits`, one line `window<TAB>percent<TAB>reset` per window (`reset` is in epoch seconds). Claude Code passes a `statusLine` command only the 5-hour and 7-day windows; the per-model weekly window (`7d_oi`, the one `/usage` shows for Fable) reaches a statusline only through this file. Anthropic sends that window only on an answer from that model, so the file keeps the last value each window had until its reset passes. A request answered by a provider writes nothing.
+The router also writes the usage windows Anthropic reports on each Claude answer to `~/.claude/model-relay-status/<session id>.limits`, one line `window<TAB>percent<TAB>reset` per window (`reset` is in epoch seconds). Claude Code passes a `statusLine` command only the 5-hour and 7-day windows; the per-model weekly window (`7d_oi`, the one `/usage` shows for Fable) reaches a statusline only through this file. Anthropic sends that window only on an answer from that model, so the file keeps the last value each window had until its reset passes. The windows are the account's, but each file holds only what its own window's answers reported, so two windows on different accounts never show each other's numbers. Read lines by window name and skip one whose `reset` has passed: other names may appear, and a file is not rewritten once all its windows have expired. A request answered by a provider writes nothing.
 
 | `window` | Meaning |
 |---|---|

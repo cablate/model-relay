@@ -122,7 +122,9 @@ test('usage windows are read from the rate-limit headers and kept per session', 
   assert.strictEqual(file.text, '5h\t4\t2000\n7d_oi\t29\t9000\n')
   assert.strictEqual(L.limitsFile('/c/s', '../x', second), null, 'a session id that is not a file name')
   assert.strictEqual(L.limitsFile('/c/s', '', second), null)
-  assert.strictEqual(L.limitsFile('/c/s', 'ab-12', {}), null, 'nothing to report')
+  assert.strictEqual(L.limitsFile('/c/s', 'ab-12', {}).text, '', 'nothing to report')
+  assert.deepStrictEqual({ ...L.parseLimits(file.text) }, { ...second }, 'the file reads back as the windows it was written from')
+  assert.deepStrictEqual({ ...L.parseLimits('x\n7d\tabc\t1\n../a\t1\t2\n5h\t4\n') }, {}, 'lines that are not window, percent, reset')
 })
 
 test('only a usage-limit 429 triggers failover', () => {

@@ -508,15 +508,24 @@ function limitWindows(prev, headers, nowSec) {
 }
 
 // The limits file of a session: <status dir>/<session id>.limits, one line "window<TAB>percent<TAB>reset" per window,
-// sorted by name. null for a session id that is not a plain file name, or with no window to report.
+// sorted by name. null for a session id that is not a plain file name; text is empty with no window to report.
 function limitsFile(statusDir, sid, windows) {
   if (!/^[A-Za-z0-9._-]+$/.test(sid) || sid === '.' || sid === '..') return null
   const names = Object.keys(windows).sort()
-  if (!names.length) return null
   return {
     path: path.join(statusDir, `${sid}.limits`),
     text: names.map((n) => `${n}\t${windows[n].percent}\t${windows[n].reset}\n`).join(''),
   }
+}
+
+// The windows a limits file holds, for a router that restarted and no longer remembers what the session saw
+function parseLimits(text) {
+  const windows = Object.create(null)
+  for (const line of String(text).split('\n')) {
+    const [name, percent, reset] = line.split('\t')
+    if (/^[a-z0-9_]+$/.test(name) && /^\d+$/.test(percent || '') && /^\d+$/.test(reset || '')) windows[name] = { percent: Number(percent), reset: Number(reset) }
+  }
+  return windows
 }
 
 // A provider's answer with its calls to the alias named ToolSearch again; works line by line, so a name cut across two
@@ -607,6 +616,7 @@ module.exports = {
   isUsageLimit,
   limitWindows,
   limitsFile,
+  parseLimits,
   emptyState,
   parseState,
   pruneSticky,

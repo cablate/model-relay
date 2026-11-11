@@ -307,25 +307,45 @@ function toProvider(provider, req, res, body, rewrite, sid, attempt = 0, tried =
   })
 }
 
-// What each session last saw of its usage windows, and the text last written for it. Written only when the text
-// changes, through a temp file so a statusline never reads half a file; a failed write is retried on the next change.
+// What each session last saw of its usage windows, and the text last written for it. A session the router does not
+// remember (it restarted, or the map was emptied) starts from its file, so a window that only some answers carry
+// survives. Written only when the text changes, through a temp file so a statusline never reads half a file; after a
+// failed write the windows are kept and the next answer writes again.
 const limitsSeen = new Map()
 function noteLimits(sid, headers) {
-  const seen = limitsSeen.get(sid)
-  const windows = L.limitWindows(seen && seen.windows, headers, Math.floor(Date.now() / 1000))
-  const file = L.limitsFile(STATUS_DIR, sid, windows)
-  if (!file) return
-  // ended sessions are never told apart from idle ones here; a full map starts over and each live one writes once more
-  if (!seen && limitsSeen.size >= 256) limitsSeen.clear()
-  limitsSeen.set(sid, { windows, text: file.text })
-  if (seen && seen.text === file.text) return
-  const tmp = `${file.path}.${process.pid}.tmp`
+  const target = L.limitsFile(STATUS_DIR, sid, {})
+  if (!target) return
+  let seen = limitsSeen.get(sid)
+  if (!seen) {
+    let onDisk = ''
+    try {
+      onDisk = fs.readFileSync(target.path, 'utf8')
+    } catch {}
+    seen = { windows: L.parseLimits(onDisk), text: onDisk }
+    if (limitsSeen.size >= 256) limitsSeen.clear()
+  }
+  const windows = L.limitWindows(seen.windows, headers, Math.floor(Date.now() / 1000))
+  const { path: file, text } = L.limitsFile(STATUS_DIR, sid, windows)
+  limitsSeen.set(sid, { windows, text })
+  // with no window left the file keeps its last lines, whose resets have passed
+  if (!text || text === seen.text) return
+  const tmp = `${file}.${process.pid}.tmp`
+  const write = () => {
+    fs.writeFileSync(tmp, text)
+    fs.renameSync(tmp, file)
+  }
   try {
-    fs.mkdirSync(STATUS_DIR, { recursive: true })
-    fs.writeFileSync(tmp, file.text)
-    fs.renameSync(tmp, file.path)
+    write()
   } catch {
-    limitsSeen.delete(sid)
+    try {
+      fs.mkdirSync(STATUS_DIR, { recursive: true })
+      write()
+    } catch {
+      limitsSeen.set(sid, { windows, text: '' })
+      try {
+        fs.unlinkSync(tmp)
+      } catch {}
+    }
   }
 }
 

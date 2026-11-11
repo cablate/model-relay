@@ -237,7 +237,7 @@ node tools/setup.mjs rc
 
 [coralline](https://github.com/Nanako0129/coralline) 的 `relay` segment 會讀這個檔案。
 
-轉發站也會把 Anthropic 在每次 Claude 回應裡回報的用量視窗，寫進 `~/.claude/model-relay-status/<session id>.limits`，每個視窗一行 `window<TAB>percent<TAB>reset`（`reset` 是 epoch 秒）。Claude Code 只把 5 小時和 7 天兩個視窗傳給 `statusLine` 指令；單一模型的每週視窗（`7d_oi`，也就是 `/usage` 裡 Fable 那一項）只有透過這個檔案才到得了 statusline。Anthropic 只在那個模型的回應裡送這個視窗，所以檔案會保留每個視窗最後一次的數值，直到它的重置時間過去。由供應商回答的請求不會寫入任何東西。
+轉發站也會把 Anthropic 在每次 Claude 回應裡回報的用量視窗，寫進 `~/.claude/model-relay-status/<session id>.limits`，每個視窗一行 `window<TAB>percent<TAB>reset`（`reset` 是 epoch 秒）。Claude Code 只把 5 小時和 7 天兩個視窗傳給 `statusLine` 指令；單一模型的每週視窗（`7d_oi`，也就是 `/usage` 裡 Fable 那一項）只有透過這個檔案才到得了 statusline。Anthropic 只在那個模型的回應裡送這個視窗，所以檔案會保留每個視窗最後一次的數值，直到它的重置時間過去。這些視窗屬於帳號，但每個檔案只記自己那個視窗的回應回報的數值，所以兩個不同帳號的視窗不會看到對方的數字。請依視窗名稱讀取，並略過 `reset` 已過的那一行：可能出現其他名稱，而且所有視窗都過期後檔案不會再改寫。由供應商回答的請求不會寫入任何東西。
 
 | `window` | 意思 |
 |---|---|

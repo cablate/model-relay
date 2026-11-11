@@ -154,6 +154,10 @@ test("a Claude answer's usage windows are written to the session's limits file",
   assert.strictEqual(fs.readFileSync(path.join(dir, 's1.limits'), 'utf8'), `7d_oi\t29\t${reset}\n`)
   assert.strictEqual((await call('../s2')).status, 200, 'a session id that is no file name is answered and writes nothing')
   assert.deepStrictEqual(fs.readdirSync(dir), ['s1.limits'], 'no other file, no temp file left behind')
+  // a router that never saw this session starts from its file: a window this answer does not carry is kept
+  fs.writeFileSync(path.join(dir, 's3.limits'), `5h\t4\t${reset}\n7d\t9\t1\n`)
+  assert.strictEqual((await call('s3')).status, 200)
+  assert.strictEqual(fs.readFileSync(path.join(dir, 's3.limits'), 'utf8'), `5h\t4\t${reset}\n7d_oi\t29\t${reset}\n`, 'kept 5h, dropped the 7d whose reset passed')
 })
 
 test('a model call for a custom provider is routed there with the provider token', async (t) => {
