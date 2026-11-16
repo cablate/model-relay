@@ -80,6 +80,7 @@ const PRESETS = {
   kimi: { baseUrl: 'https://api.moonshot.ai/anthropic', matchModels: ['^kimi', '^moonshot'], stripCacheControl: false, authHeader: 'bearer' },
   minimax: { baseUrl: 'https://api.minimax.io/anthropic', matchModels: ['^minimax'], stripCacheControl: false, authHeader: 'bearer' },
   openrouter: { baseUrl: 'https://openrouter.ai/api', matchModels: ['^openrouter/'], stripCacheControl: false, authHeader: 'bearer' },
+  teapotrouter: { baseUrl: 'https://api.teapotrouter.com', matchModels: ['^claude'], stripCacheControl: false, authHeader: 'bearer' },
 }
 
 // Format 2 is the only layout the router reads; "setup.mjs migrate" turns an older file into it
