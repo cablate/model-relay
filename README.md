@@ -38,7 +38,7 @@ Claude Code binds model settings globally across every terminal window. `model-r
 
 ## Who this is for
 
-`model-relay` is built for Claude Code users who combine a Claude subscription with backup or specialized endpoints (z.ai, DeepSeek, Kimi, MiniMax, OpenRouter, or a gateway on your own machine). Each provider has to accept Anthropic's `/v1/messages` format; a service that only speaks OpenAI Chat Completions needs a local translator (see [Limitations](#limitations)). If you need a multi-tenant cloud proxy for an entire organization, use LiteLLM instead—`model-relay` is a single-user localhost daemon.
+`model-relay` is built for Claude Code users who combine a Claude subscription with backup or specialized endpoints (z.ai, DeepSeek, Kimi, MiniMax, OpenRouter, TeapotRouter, or a gateway on your own machine). Each provider has to accept Anthropic's `/v1/messages` format; a service that only speaks OpenAI Chat Completions needs a local translator (see [Limitations](#limitations)). If you need a multi-tenant cloud proxy for an entire organization, use LiteLLM instead—`model-relay` is a single-user localhost daemon.
 
 ## Install
 
@@ -113,7 +113,7 @@ A provider answering 429 or 5xx is retried on the SAME provider with exponential
 
 ### Built-in provider presets and local gateway auto-launch
 
-Built-in presets (`zai`, `deepseek`, `kimi`, `minimax`, `openrouter`) fill in a service's address and the compatibility switches it needs. You always choose the `model`, because model IDs go out of date, and give the `token` (or `"env:VAR_NAME"`). `node tools/setup.mjs presets` lists them. For local gateways on `127.0.0.1`, set `launch: { command, args }` and the router will automatically spawn the gateway process whenever its port is closed.
+Built-in presets (`zai`, `deepseek`, `kimi`, `minimax`, `openrouter`, `teapotrouter`) fill in a service's address and the compatibility switches it needs. You always choose the `model`, because model IDs go out of date, and give the `token` (or `"env:VAR_NAME"`). `node tools/setup.mjs presets` lists them. For local gateways on `127.0.0.1`, set `launch: { command, args }` and the router will automatically spawn the gateway process whenever its port is closed.
 
 ### Model alias routing (pointing `haiku` / `sonnet` / `opus` at a provider)
 
@@ -212,7 +212,7 @@ Configuration lives in `~/.claude/model-relay.json`. The directory defaults to `
 | `retry.failover` | `false` | Opt-in: after retries are exhausted, forward the original request to the next provider in the chain instead of returning the error |
 | `providers.<name>.retry` | `true` | Per-provider switch: `false` never retries this provider (failure returns at once); `true` follows the global `retry`; or a partial object like `{ "attempts": 5 }` overrides just those fields, within the limits listed above |
 | `providers.<name>.fallback` | the chain | Who takes over from this provider: `false` for nobody, or a list like `["backup"]` |
-| `providers.<name>.preset` | `<name>` | Optional preset (`zai`, `deepseek`, `kimi`, `minimax`, `openrouter`): the address and compatibility switches, never a model |
+| `providers.<name>.preset` | `<name>` | Optional preset (`zai`, `deepseek`, `kimi`, `minimax`, `openrouter`, `teapotrouter`): the address and compatibility switches, never a model |
 | `providers.<name>.baseUrl` | (from preset) | Anthropic-compatible upstream URL for this provider |
 | `providers.<name>.token` | (required) | Literal token or `"env:ENV_VAR_NAME"`. The variable is read from the router process's environment (inherited from the Claude Code session or setup command that started it), so one exported later is not seen until the router restarts |
 | `providers.<name>.model` | (required) | Target model ID when rewriting requests (suffixes like `[1m]` are stripped on wire) |

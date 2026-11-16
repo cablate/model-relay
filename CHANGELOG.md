@@ -6,6 +6,10 @@ All notable changes to `model-relay` are documented in this file. Format follows
 
 ## [Unreleased]
 
+### Added
+
+- **Built-in `teapotrouter` preset:** adds [TeapotRouter](https://teapotrouter.com), an Anthropic-compatible endpoint serving Claude and GPT model families, to the preset table (`baseUrl: https://api.teapotrouter.com`, bearer auth, `^claude` model matching). Its current model IDs are published as JSON at https://teapotrouter.com/api/pricing.
+
 ## [0.7.5] - 2026-10-24
 
 A window switched to a provider can call MCP tools that reconnected mid-session again, and an experimental pane can show the picture of the model you are talking to.

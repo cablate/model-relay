@@ -35,6 +35,14 @@ test('the router reads format 2 only: anything else gives no providers, and no e
   assert.notStrictEqual(L.parseShape({ format: 2, providers }), null, 'the same providers under format 2 are')
 })
 
+test('teapotrouter preset fills url, bearer auth and claude model matching', () => {
+  const c = L.parseCfg({ format: 2, providers: { tpr: { preset: 'teapotrouter', token: 't', model: 'claude-sonnet-5-5' } } })
+  assert.strictEqual(c.providers.tpr.url, 'https://api.teapotrouter.com')
+  assert.strictEqual(c.providers.tpr.authHeader, 'bearer')
+  assert.strictEqual(c.providers.tpr.stripCacheControl, false)
+  assert.deepStrictEqual(c.providers.tpr.matchSources, ['^claude'])
+})
+
 test('multi-provider config and env:VAR token resolution', () => {
   const multi = L.parseCfg({
     format: 2,

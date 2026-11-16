@@ -6,6 +6,10 @@
 
 ## [未發布]
 
+### 新增
+
+- **內建 `teapotrouter` 預設集：** 將 [TeapotRouter](https://teapotrouter.com)（相容 Anthropic 格式、同時供應 Claude 與 GPT 模型的端點）加入預設集表（`baseUrl: https://api.teapotrouter.com`、bearer 認證、`^claude` 模型比對）。最新的模型 ID 以 JSON 公開於 https://teapotrouter.com/api/pricing。
+
 ## [0.7.5] - 2026-10-24
 
 切到供應商的視窗，又能叫用對話中途重新連上的 MCP 工具；另有實驗性的面板，可以顯示你正在對話的模型頭像。
