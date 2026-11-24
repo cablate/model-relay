@@ -457,3 +457,170 @@ test("the provider's calls to the renamed search reach Claude Code as ToolSearch
   assert.doesNotMatch(text, /"name"\s*:\s*"load_deferred_tools"/)
   assert.ok(text.includes('"text":"說明 load_deferred_tools"'), 'text that only mentions the alias is left alone, and no character is broken')
 })
+
+// ---------- Per-provider models, efforts, session pins, and hardened status helpers ----------
+
+test('parseProvider validates and dedupes models/efforts without auto-adding matchers and preserves explicit empty efforts', () => {
+  const p = L.parseProvider('alt', {
+    baseUrl: 'https://alt.example/anthropic',
+    token: 'tok',
+    model: 'alt-primary[1m]',
+    efforts: [' Low ', 'high', 'HIGH', 'bad effort!', 'xhigh', 42],
+    models: [
+      { model: 'alt-secondary', efforts: ['xhigh', 'bad!'] },
+      'alt-secondary', // duplicate (case-insensitive)
+      'alt-third[1m]',
+      { model: 'alt-fast', efforts: [] }, // explicit empty opt-out
+      { model: 'alt-inherit' }, // inherits provider-level efforts
+      'bad model space',
+      '',
+      'a'.repeat(129),
+    ],
+  })
+  assert.deepStrictEqual(p.efforts, ['low', 'high', 'xhigh'])
+  assert.deepStrictEqual(p.models, [
+    { model: 'alt-primary[1m]', efforts: ['low', 'high', 'xhigh'] },
+    { model: 'alt-secondary', efforts: ['xhigh'] },
+    { model: 'alt-third[1m]', efforts: ['low', 'high', 'xhigh'] },
+    { model: 'alt-fast', efforts: [] },
+    { model: 'alt-inherit', efforts: ['low', 'high', 'xhigh'] },
+  ])
+  assert.deepStrictEqual(p.matchSources, ['^alt'], 'models[] does not auto-add matchers')
+
+  // Explicit empty efforts: [] rejects provider-level efforts in resolveProviderEffort
+  const fast = L.resolveProviderModel(p, 'alt-fast')
+  assert.strictEqual(L.resolveProviderEffort(p, fast, 'low'), null, 'explicit empty efforts opts out of provider efforts')
+  assert.deepStrictEqual(L.resolveProviderEffort(p, fast, 'auto'), { clear: true, effort: null })
+
+  // Primary already listed in models[] keeps its position and own efforts
+  const p2 = L.parseProvider('alt', {
+    baseUrl: 'https://alt.example/anthropic',
+    token: 'tok',
+    model: 'alt-1',
+    efforts: ['low'],
+    models: ['alt-2', { model: 'ALT-1', efforts: ['high'] }],
+  })
+  assert.deepStrictEqual(p2.models, [
+    { model: 'alt-2', efforts: ['low'] },
+    { model: 'ALT-1', efforts: ['high'] },
+  ])
+})
+
+test('resolveProviderModel and resolveProviderEffort match safely and reject ambiguous/invalid inputs', () => {
+  const p = L.parseProvider('alt', {
+    baseUrl: 'https://alt.example/anthropic',
+    token: 'tok',
+    model: 'acp-alt-4-pro[1m]',
+    efforts: ['low', 'medium', 'high'],
+    models: [
+      'acp-alt-4-pro[1m]',
+      { model: 'acp-alt-4-neon[1m]', efforts: ['high', 'xhigh'] },
+      { model: 'acp-alt-4', efforts: ['low'] },
+    ],
+  })
+  assert.strictEqual(L.resolveProviderModel(p, 'ACP-ALT-4-PRO[1M]').model, 'acp-alt-4-pro[1m]')
+  assert.strictEqual(L.resolveProviderModel(p, 'acp-alt-4-pro').model, 'acp-alt-4-pro[1m]')
+  assert.strictEqual(L.resolveProviderModel(p, 'alt-4').model, 'acp-alt-4', 'prefix-stripped exact wins over substring')
+  assert.strictEqual(L.resolveProviderModel(p, 'neon').model, 'acp-alt-4-neon[1m]', 'unique substring')
+  assert.strictEqual(L.resolveProviderModel(p, 'acp-alt'), null, 'ambiguous returns null')
+  assert.strictEqual(L.resolveProviderModel(p, 'missing'), null)
+  assert.strictEqual(L.resolveProviderModel(p, 'neon\n'), null, 'control chars rejected')
+  assert.strictEqual(L.resolveProviderModel(p, 'bad space'), null)
+  assert.strictEqual(L.resolveProviderModel(null, 'neon'), null)
+
+  const neon = L.resolveProviderModel(p, 'neon')
+  assert.deepStrictEqual(L.resolveProviderEffort(p, neon, ''), { clear: true, effort: null })
+  assert.deepStrictEqual(L.resolveProviderEffort(p, neon, null), { clear: true, effort: null })
+  assert.deepStrictEqual(L.resolveProviderEffort(p, neon, undefined), { clear: true, effort: null })
+  assert.deepStrictEqual(L.resolveProviderEffort(p, neon, 'AUTO'), { clear: true, effort: null })
+  assert.deepStrictEqual(L.resolveProviderEffort(p, neon, 'xhigh'), { clear: false, effort: 'xhigh' })
+  assert.strictEqual(L.resolveProviderEffort(p, neon, 'low'), null, 'not allowed for neon')
+  assert.strictEqual(L.resolveProviderEffort(p, neon, 'xhigh\n'), null, 'control chars rejected')
+  assert.strictEqual(L.resolveProviderEffort(p, neon, 123), null)
+  assert.strictEqual(L.resolveProviderEffort(null, null, 'high'), null)
+})
+
+test('SEC-02: isSafeStatusSid, formatStatusLine, and extractRequestEffort', () => {
+  assert.strictEqual(L.isSafeStatusSid('s1'), true)
+  assert.strictEqual(L.isSafeStatusSid('11111111-2222-4333-8444-555555555555'), true)
+  assert.strictEqual(L.isSafeStatusSid('a'.repeat(128)), true)
+  for (const bad of ['', '.', '..', '.hidden', '../x', 'a/b', 's1.limits', 's1.LIMITS', 's1.tmp', 's1.TMP', 'a'.repeat(129), 'a b', 'a\nb', null, 123]) {
+    assert.strictEqual(L.isSafeStatusSid(bad), false, `reject ${String(bad)}`)
+  }
+  assert.strictEqual(L.formatStatusLine('pinned', 'alt-1'), 'pinned\talt-1\n')
+  assert.strictEqual(L.formatStatusLine('pinned', 'alt-1', 'xhigh'), 'pinned\talt-1\txhigh\n')
+  assert.strictEqual(L.formatStatusLine('pinned', 'alt\t1\r\n2', 'HIGH'), 'pinned\talt 1 2\thigh\n')
+  assert.strictEqual(L.formatStatusLine('pinned', 'alt-1', 'bad effort!'), 'pinned\talt-1\n')
+
+  assert.strictEqual(L.extractRequestEffort(Buffer.from(JSON.stringify({ output_config: { effort: 'High' } }))), 'high')
+  assert.strictEqual(L.extractRequestEffort(Buffer.from(JSON.stringify({ output_config: { effort: 'bad!' } }))), null)
+  assert.strictEqual(L.extractRequestEffort(Buffer.from('null')), null)
+  assert.strictEqual(L.extractRequestEffort(Buffer.from('not-json')), null)
+})
+
+test('sessionPins helpers and capSticky bound size, isolate prototypes, and revalidate against config', () => {
+  const cfg = L.parseCfg({
+    format: 2,
+    providers: {
+      alt: {
+        baseUrl: 'https://alt.example/anthropic',
+        token: 'tok',
+        model: 'alt-1',
+        efforts: ['low', 'high'],
+        models: ['alt-1', { model: 'alt-2', efforts: ['xhigh'] }, { model: 'alt-fast', efforts: [] }],
+      },
+    },
+  })
+  let state = L.setSticky(L.emptyState(), 's1', 'alt', 1000)
+  let pins = L.setSessionPin(Object.create(null), 's1', 'alt', 'alt-2', 'xhigh', 1000)
+  assert.deepStrictEqual(L.getSessionPin(state, pins, cfg, 's1'), { provider: 'alt', model: 'alt-2', effort: 'xhigh' })
+
+  // Explicit empty efforts: [] drops any stale effort stored for that model
+  const fastPins = L.setSessionPin(Object.create(null), 's1', 'alt', 'alt-fast', 'high', 1000)
+  assert.deepStrictEqual(L.getSessionPin(state, fastPins, cfg, 's1'), { provider: 'alt', model: 'alt-fast', effort: null })
+
+  // Config removes alt-2: falls back to primary alt-1 and drops xhigh (not allowed on alt-1)
+  const cfgShrunk = L.parseCfg({
+    format: 2,
+    providers: { alt: { baseUrl: 'https://alt.example/anthropic', token: 'tok', model: 'alt-1', efforts: ['low', 'high'] } },
+  })
+  assert.deepStrictEqual(L.getSessionPin(state, pins, cfgShrunk, 's1'), { provider: 'alt', model: 'alt-1', effort: null })
+
+  // Prototype keys never leak
+  assert.strictEqual(L.getSessionPin(state, {}, cfg, 'constructor').provider, 'claude')
+  const parsed = L.parseSessionPins({ sessionPins: { __proto__: { provider: 'alt', model: 'alt-2', effort: 'xhigh', at: 5 }, bad: { provider: 'alt', model: 'bad space', effort: 'bad!', at: 5 } } })
+  assert.strictEqual(Object.getPrototypeOf(parsed), null)
+  assert.deepStrictEqual(parsed.bad, { provider: 'alt', at: 5 })
+
+  // Prune TTL and cap to STICKY_MAX
+  const oldPins = L.setSessionPin(pins, 'old', 'alt', 'alt-1', 'low', 10)
+  const pruned = L.pruneSessionPins(oldPins, 10 + 8 * 24 * 3600e3)
+  assert.strictEqual(pruned.old, undefined)
+
+  let bigState = L.emptyState()
+  for (let i = 0; i < 600; i++) bigState = L.setSticky(bigState, `s${i}`, 'alt', i)
+  const capped = L.capSticky(bigState, L.STICKY_MAX)
+  assert.strictEqual(Object.keys(capped.sticky).length, L.STICKY_MAX)
+  assert.ok(capped.sticky.s599 && !capped.sticky.s0, 'keeps newest entries')
+})
+
+test('SEC-05: rewriteBody guards non-object roots and safely merges/replaces output_config.effort', () => {
+  for (const raw of ['null', '[]', '123', '"hello"']) {
+    const buf = Buffer.from(raw)
+    assert.deepStrictEqual(L.rewriteBody(buf, { model: 'alt-1', effort: 'high' }), { body: buf, restoreToolSearch: false }, raw)
+  }
+  // Effort-only rewrite without model change
+  const effortOnly = L.rewriteBody(Buffer.from(JSON.stringify({ model: 'alt-1', messages: [] })), { effort: 'xhigh' })
+  assert.deepStrictEqual(JSON.parse(effortOnly.body.toString()), { model: 'alt-1', messages: [], output_config: { effort: 'xhigh' } })
+  // Preserves sibling properties like format
+  const withFormat = L.rewriteBody(Buffer.from(JSON.stringify({ model: 'alt-1', output_config: { format: { type: 'json' }, effort: 'low' } })), { effort: 'high' })
+  assert.deepStrictEqual(JSON.parse(withFormat.body.toString()).output_config, { format: { type: 'json' }, effort: 'high' })
+  // Safely replaces null, primitive, or array output_config
+  for (const badCfg of [null, 'fast', 42, ['low']]) {
+    const res = L.rewriteBody(Buffer.from(JSON.stringify({ model: 'alt-1', output_config: badCfg })), { effort: 'medium' })
+    assert.deepStrictEqual(JSON.parse(res.body.toString()).output_config, { effort: 'medium' }, JSON.stringify(badCfg))
+  }
+  // Invalid effort string is ignored (no rewrite)
+  const plain = Buffer.from(JSON.stringify({ model: 'alt-1' }))
+  assert.deepStrictEqual(L.rewriteBody(plain, { effort: 'bad effort!' }), { body: plain, restoreToolSearch: false })
+})

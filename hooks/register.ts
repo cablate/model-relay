@@ -1,6 +1,6 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, UiOpenResult } from 'claude-code'
-import type { AvatarEntry, AvatarView, PanelNote, PanelUi } from '../types'
+import type { AvatarEntry, AvatarView, PanelNote, PanelUi, ProviderModelOption } from '../types'
 import {
   AVATAR_EMPTY,
   AVATAR_START,
@@ -28,6 +28,7 @@ import {
   outdatedText,
   parseHealth,
   parseLocal,
+  parseProviderArgs,
   pingArgv,
   pingReport,
   probeArgv,
@@ -58,6 +59,7 @@ import {
   type AvatarWant,
   type Health,
   type LocalCfg,
+  type StatusFields,
 } from './logic'
 import { avatarTree } from './avatar'
 import { panelTree, type PanelActions } from './panel'
@@ -89,6 +91,7 @@ let staleBusy = false // the router runs older code but was answering a request 
 let outdatedTold = false // the toast about an older config, once per session
 // The providers our own router last reported; kept through an outage so a model-relay:<name> spawn still gets its model
 let knownProviders: Record<string, string> = {}
+let knownProviderModels: Record<string, ProviderModelOption[]> = {}
 // model-relay:<name> subagents started and not finished yet, by agentId: checked against the router when their turn ends
 const pending = new Map<string, { name: string; model: string; since: number }>()
 let avatarEntries: Record<string, AvatarEntry> = {} // the config's "avatars", read each tick
@@ -113,20 +116,25 @@ async function myVersion($: EngineInterface): Promise<string> {
 }
 
 // One model-relay:<name> agent per provider, and the provider names in /provider's hint; redone when the router's list changes
-async function syncProviders($: EngineInterface, providers: Record<string, string>): Promise<void> {
+async function syncProviders(
+  $: EngineInterface,
+  providers: Record<string, string>,
+  providerModels: Record<string, ProviderModelOption[]> = {},
+): Promise<void> {
   knownProviders = providers
+  knownProviderModels = providerModels
   let options: ReturnType<typeof providerAgentOptions> = {}
   try {
     options = providerAgentOptions(JSON.parse(await $.fs.read(`${await configDir($)}/${CONFIG_NAME}`)))
   } catch {}
-  const specs = providerAgentSpecs(providers, options)
+  const specs = providerAgentSpecs(providers, options, knownProviderModels)
   const sig = JSON.stringify(specs)
   if (sig === registeredSig) return
-  const plain = providerAgentSpecs(providers)
+  const plain = providerAgentSpecs(providers, {}, knownProviderModels)
   for (const [i, spec] of specs.entries()) {
     const ok = await $.agent.register(spec).then(() => true, () => false)
     // Claude Code refused this provider's "agent" fields: keep the agent with the defaults rather than lose it
-    if (!ok && has(options, spec.name)) {
+    if (!ok && JSON.stringify(spec) !== JSON.stringify(plain[i])) {
       await $.agent.register(plain[i]!).catch(() => undefined)
       const lang = await detectLang($)
       $.ui.toast(lang === 'en'
@@ -193,19 +201,32 @@ async function health($: EngineInterface, cfg: LocalCfg): Promise<Health | null>
   }
 }
 
+const routerWritesStatus = (h: Health | null) => h?.statusWriter === 'router'
+
+function sessionError(stdout: string, lang: 'zh' | 'en'): string {
+  try {
+    const j = JSON.parse(stdout) as { error?: { message?: string } }
+    const msg = typeof j?.error?.message === 'string' ? j.error.message.replace(/^model-relay router:\s*/, '').trim() : ''
+    if (msg) return msg
+  } catch {}
+  return lang === 'en' ? 'Relay did not respond; nothing changed.' : '轉發站沒有回應，沒有改變。'
+}
+
 // Writes this session's relay state for statusline tools (statusFields), when it changes and at least daily so the
-// router's sweep of week-old files never takes a live session's; then draws the plugin status line, only when the
-// config asks for it ("statusBar": true).
-async function showStatus($: EngineInterface, text: string, fields: [string, string]): Promise<void> {
-  // the session id is asked each time: /clear and an in-process resume go on under a new one without session.start
-  statusDir ??= await configDir($)
-  const file = statusFile(statusDir, await $.session.id(), fields)
-  if (file && (`${file.path}\n${file.line}` !== writtenStatus || Date.now() - writtenStatusAt > 86400000)) {
-    try {
-      await $.fs.write(file.path, file.line)
-      writtenStatus = `${file.path}\n${file.line}`
-      writtenStatusAt = Date.now()
-    } catch {}
+// router's sweep of week-old files never takes a live session's; skipped when the router itself is the sole writer
+// (SEC-01). Then draws the plugin status line when the config asks for it ("statusBar": true).
+async function showStatus($: EngineInterface, text: string, fields: StatusFields, skipFileWrite = false): Promise<void> {
+  if (!skipFileWrite) {
+    // the session id is asked each time: /clear and an in-process resume go on under a new one without session.start
+    statusDir ??= await configDir($)
+    const file = statusFile(statusDir, await $.session.id(), fields)
+    if (file && (`${file.path}\n${file.line}` !== writtenStatus || Date.now() - writtenStatusAt > 86400000)) {
+      try {
+        await $.fs.write(file.path, file.line)
+        writtenStatus = `${file.path}\n${file.line}`
+        writtenStatusAt = Date.now()
+      } catch {}
+    }
   }
   const shown = statusBar ? text : undefined
   if (shown === shownStatus) return
@@ -330,7 +351,7 @@ async function openPanel($: EngineInterface, cfg: LocalCfg, h: Health | null, la
 // Our router answered: it is the one source of what providers exist
 async function ours($: EngineInterface, cfg: LocalCfg, h: Health, lang: 'zh' | 'en'): Promise<void> {
   startFailed = false
-  await syncProviders($, h.providers)
+  await syncProviders($, h.providers, h.providerModels)
   await syncPanelData($, cfg, h, lang)
   followAvatar($, h)
 }
@@ -388,7 +409,7 @@ async function tick($: EngineInterface): Promise<void> {
         $.ui.toast(lang === 'en' ? 'Relay recovered; routing through local relay' : '轉發站恢復，主線重新經由轉發站')
       }
       const note = cfg.outdated ? outdatedText(lang) : staleBusy ? staleStatusText(lang) : ''
-      await showStatus($, note ? `${statusText(h, false, lang)} · ${note}` : statusText(h, false, lang), statusFields(h, false))
+      await showStatus($, note ? `${statusText(h, false, lang)} · ${note}` : statusText(h, false, lang), statusFields(h, false), routerWritesStatus(h))
       await ours($, cfg, h, lang)
       return
     }
@@ -401,7 +422,7 @@ async function tick($: EngineInterface): Promise<void> {
       const up = await $.process.run(healthWaitArgv(cfg, await $.session.id(), win), { timeoutMs: 20000 }).catch(() => null)
       const h2 = up && up.exitCode === 0 ? parseHealth(up.stdout) : null
       if (h2) {
-        await showStatus($, statusText(h2, false, lang), statusFields(h2, false))
+        await showStatus($, statusText(h2, false, lang), statusFields(h2, false), routerWritesStatus(h2))
         await ours($, cfg, h2, lang)
         return
       }
@@ -441,7 +462,7 @@ function panelActions($: EngineInterface): PanelActions {
           const lang = await detectLang($)
           const h = await health($, cfg)
           if (h) {
-            await showStatus($, statusText(h, false, lang), statusFields(h, false))
+            await showStatus($, statusText(h, false, lang), statusFields(h, false), routerWritesStatus(h))
             followAvatar($, h)
           }
           await syncPanelData($, cfg, h, lang)
@@ -452,19 +473,28 @@ function panelActions($: EngineInterface): PanelActions {
   const close = () => update($, panelUi, (u) => ({ ...u, open: false, confirmingClaude: false, confirmingProxy: false }))
   return {
     // A switch that took is the panel's job done: it closes, and a toast (and the status line, when on) says where this window goes now
-    switchTo: (target) =>
+    switchTo: (target, opts) =>
       run(async () => {
         const cfg = await readLocal($)
         const lang = await detectLang($)
         if (!cfg) return bad(lang === 'en' ? 'Config missing.' : '設定檔不存在。')
         const win = await isWindows($)
-        const r = await $.process.run(sessionArgv(cfg, await $.session.id(), target, win), { timeoutMs: 8000 }).catch(() => null)
+        const r = await $.process.run(sessionArgv(cfg, await $.session.id(), target, win, opts), { timeoutMs: 8000 }).catch(() => null)
         if (!r || r.exitCode !== 0 || !r.stdout.includes('"ok":true')) {
-          return bad(lang === 'en' ? 'Relay did not respond; nothing changed.' : '轉發站沒有回應，沒有改變。')
+          return bad(r && r.exitCode === 0 ? sessionError(r.stdout, lang) : (lang === 'en' ? 'Relay did not respond; nothing changed.' : '轉發站沒有回應，沒有改變。'))
         }
+        let respModel = ''
+        let respEffort: string | null = null
+        try {
+          const parsed = JSON.parse(r.stdout) as { model?: unknown; effort?: unknown }
+          if (typeof parsed.model === 'string') respModel = parsed.model
+          if (typeof parsed.effort === 'string') respEffort = parsed.effort
+        } catch {}
         const h = await health($, cfg)
         await close()
-        $.ui.toast(switchedText(target, h && has(h.providers, target) ? h.providers[target]! : target, lang))
+        const modelShown = respModel || h?.sessionModel || (h && has(h.providers, target) ? h.providers[target]! : target)
+        const effortShown = respEffort ?? h?.sessionEffort ?? null
+        $.ui.toast(switchedText(target, modelShown, lang, effortShown))
         return undefined
       }),
     askClaude: (ask) => {
@@ -541,7 +571,7 @@ export const register: Register = (on) => {
 
   on('agent.spawn', async ($, e, next) => {
     if (e.fork || e.resume) return next(e)
-    const relay = relayAgent(e.subagentType, knownProviders)
+    const relay = relayAgent(e.subagentType, knownProviders, e.model, knownProviderModels)
     if (!relay) return next(e)
     const since = Date.now()
     const r = await next({ ...e, model: relay.model })
@@ -679,7 +709,7 @@ export const register: Register = (on) => {
       const cfgNext = (await readLocal($)) ?? cfg
       const h = await health($, cfgNext)
       if (h) {
-        await showStatus($, statusText(h, false, lang), statusFields(h, false))
+        await showStatus($, statusText(h, false, lang), statusFields(h, false), routerWritesStatus(h))
         followAvatar($, h)
       }
       await syncPanelData($, cfgNext, h, lang)
@@ -688,18 +718,32 @@ export const register: Register = (on) => {
 
     const h0 = await health($, cfg)
     const providers = h0?.providers ?? {}
-    if (arg === 'claude' || has(providers, arg)) {
-      const r = await $.process.run(sessionArgv(cfg, await $.session.id(), arg, win), { timeoutMs: 8000 }).catch(() => null)
+    const target = head
+    const extra = parts.slice(1)
+    if (target === 'claude' || has(providers, target)) {
+      const opts = target === 'claude'
+        ? (extra.length ? { model: extra[0], ...(extra[1] ? { effort: extra[1] } : {}) } : undefined)
+        : parseProviderArgs(extra, h0?.providerModels && has(h0.providerModels, target) ? h0.providerModels[target] : undefined)
+      const r = await $.process.run(sessionArgv(cfg, await $.session.id(), target, win, opts), { timeoutMs: 8000 }).catch(() => null)
       if (!r || r.exitCode !== 0 || !r.stdout.includes('"ok":true')) {
-        return { text: lang === 'en' ? 'Relay did not respond; nothing changed.' : '轉發站沒有回應，沒有改變。' }
+        return { text: r && r.exitCode === 0 ? sessionError(r.stdout, lang) : (lang === 'en' ? 'Relay did not respond; nothing changed.' : '轉發站沒有回應，沒有改變。') }
       }
+      let respModel = ''
+      let respEffort: string | null = null
+      try {
+        const parsed = JSON.parse(r.stdout) as { model?: unknown; effort?: unknown }
+        if (typeof parsed.model === 'string') respModel = parsed.model
+        if (typeof parsed.effort === 'string') respEffort = parsed.effort
+      } catch {}
       const h = await health($, cfg)
       if (h) {
-        await showStatus($, statusText(h, false, lang), statusFields(h, false))
+        await showStatus($, statusText(h, false, lang), statusFields(h, false), routerWritesStatus(h))
         followAvatar($, h)
       }
       await syncPanelData($, cfg, h, lang)
-      return { text: switchedText(arg, providers[arg] ?? arg, lang) }
+      const modelShown = respModel || h?.sessionModel || providers[target] || target
+      const effortShown = respEffort ?? h?.sessionEffort ?? null
+      return { text: switchedText(target, modelShown, lang, effortShown) }
     }
     const names = [...Object.keys(providers), 'claude'].join(lang === 'en' ? ', ' : '、')
     return {

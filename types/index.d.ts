@@ -13,16 +13,21 @@ export type PingStat = {
   detail: string
 }
 
+export type ProviderModelOption = { model: string; efforts: string[] }
+
 export type PanelData = {
   online: boolean
   direct: boolean
   port: number
   session: string // 'claude' or provider name
+  sessionModel?: string
+  sessionEffort?: string
   failoverProvider: string | null // null when failover has nobody to hand over to
   failoverSince: number
   nextClaudeTry: number
   sessionsOnCustom: number
   providers: Record<string, string>
+  providerModels?: Record<string, ProviderModelOption[]>
   aliases: Record<string, string>
   failoverChain: string[]
   // The router's own view of its switches; null when it is offline or too old to report them

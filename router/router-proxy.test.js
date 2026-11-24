@@ -308,3 +308,256 @@ test('the Host check follows the port the router holds, not a port edited into t
   const stale = await call(env.port, { p: '/__health', headers: { host: `127.0.0.1:${other}` } })
   assert.strictEqual(stale.status, 403, 'a Host naming the edited port is not this router')
 })
+
+// ---------- Per-provider models/efforts & hardened single-writer status (SEC-01, SEC-02, SEC-03, SEC-05) ----------
+
+async function startCustomRouter(t, cfgOverrides, handlers = {}) {
+  const seen = { anthropic: [], providers: {} }
+  const anthropic = http.createServer((req, res) => {
+    const ch = []
+    req.on('data', (c) => ch.push(c))
+    req.on('end', () => {
+      const body = Buffer.concat(ch).toString('utf8')
+      seen.anthropic.push({ url: req.url, body })
+      if (handlers.anthropic) return handlers.anthropic(req, res, body)
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({ from: 'anthropic' }))
+    })
+  })
+  const anthropicPort = await listen(anthropic)
+  const servers = [anthropic]
+  const providerPorts = {}
+  for (const [name, fn] of Object.entries(handlers.providers || {})) {
+    seen.providers[name] = []
+    const srv = http.createServer((req, res) => {
+      const ch = []
+      req.on('data', (c) => ch.push(c))
+      req.on('end', () => {
+        const body = Buffer.concat(ch).toString('utf8')
+        seen.providers[name].push({ url: req.url, body })
+        fn(req, res, body)
+      })
+    })
+    providerPorts[name] = await listen(srv)
+    servers.push(srv)
+  }
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'relay-models-'))
+  const port = await freePort()
+  const cfg = typeof cfgOverrides === 'function' ? cfgOverrides({ port, anthropicPort, providerPorts }) : { ...cfgOverrides, port, claudeUrl: `http://127.0.0.1:${anthropicPort}` }
+  fs.writeFileSync(path.join(dir, 'model-relay.json'), JSON.stringify(cfg))
+  const child = spawn(process.execPath, [path.join(__dirname, 'router.js'), dir], { stdio: 'ignore' })
+  t.after(() => {
+    child.kill()
+    for (const s of servers) s.close()
+    fs.rmSync(dir, { recursive: true, force: true })
+  })
+  await waitHealth(port)
+  return { port, dir, seen }
+}
+
+test('SEC-01 & SEC-02: router writes atomic 0700/0600 status files, byModel does not clobber pinned status, bad sids and symlinked STATUS_DIR are refused', async (t) => {
+  const env = await startCustomRouter(
+    t,
+    ({ port, anthropicPort, providerPorts }) => ({
+      format: 2,
+      port,
+      claudeUrl: `http://127.0.0.1:${anthropicPort}`,
+      providers: {
+        alt: {
+          baseUrl: `http://127.0.0.1:${providerPorts.alt}`,
+          token: 'KEY-ALT',
+          model: 'alt-primary',
+          efforts: ['low', 'high'],
+        },
+      },
+    }),
+    {
+      providers: {
+        alt: (_req, res) => {
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ from: 'alt' }))
+        },
+      },
+    },
+  )
+  const statusDir = path.join(env.dir, 'model-relay-status')
+
+  // Claude request writes claude\tclaude\n
+  const claudeReq = await call(env.port, {
+    method: 'POST',
+    p: '/v1/messages',
+    headers: { 'content-type': 'application/json', 'x-claude-code-session-id': 'main-claude' },
+    body: JSON.stringify({ model: 'claude-opus-5-5', messages: [{ role: 'user', content: 'hi' }] }),
+  })
+  assert.strictEqual(claudeReq.status, 200)
+  assert.strictEqual(fs.readFileSync(path.join(statusDir, 'main-claude'), 'utf8'), 'claude\tclaude\n')
+  if (process.platform !== 'win32') {
+    assert.strictEqual(fs.statSync(statusDir).mode & 0o777, 0o700, 'STATUS_DIR mode is 0700')
+    assert.strictEqual(fs.statSync(path.join(statusDir, 'main-claude')).mode & 0o777, 0o600, 'status file mode is 0600')
+  }
+
+  // Pinned session status is NOT clobbered by a byModel (rewrite === false) subagent request carrying a different effort
+  const pin = await call(env.port, { method: 'POST', p: '/__session', body: JSON.stringify({ sid: 'main-pinned', on: 'alt' }) })
+  assert.strictEqual(pin.status, 200)
+  assert.strictEqual(fs.readFileSync(path.join(statusDir, 'main-pinned'), 'utf8'), 'pinned\talt-primary\n')
+  const byModel = await call(env.port, {
+    method: 'POST',
+    p: '/v1/messages',
+    headers: { 'content-type': 'application/json', 'x-claude-code-session-id': 'main-pinned' },
+    body: JSON.stringify({ model: 'alt-primary', output_config: { effort: 'low' }, messages: [{ role: 'user', content: 'subagent' }] }),
+  })
+  assert.strictEqual(byModel.status, 200)
+  assert.strictEqual(fs.readFileSync(path.join(statusDir, 'main-pinned'), 'utf8'), 'pinned\talt-primary\n', 'byModel request does not clobber pinned status')
+  const hPinned = await getJson(env.port, '/__health?sid=main-pinned')
+  assert.strictEqual(hPinned.sessionEffort, null, 'byModel request does not pollute sessionLastRoute')
+
+  // Unsafe sids write nothing to STATUS_DIR
+  for (const badSid of ['../escape', '.dotfile', 'bad.limits', 'bad.tmp', 'bad.LIMITS', 'bad.TMP']) {
+    await call(env.port, {
+      method: 'POST',
+      p: '/v1/messages',
+      headers: { 'content-type': 'application/json', 'x-claude-code-session-id': badSid },
+      body: JSON.stringify({ model: 'claude-opus-5-5', messages: [] }),
+    })
+  }
+  assert.deepStrictEqual(fs.readdirSync(statusDir).sort(), ['main-claude', 'main-pinned'])
+
+  // Symlinked STATUS_DIR is refused without writing to target
+  if (process.platform !== 'win32') {
+    const targetDir = path.join(env.dir, 'symlink-target')
+    fs.mkdirSync(targetDir)
+    fs.rmSync(statusDir, { recursive: true, force: true })
+    fs.symlinkSync(targetDir, statusDir)
+    const viaLink = await call(env.port, { method: 'POST', p: '/__session', body: JSON.stringify({ sid: 'via-link', on: 'alt' }) })
+    assert.strictEqual(viaLink.status, 200)
+    assert.deepStrictEqual(fs.readdirSync(targetDir), [], 'symlinked STATUS_DIR is refused')
+  }
+})
+
+test('SEC-03 & SEC-05: /__session validates non-echoingly, /__health exposes metadata, multi-model/effort rewrites safely, and failover does not bleed', async (t) => {
+  let failA = false
+  const env = await startCustomRouter(
+    t,
+    ({ port, anthropicPort, providerPorts }) => ({
+      format: 2,
+      port,
+      claudeUrl: `http://127.0.0.1:${anthropicPort}`,
+      failover: { enabled: true, chain: ['prov-b'] },
+      retry: { enabled: true, attempts: 1, delayMs: 5, maxDelayMs: 5, failover: true },
+      providers: {
+        'prov-a': {
+          baseUrl: `http://127.0.0.1:${providerPorts['prov-a']}`,
+          token: 'KEY-A',
+          model: 'a-primary[1m]',
+          efforts: ['low', 'high'],
+          models: [
+            'a-primary[1m]',
+            { model: 'a-neon[1m]', efforts: ['high', 'xhigh'] },
+            { model: 'a-fast', efforts: [] },
+          ],
+          fallback: ['prov-b'],
+        },
+        'prov-b': {
+          baseUrl: `http://127.0.0.1:${providerPorts['prov-b']}`,
+          token: 'KEY-B',
+          model: 'b-primary',
+          efforts: ['low'],
+        },
+      },
+    }),
+    {
+      providers: {
+        'prov-a': (_req, res) => {
+          if (failA) {
+            res.writeHead(500, { 'content-type': 'application/json' })
+            return res.end('{"error":"boom"}')
+          }
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ from: 'prov-a' }))
+        },
+        'prov-b': (_req, res) => {
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ from: 'prov-b' }))
+        },
+      },
+    },
+  )
+
+  // /__health exposes providerModels and statusWriter: 'router'
+  const h0 = await getJson(env.port, '/__health?sid=s-multi')
+  assert.strictEqual(h0.statusWriter, 'router')
+  assert.deepStrictEqual(h0.providerModels['prov-a'], [
+    { model: 'a-primary[1m]', efforts: ['low', 'high'] },
+    { model: 'a-neon[1m]', efforts: ['high', 'xhigh'] },
+    { model: 'a-fast', efforts: [] },
+  ])
+  assert.strictEqual(h0.sessionModel, null)
+  assert.strictEqual(h0.sessionEffort, null)
+
+  // Reject invalid provider, model, effort, control chars, claude+model/effort, opt-out model+effort without echoing sensitive inputs
+  const secretToken = 'SENSITIVE-INPUT-999'
+  const rejects = [
+    { sid: 's-multi', on: secretToken },
+    { sid: 's-multi', on: 'prov-a', model: secretToken },
+    { sid: 's-multi', on: 'prov-a', effort: secretToken },
+    { sid: 's-multi', on: 'prov-a', model: `a-neon\n${secretToken}` },
+    { sid: 's-multi', on: 'prov-a', effort: 'high\n' },
+    { sid: 's-multi', on: 'prov-a', model: 'a-fast', effort: 'low' },
+    { sid: 's-multi', on: 'claude', effort: 'high' },
+    { sid: 's-multi', on: 'claude', model: secretToken },
+    { sid: 'bad sid', on: 'prov-a' },
+  ]
+  for (const payload of rejects) {
+    const res = await call(env.port, { method: 'POST', p: '/__session', body: JSON.stringify(payload) })
+    assert.strictEqual(res.status, 400, JSON.stringify(payload))
+    assert.ok(!res.body.includes(secretToken), `must not echo input: ${res.body}`)
+  }
+
+  // Valid pin to prov-a with unique shorthand 'neon' + 'xhigh'
+  const pinOk = await call(env.port, { method: 'POST', p: '/__session', body: JSON.stringify({ sid: 's-multi', on: 'prov-a', model: 'neon', effort: 'xhigh' }) })
+  assert.strictEqual(pinOk.status, 200, pinOk.body)
+  assert.deepStrictEqual(JSON.parse(pinOk.body), { ok: true, session: 'prov-a', model: 'a-neon[1m]', effort: 'xhigh' })
+
+  // /__health reports pinned sessionModel + sessionEffort, status file has 3 fields
+  const h1 = await getJson(env.port, '/__health?sid=s-multi')
+  assert.strictEqual(h1.session, 'prov-a')
+  assert.strictEqual(h1.sessionModel, 'a-neon[1m]')
+  assert.strictEqual(h1.sessionEffort, 'xhigh')
+  assert.strictEqual(fs.readFileSync(path.join(env.dir, 'model-relay-status', 's-multi'), 'utf8'), 'pinned\ta-neon[1m]\txhigh\n')
+
+  // Request to prov-a gets rewritten wire model and output_config.effort, preserving sibling output_config.format
+  const reqBody = JSON.stringify({ model: 'claude-opus-5-5', output_config: { format: { type: 'json' } }, messages: [{ role: 'user', content: 'hi' }] })
+  const resA = await call(env.port, {
+    method: 'POST',
+    p: '/v1/messages',
+    headers: { 'content-type': 'application/json', 'x-claude-code-session-id': 's-multi' },
+    body: reqBody,
+  })
+  assert.strictEqual(resA.status, 200, resA.body)
+  const sentA = JSON.parse(env.seen.providers['prov-a'].at(-1).body)
+  assert.strictEqual(sentA.model, 'a-neon')
+  assert.deepStrictEqual(sentA.output_config, { format: { type: 'json' }, effort: 'xhigh' })
+
+  // Failover from prov-a to prov-b must NOT bleed prov-a's pinned model ('a-neon') or effort ('xhigh') onto prov-b
+  failA = true
+  const resB = await call(env.port, {
+    method: 'POST',
+    p: '/v1/messages',
+    headers: { 'content-type': 'application/json', 'x-claude-code-session-id': 's-multi' },
+    body: reqBody,
+  })
+  assert.strictEqual(resB.status, 200, resB.body)
+  assert.strictEqual(JSON.parse(resB.body).from, 'prov-b')
+  const sentB = JSON.parse(env.seen.providers['prov-b'].at(-1).body)
+  assert.strictEqual(sentB.model, 'b-primary', 'fallback uses B primary model, never A pinned model')
+  assert.deepStrictEqual(sentB.output_config, { format: { type: 'json' } }, 'A effort never bleeds onto fallback B')
+
+  // Switching back to claude clears pin and resets status file to 2-field claude line
+  const backClaude = await call(env.port, { method: 'POST', p: '/__session', body: JSON.stringify({ sid: 's-multi', on: 'claude' }) })
+  assert.strictEqual(backClaude.status, 200, backClaude.body)
+  assert.strictEqual(fs.readFileSync(path.join(env.dir, 'model-relay-status', 's-multi'), 'utf8'), 'claude\tclaude\n')
+  const h2 = await getJson(env.port, '/__health?sid=s-multi')
+  assert.strictEqual(h2.session, 'claude')
+  assert.strictEqual(h2.sessionModel, null)
+  assert.strictEqual(h2.sessionEffort, null)
+})

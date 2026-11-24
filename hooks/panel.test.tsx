@@ -74,3 +74,96 @@ test('/provider opens the panel in one line; the panel offers this window\'s rou
   expect(written.at(-1)?.path.replace(/\\/g, '/')).toContain('/.claude/model-relay-status/s1')
   expect(written.at(-1)?.text).toBe('pinned\taaa-9\n')
 })
+
+test('panel renders model and effort buttons for active multi-model provider, sends opts to /__session, and skips hook status writes when router owns status (SEC-01)', async ($, on) => {
+  const sessionPayloads: Array<Record<string, unknown>> = []
+  const toasts: string[] = []
+  const written: Array<{ path: string; text: string }> = []
+  let currentModel = 'alt-pro[1m]'
+  let currentEffort: string | null = 'high'
+  const multiHealth = () => ({
+    ok: true,
+    session: 'alt',
+    sessionModel: currentModel,
+    sessionEffort: currentEffort,
+    statusWriter: 'router',
+    providers: { alt: 'alt-pro[1m]' },
+    providerModels: {
+      alt: [
+        { model: 'alt-pro[1m]', efforts: ['low', 'high'] },
+        { model: 'alt-neon[1m]', efforts: ['high', 'xhigh'] },
+      ],
+    },
+    aliases: {},
+    failoverChain: [],
+    config: { failoverEnabled: true, retryEnabled: true, proxyEnabled: false },
+    proxy: { enabled: false, certificate: false },
+  })
+  on('env.get', () => ({ value: undefined }))
+  on('ui.toast', (_$, e) => {
+    toasts.push(e.text)
+    return { value: undefined }
+  })
+  on('ui.status', () => ({ value: undefined }))
+  on('fs.write', (_$, e) => {
+    written.push({ path: e.path, text: e.text })
+    return { value: undefined }
+  })
+  on('ui.render', { component: 'AbovePrompt' }, ($, e) => {
+    const { Box } = $.ui.resolve(e)
+    return <Box key="engine" />
+  })
+  on('session.id', () => ({ value: 's2' }))
+  on('fs.read', () => ({ value: JSON.stringify({ format: 2, port: 8950 }) }))
+  on('process.run', (_$, e) => {
+    const url = e.argv.at(-1) ?? ''
+    if (url.includes('/__health')) {
+      return { value: { exitCode: 0, stdout: JSON.stringify(multiHealth()), stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+    }
+    if (url.includes('/__session')) {
+      const payload = JSON.parse(e.argv[e.argv.indexOf('-d') + 1] ?? '{}') as Record<string, unknown>
+      sessionPayloads.push(payload)
+      if (typeof payload.model === 'string') currentModel = payload.model
+      if (typeof payload.effort === 'string') currentEffort = payload.effort === 'auto' ? null : payload.effort
+      return {
+        value: {
+          exitCode: 0,
+          stdout: JSON.stringify({ ok: true, session: 'alt', model: currentModel, effort: currentEffort }),
+          stderr: '',
+          isStdoutTruncated: false,
+          isStderrTruncated: false,
+        },
+      }
+    }
+    return { value: { exitCode: 1, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+  })
+
+  await $.command.run(provider(''))
+  const ui = await $.ui.mount({ plugin: 'model-relay', surface: 'terminal', component: 'AbovePrompt', props })
+  expect(await ui.find({ type: 'Text', text: /\[high\]/ })).toBeDefined()
+  expect(await ui.find({ key: 'btn:alt:model:alt-pro[1m]' })).toBeDefined()
+  expect(await ui.find({ key: 'btn:alt:model:alt-neon[1m]' })).toBeDefined()
+  expect(await ui.find({ key: 'btn:alt:effort:auto' })).toBeDefined()
+  expect(await ui.find({ key: 'btn:alt:effort:low' })).toBeDefined()
+  expect(await ui.find({ key: 'btn:alt:effort:high' })).toBeDefined()
+
+  // Switch model via button
+  await ui.press({ key: 'btn:alt:model:alt-neon[1m]' })
+  expect(sessionPayloads.at(-1)).toEqual({ sid: 's2', on: 'alt', model: 'alt-neon[1m]' })
+  await ui.unmount()
+
+  // Reopen panel: now alt-neon[1m] is active and offers xhigh effort button
+  await $.command.run(provider(''))
+  const ui2 = await $.ui.mount({ plugin: 'model-relay', surface: 'terminal', component: 'AbovePrompt', props })
+  expect(await ui2.find({ key: 'btn:alt:effort:xhigh' })).toBeDefined()
+  await ui2.press({ key: 'btn:alt:effort:xhigh' })
+  expect(sessionPayloads.at(-1)).toEqual({ sid: 's2', on: 'alt', model: 'alt-neon[1m]', effort: 'xhigh' })
+  expect(toasts.at(-1)).toContain('xhigh')
+  await ui2.unmount()
+
+  // Command form `/provider alt auto` clears effort and skips hook status file write because statusWriter === 'router'
+  const cleared = await $.command.run(provider('alt auto'))
+  expect(sessionPayloads.at(-1)).toEqual({ sid: 's2', on: 'alt', effort: 'auto' })
+  expect(cleared.text).toContain('alt-neon[1m]')
+  expect(written.filter((w) => w.path.includes('model-relay-status'))).toEqual([])
+})
