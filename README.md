@@ -115,6 +115,27 @@ A provider answering 429 or 5xx is retried on the SAME provider with exponential
 
 Built-in presets (`zai`, `deepseek`, `kimi`, `minimax`, `openrouter`) fill in a service's address and the compatibility switches it needs. You always choose the `model`, because model IDs go out of date, and give the `token` (or `"env:VAR_NAME"`). `node tools/setup.mjs presets` lists them. For local gateways on `127.0.0.1`, set `launch: { command, args }` and the router will automatically spawn the gateway process whenever its port is closed.
 
+### Local gateways that need their own model prefix (example: Gemini through the official ACP server)
+
+A request goes to the provider whose own `model` equals the requested ID; `matchModels` patterns are only tried, in config order, for IDs that are no provider's own model. A local gateway that serves the same model IDs as another provider (for example Gemini both through a cloud proxy and locally) therefore needs its own prefix: if two providers both set `model` to `gemini-4-hydrogen-medium`, the first one in the file takes it, and other Gemini IDs go to whichever pattern such as `^gemini-4` is listed first. Give the gateway its own model prefix and matcher, and let the gateway strip the prefix itself. [acp-gateway](https://github.com/Nanako0129/acp-gateway) is one such gateway: it serves `/v1/messages` on `127.0.0.1` by driving Google's official Antigravity ACP server, so Claude Code subagents can run on Gemini:
+
+```json
+"agy": {
+  "baseUrl": "http://127.0.0.1:8960",
+  "token": "acp-gateway-local",
+  "model": "acp-gemini-4-hydrogen-medium[1m]",
+  "matchModels": ["^acp-gemini-"],
+  "authHeader": "bearer",
+  "stripCacheControl": true,
+  "retry": false,
+  "fallback": false
+}
+```
+
+- `retry: false` and `fallback: false`: prevents the relay from re-sending 429/5xx/529 responses or silently failing over to another provider. The gateway sends `x-should-retry: false` for Claude Code itself; the relay does not read that header.
+- `token`: this gateway listens on loopback only and needs no secret; the value is a placeholder.
+- To let the relay start it when the port is closed, install the package into a Python 3.11+ interpreter (`python3.11 -m pip install git+https://github.com/Nanako0129/acp-gateway`) and add `"launch": { "command": "python3.11", "args": ["-m", "acp_gateway.relay"] }`.
+
 ### Model alias routing (pointing `haiku` / `sonnet` / `opus` at a provider)
 
 `model-relay` separates three routing layers so they never get mixed up:
