@@ -85,6 +85,25 @@ const PRESETS = {
 // Format 2 is the only layout the router reads; "setup.mjs migrate" turns an older file into it
 const isFormat2 = (raw) => isObj(raw) && raw.format === 2
 
+const EFFORT_RE = /^[a-z0-9][a-z0-9_-]{0,31}$/
+const MODEL_ID_RE = /^[\x21-\x7e]{1,128}$/
+const STATUS_SID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/
+const STATUS_RESERVED_SUFFIX_RE = /\.(limits|tmp)$/i
+
+function parseEfforts(raw) {
+  if (!Array.isArray(raw)) return []
+  const out = []
+  const seen = new Set()
+  for (const item of raw) {
+    if (typeof item !== 'string') continue
+    const e = item.trim().toLowerCase()
+    if (!EFFORT_RE.test(e) || seen.has(e)) continue
+    seen.add(e)
+    out.push(e)
+  }
+  return out
+}
+
 // presets: the table a "preset" (or the provider's own name) is looked up in; migrate passes the older one
 function parseProvider(name, raw, env = process.env, baseRetry = parseRetryCfg(undefined), presets = PRESETS) {
   if (typeof raw !== 'object' || raw === null) return null
@@ -121,11 +140,34 @@ function parseProvider(name, raw, env = process.env, baseRetry = parseRetryCfg(u
     }
   }
 
+  const efforts = parseEfforts(raw.efforts)
+  const models = []
+  const seenModels = new Set()
+  if (Array.isArray(raw.models)) {
+    for (const item of raw.models) {
+      const rawM = typeof item === 'string' ? item : isObj(item) && typeof item.model === 'string' ? item.model : ''
+      const m = rawM.trim()
+      if (!MODEL_ID_RE.test(m)) continue
+      const key = m.toLowerCase()
+      if (seenModels.has(key)) continue
+      seenModels.add(key)
+      const hasOwnEfforts = isObj(item) && Array.isArray(item.efforts)
+      const ownEfforts = hasOwnEfforts ? parseEfforts(item.efforts) : [...efforts]
+      models.push({ model: m, efforts: ownEfforts })
+    }
+  }
+  const primaryTrimmed = model.trim()
+  if (!seenModels.has(primaryTrimmed.toLowerCase())) {
+    models.unshift({ model, efforts: [...efforts] })
+  }
+
   return {
     name,
     url,
     token,
     model,
+    models,
+    efforts,
     stripCacheControl,
     authHeader,
     matchSources: rawMatchers,
@@ -517,17 +559,156 @@ function rewriteBody(bodyBuf, opts = {}) {
   const model = opts.model || null
   const defaultModel = opts.defaultModel || null
   const noCache = Boolean(opts.stripCacheControl)
+  const effort = typeof opts.effort === 'string' && EFFORT_RE.test(opts.effort) ? opts.effort : null
   const j = JSON.parse(bodyBuf.toString('utf8'))
+  if (!isObj(j)) return { body: bodyBuf, restoreToolSearch: false }
   if (noCache) stripCache(j)
   const changedTools = applyToolChanges(j)
   const search = adaptToolSearch(j)
   const restoreToolSearch = Boolean(search && search.aliased)
   const targetModel = model || (defaultModel && isClaudeModel(j.model) ? defaultModel : null)
   const strippedSame = !targetModel && typeof j.model === 'string' && wireModel(j.model) !== j.model ? wireModel(j.model) : null
-  if (!targetModel && !strippedSame && !search && !noCache && !changedTools) return { body: bodyBuf, restoreToolSearch }
+  if (!targetModel && !strippedSame && !search && !noCache && !changedTools && !effort) return { body: bodyBuf, restoreToolSearch }
   if (targetModel) j.model = wireModel(targetModel)
   else if (strippedSame) j.model = strippedSame
+  if (effort) j.output_config = isObj(j.output_config) ? { ...j.output_config, effort } : { effort }
   return { body: Buffer.from(JSON.stringify(j), 'utf8'), restoreToolSearch }
+}
+
+// Session id safe as a plain file name in model-relay-status/: starts with ASCII alnum, up to 128 chars,
+// and never ends with the reserved .limits or .tmp suffixes.
+function isSafeStatusSid(sid) {
+  return typeof sid === 'string' && STATUS_SID_RE.test(sid) && !STATUS_RESERVED_SUFFIX_RE.test(sid)
+}
+
+function formatStatusLine(kind, label, effort = null) {
+  const clean = (s) => String(s ?? '').replace(/[\t\r\n]+/g, ' ')
+  const k = clean(kind)
+  const l = clean(label)
+  const e = typeof effort === 'string' ? effort.trim().toLowerCase() : ''
+  return e && EFFORT_RE.test(e) ? `${k}\t${l}\t${e}\n` : `${k}\t${l}\n`
+}
+
+function extractRequestEffort(bodyBuf) {
+  try {
+    const j = JSON.parse(bodyBuf.toString('utf8'))
+    if (!isObj(j) || !isObj(j.output_config) || typeof j.output_config.effort !== 'string') return null
+    const e = j.output_config.effort.trim().toLowerCase()
+    return EFFORT_RE.test(e) ? e : null
+  } catch {
+    return null
+  }
+}
+
+const CTRL_RE = /[\x00-\x1f\x7f]/
+
+function resolveProviderModel(provider, rawModel) {
+  if (!provider || typeof rawModel !== 'string' || CTRL_RE.test(rawModel)) return null
+  const q = rawModel.trim()
+  if (!MODEL_ID_RE.test(q)) return null
+  const ql = q.toLowerCase()
+  const list = Array.isArray(provider.models) && provider.models.length
+    ? provider.models
+    : (provider.model ? [{ model: provider.model, efforts: Array.isArray(provider.efforts) ? provider.efforts : [] }] : [])
+  if (!list.length) return null
+  const exact = list.find((e) => e.model.toLowerCase() === ql)
+  if (exact) return exact
+  const wireExact = list.filter((e) => wireModel(e.model).toLowerCase() === ql)
+  if (wireExact.length === 1) return wireExact[0]
+  if (wireExact.length > 1) return null
+  const noPrefix = list.filter((e) => {
+    const w = wireModel(e.model).toLowerCase()
+    const dash = w.indexOf('-')
+    return dash >= 0 && w.slice(dash + 1) === ql
+  })
+  if (noPrefix.length === 1) return noPrefix[0]
+  if (noPrefix.length > 1) return null
+  const sub = list.filter((e) => wireModel(e.model).toLowerCase().includes(ql) || e.model.toLowerCase().includes(ql))
+  return sub.length === 1 ? sub[0] : null
+}
+
+function resolveProviderEffort(provider, modelEntry, rawEffort) {
+  if (!provider) return null
+  if (rawEffort === '' || rawEffort === null || rawEffort === undefined) return { clear: true, effort: null }
+  if (typeof rawEffort !== 'string' || CTRL_RE.test(rawEffort)) return null
+  const val = rawEffort.trim().toLowerCase()
+  if (!val || val === 'auto') return { clear: true, effort: null }
+  if (!EFFORT_RE.test(val)) return null
+  const allowed = modelEntry && Array.isArray(modelEntry.efforts)
+    ? modelEntry.efforts
+    : (Array.isArray(provider.efforts) ? provider.efforts : [])
+  return allowed.includes(val) ? { clear: false, effort: val } : null
+}
+
+const STICKY_MAX = 512
+
+function capMapByAt(map, max = STICKY_MAX) {
+  const entries = Object.entries(map)
+  if (entries.length <= max) return map
+  entries.sort((a, b) => b[1].at - a[1].at)
+  const out = Object.create(null)
+  for (const [k, v] of entries.slice(0, Math.max(0, max))) out[k] = v
+  return out
+}
+
+function capSticky(state, max = STICKY_MAX) {
+  const base = parseState(state)
+  return { ...base, sticky: capMapByAt(base.sticky, max) }
+}
+
+function parseSessionPins(raw) {
+  const pins = Object.create(null)
+  if (isObj(raw) && isObj(raw.sessionPins)) {
+    for (const [sid, v] of Object.entries(raw.sessionPins)) {
+      if (!sid || !isObj(v) || typeof v.provider !== 'string' || !v.provider.trim() || typeof v.at !== 'number' || !Number.isFinite(v.at)) continue
+      const provider = v.provider.trim().toLowerCase()
+      const m = typeof v.model === 'string' ? v.model.trim() : ''
+      const e = typeof v.effort === 'string' ? v.effort.trim().toLowerCase() : ''
+      const model = MODEL_ID_RE.test(m) ? m : null
+      const effort = EFFORT_RE.test(e) ? e : null
+      pins[sid] = { provider, at: v.at, ...(model ? { model } : {}), ...(effort ? { effort } : {}) }
+    }
+  }
+  return capMapByAt(pins, STICKY_MAX)
+}
+
+function pruneSessionPins(pins, now) {
+  const out = Object.create(null)
+  if (isObj(pins)) {
+    for (const [sid, entry] of Object.entries(pins)) {
+      if (isObj(entry) && typeof entry.at === 'number' && now - entry.at < STICKY_TTL_MS) out[sid] = entry
+    }
+  }
+  return capMapByAt(out, STICKY_MAX)
+}
+
+function setSessionPin(pins, sid, provider, model, effort, now) {
+  const next = Object.assign(Object.create(null), isObj(pins) ? pins : {})
+  if (!sid) return capMapByAt(next, STICKY_MAX)
+  const p = typeof provider === 'string' ? provider.trim().toLowerCase() : ''
+  const m = typeof model === 'string' && MODEL_ID_RE.test(model.trim()) ? model.trim() : null
+  const e = typeof effort === 'string' && EFFORT_RE.test(effort.trim().toLowerCase()) ? effort.trim().toLowerCase() : null
+  if (!p || p === 'claude' || (!m && !e)) {
+    delete next[sid]
+  } else {
+    next[sid] = { provider: p, at: now, ...(m ? { model: m } : {}), ...(e ? { effort: e } : {}) }
+  }
+  return capMapByAt(next, STICKY_MAX)
+}
+
+function getSessionPin(state, pins, cfg, sid) {
+  const provider = getSessionProvider(state, cfg, sid)
+  const p = cfg?.providers?.[provider]
+  if (provider === 'claude' || !p) return { provider, model: null, effort: null }
+  const pin = isObj(pins) && Object.hasOwn(pins, sid) ? pins[sid] : null
+  if (!pin || pin.provider !== provider) return { provider, model: p.model, effort: null }
+  const list = Array.isArray(p.models) && p.models.length ? p.models : [{ model: p.model, efforts: Array.isArray(p.efforts) ? p.efforts : [] }]
+  const matchedEntry = pin.model ? list.find((e) => e.model.toLowerCase() === pin.model.toLowerCase()) : null
+  const entry = matchedEntry || list.find((e) => e.model.toLowerCase() === p.model.toLowerCase()) || list[0]
+  const validModel = matchedEntry ? matchedEntry.model : p.model
+  const allowedEfforts = entry && Array.isArray(entry.efforts) ? entry.efforts : (Array.isArray(p.efforts) ? p.efforts : [])
+  const validEffort = pin.effort && allowedEfforts.includes(pin.effort) ? pin.effort : null
+  return { provider, model: validModel, effort: validEffort }
 }
 
 // Message Threads (anthropic-beta "message-threads-*"): Claude Code keeps the conversation on Anthropic's server and
@@ -581,6 +762,17 @@ module.exports = {
   onLimited,
   onClaudeOk,
   rewriteBody,
+  isSafeStatusSid,
+  formatStatusLine,
+  extractRequestEffort,
+  resolveProviderModel,
+  resolveProviderEffort,
+  STICKY_MAX,
+  capSticky,
+  parseSessionPins,
+  pruneSessionPins,
+  setSessionPin,
+  getSessionPin,
   toolSearchRestorer,
   threadBetaRefusal,
   upstreamPath,

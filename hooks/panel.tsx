@@ -3,14 +3,14 @@
 // It is for one thing, picking this window's model; what every window shares stays folded behind Settings [s].
 import type { EngineInterface } from 'claude-code'
 import type { PanelData, PanelUi } from '../types'
-import { fit, pingText, statText } from './logic'
+import { fit, has, pingText, statText } from './logic'
 
 type Elements = ReturnType<EngineInterface['ui']['resolve']>
 
 export type PanelView = PanelData & PanelUi & { columns: number }
 
 export type PanelActions = {
-  switchTo: (target: string) => void
+  switchTo: (target: string, opts?: { model?: string; effort?: string }) => void
   askClaude: (ask: boolean) => void
   ping: () => void
   probe: () => void
@@ -75,26 +75,73 @@ export function panelTree(ui: Elements, v: PanelView, act: PanelActions) {
     </Box>
   )
 
-  const providerRows = Object.entries(v.providers).map(([name, model], idx) => {
+  const shortModel = (m: string) => m.replace(/\[[^\]]*\]$/, '')
+  const providerRows = Object.entries(v.providers).flatMap(([name, model], idx) => {
     const active = v.session === name
+    const displayedModel = active && v.sessionModel ? v.sessionModel : model
+    const activeEffort = active && v.sessionEffort ? v.sessionEffort : null
+    const modelOpts = v.providerModels && has(v.providerModels, name) ? v.providerModels[name]! : []
+    const activeEntry = modelOpts.find((o) => o.model.toLowerCase() === displayedModel.toLowerCase()) ?? modelOpts[0]
+    const effortOpts = activeEntry?.efforts ?? []
     // the last real request and the last test are shown apart: a long reply is not a slow provider
     const notes = [statText(v.stats[name], v.lang), pingText(v.ping?.[name], v.lang)].filter((x) => x !== null)
     const hk = String(idx + 2)
-    return (
+    const rows = [
       <Box key={`route:${name}`}>
         <Box flexGrow={1}>
           <Text>
             {mark(active)}
             <Text bold={active}>{name.padEnd(8)}</Text>{' '}
-            <Text color={active ? ACCENT : undefined}>{model}</Text>
+            <Text color={active ? ACCENT : undefined}>{displayedModel}</Text>
+            {activeEffort ? <Text color="magenta">{` [${activeEffort}]`}</Text> : null}
             {notes.map((n, i) => <Text key={`note:${i}`} color={n.color}>{` · ${n.text}`}</Text>)}
           </Text>
         </Box>
         {active
           ? inUse
           : <Button key={`btn:${name}`} label={en ? `Use [${hk}]` : `切換 [${hk}]`} hotkey={hk} variant="primary" onPress={() => act.switchTo(name)} />}
-      </Box>
-    )
+      </Box>,
+    ]
+    if (active && modelOpts.length > 1) {
+      rows.push(
+        <Box key={`models:${name}`}>
+          <Text dimColor>{'  '}{en ? 'Model: ' : '模型：'}</Text>
+          {modelOpts.map((opt) => {
+            const isCur = opt.model.toLowerCase() === displayedModel.toLowerCase()
+            return (
+              <Button
+                key={`btn:${name}:model:${opt.model}`}
+                label={shortModel(opt.model)}
+                {...(isCur ? { variant: 'primary' as const } : {})}
+                onPress={() => act.switchTo(name, { model: opt.model })}
+              />
+            )
+          })}
+        </Box>,
+      )
+    }
+    if (active && effortOpts.length > 0) {
+      rows.push(
+        <Box key={`efforts:${name}`}>
+          <Text dimColor>{'  '}{en ? 'Effort: ' : '強度：'}</Text>
+          <Button
+            key={`btn:${name}:effort:auto`}
+            label="auto"
+            {...(!activeEffort ? { variant: 'primary' as const } : {})}
+            onPress={() => act.switchTo(name, { model: displayedModel, effort: 'auto' })}
+          />
+          {effortOpts.map((eff) => (
+            <Button
+              key={`btn:${name}:effort:${eff}`}
+              label={eff}
+              {...(activeEffort === eff ? { variant: 'primary' as const } : {})}
+              onPress={() => act.switchTo(name, { model: displayedModel, effort: eff })}
+            />
+          ))}
+        </Box>,
+      )
+    }
+    return rows
   })
 
   // One row per switch: what it is, whether it is on, and what flipping it does. failover and retry apply on the

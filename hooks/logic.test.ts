@@ -32,6 +32,7 @@ import {
   parseAvatars,
   parseHealth,
   parseLocal,
+  parseProviderArgs,
   pingArgv,
   pingReport,
   pingText,
@@ -118,7 +119,7 @@ test('health, panel data, and status texts (zh and en) come from the router alon
   assert(statusText({ ...h, session: 'aaa', failoverSince: 0 }, false, 'en').includes('pinned'), 'sticky session en')
   assert(parseHealth('{"ok":true,"mode":"glm"}')!.session === 'claude', 'old router answer reads as claude')
   assert(statusText(null, true).includes('直連') && !/GLM/i.test(statusText(null, true)), 'router down, direct, no provider named')
-  const fc = (x: [string, string]) => x.join(' ')
+  const fc = (x: string[]) => x.join(' ')
   assert(fc(statusFields({ ...h, failoverSince: 0 }, false)) === 'claude claude', 'fields: claude')
   assert(fc(statusFields({ ...h, session: 'aaa', failoverSince: 0 }, false)) === 'pinned aaa-9', 'fields: pinned to the model')
   assert(fc(statusFields(h, false)) === 'failover aaa-9', 'fields: failover names the model')
@@ -465,4 +466,65 @@ test('base64 matches the standard encoding both ways, padding included', () => {
     assert(base64ToBytes(bytesToBase64(bytes)).join() === bytes.join(), `${n} bytes survive the round trip`)
   }
   assert(base64ToBytes('TWE=').join() === '77,97' && base64ToBytes('TQ').join() === '77', 'padded or not')
+})
+
+test('parseHealth parses providerModels/sessionModel/sessionEffort/statusWriter; statusFields emits 3-field line; statusFile enforces SEC-02', () => {
+  const h = health({
+    session: 'alt',
+    providers: { alt: 'alt-1' },
+    providerModels: {
+      ALT: [
+        { model: 'alt-1', efforts: ['Low', 'High'] },
+        { model: 'alt-2[1m]', efforts: ['xhigh'] },
+      ],
+      __proto__: [{ model: 'evil', efforts: ['high'] }],
+    },
+    sessionModel: 'alt-2[1m]',
+    sessionEffort: 'XHIGH',
+    statusWriter: 'ROUTER',
+  })
+  assert(h.statusWriter === 'router', 'statusWriter parsed')
+  assert(h.sessionModel === 'alt-2[1m]' && h.sessionEffort === 'xhigh', 'sessionModel and sessionEffort parsed')
+  assert(h.providerModels?.alt?.length === 2 && h.providerModels.alt[1]!.efforts[0] === 'xhigh', 'providerModels parsed')
+  assert(!has(h.providerModels as Record<string, unknown>, '__proto__'), 'no prototype pollution')
+
+  const fields = statusFields(h, false)
+  assert(fields.length === 3 && fields[0] === 'pinned' && fields[1] === 'alt-2[1m]' && fields[2] === 'xhigh', JSON.stringify(fields))
+  const sf3 = statusFile('/c', 'sid-1', fields)!
+  assert(sf3.line === 'pinned\talt-2[1m]\txhigh\n', sf3.line)
+  const sf2 = statusFile('/c', 'sid-1', ['pinned', 'alt-1'])!
+  assert(sf2.line === 'pinned\talt-1\n', sf2.line)
+
+  // SEC-02 sid checks
+  for (const bad of ['.hidden', '.', '..', '../x', 's1.limits', 's1.LIMITS', 's1.tmp', 's1.TMP', 'a'.repeat(129), 'a b']) {
+    assert(statusFile('/c', bad, ['claude', 'claude']) === null, `reject ${bad}`)
+  }
+  assert(statusFile('/c', 'a'.repeat(128), ['claude', 'claude']) !== null, '128 chars allowed')
+
+  // buildPanelData, statusText, switchedText carry model & effort
+  const pd = buildPanelData(h, 8950, false, 'en', 0)
+  assert(pd.sessionModel === 'alt-2[1m]' && pd.sessionEffort === 'xhigh' && pd.providerModels?.alt?.length === 2, 'panel data carries new fields')
+  assert(statusText(h, false, 'en').includes('alt-2[1m] · xhigh'), statusText(h, false, 'en'))
+  assert(switchedText('alt', 'alt-2[1m]', 'en', 'xhigh').includes('effort: xhigh'), switchedText('alt', 'alt-2[1m]', 'en', 'xhigh'))
+
+  // sessionArgv includes model & effort when passed, preserves 4-arg shape when omitted
+  const cfg = parseLocal({ port: 9001 })!
+  const withOpts = sessionArgv(cfg, 's1', 'alt', false, { model: 'alt-2', effort: 'xhigh' })
+  assert(withOpts.includes('{"sid":"s1","on":"alt","model":"alt-2","effort":"xhigh"}'), withOpts.join(' '))
+  const plain = sessionArgv(cfg, 's1', 'alt', false)
+  assert(plain.includes('{"sid":"s1","on":"alt"}'), plain.join(' '))
+})
+
+test('parseProviderArgs disambiguates 0, 1, and 2 extra args cleanly', () => {
+  const models = [
+    { model: 'acp-alt-4-pro[1m]', efforts: ['low', 'high'] },
+    { model: 'acp-alt-4-neon[1m]', efforts: ['high', 'xhigh'] },
+    { model: 'acp-alt-4-fast', efforts: ['fast', 'high'] },
+  ]
+  assert(JSON.stringify(parseProviderArgs([], models)) === '{}', '0 args')
+  assert(JSON.stringify(parseProviderArgs(['auto'], models)) === '{"effort":"auto"}', 'auto clears effort')
+  assert(JSON.stringify(parseProviderArgs(['xhigh'], models)) === '{"effort":"xhigh"}', '1 arg matching effort only')
+  assert(JSON.stringify(parseProviderArgs(['neon'], models)) === '{"model":"neon"}', '1 arg matching model')
+  assert(JSON.stringify(parseProviderArgs(['fast'], models)) === '{"model":"fast"}', '1 arg uniquely matching model wins over effort')
+  assert(JSON.stringify(parseProviderArgs(['neon', 'xhigh'], models)) === '{"model":"neon","effort":"xhigh"}', '2 args: model + effort')
 })

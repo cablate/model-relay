@@ -1,4 +1,4 @@
-import type { AvatarEntry, AvatarMode, AvatarView, PanelData, PingStat, ProviderStat } from '../types'
+import type { AvatarEntry, AvatarMode, AvatarView, PanelData, PingStat, ProviderModelOption, ProviderStat } from '../types'
 
 // What the hook takes from the config file: where the router listens and which node runs it. Providers, aliases and the
 // failover chain come from the router's /__health only, so the plugin never second-guesses how the router reads a config.
@@ -116,8 +116,17 @@ export function healthWaitArgv(cfg: LocalCfg, sid: string, isWin = true): string
   return [curlBin(isWin), '-s', '-m', '2', '--retry', '6', '--retry-connrefused', '--retry-delay', '1', healthUrl(cfg, sid)]
 }
 
-export function sessionArgv(cfg: LocalCfg, sid: string, on: string, isWin = true): string[] {
-  return [curlBin(isWin), '-s', '-m', '3', '-X', 'POST', '-H', 'content-type: application/json', '-d', JSON.stringify({ sid, on }), `${routerUrl(cfg)}/__session`]
+export function sessionArgv(
+  cfg: LocalCfg,
+  sid: string,
+  on: string,
+  isWin = true,
+  opts?: { model?: string; effort?: string },
+): string[] {
+  const payload: Record<string, string> = { sid, on }
+  if (opts?.model !== undefined) payload.model = opts.model
+  if (opts?.effort !== undefined) payload.effort = opts.effort
+  return [curlBin(isWin), '-s', '-m', '3', '-X', 'POST', '-H', 'content-type: application/json', '-d', JSON.stringify(payload), `${routerUrl(cfg)}/__session`]
 }
 
 // The router tests each provider for up to 15 s, after waiting up to 10 s for a local one it starts itself
@@ -201,6 +210,10 @@ export interface Health {
   nextClaudeTry: number
   sessionsOnCustom?: number
   providers: Record<string, string> // provider name -> model id; empty when none is usable
+  providerModels?: Record<string, ProviderModelOption[]>
+  sessionModel?: string
+  sessionEffort?: string
+  statusWriter?: string
   aliases: Record<string, string>
   failoverProvider?: string // absent when failover has nobody to hand over to
   failoverChain: string[]
@@ -245,6 +258,27 @@ export function parseHealth(stdout: string): Health | null {
       seenModels = {}
       for (const [k, v] of Object.entries(j.seenModels)) if (typeof v === 'number') seenModels[k.toLowerCase()] = v
     }
+    let providerModels: Record<string, ProviderModelOption[]> | undefined
+    if (isObj(j.providerModels)) {
+      const pmEntries: [string, ProviderModelOption[]][] = []
+      for (const [k, v] of Object.entries(j.providerModels)) {
+        const key = k.toLowerCase()
+        if (!Array.isArray(v) || key === '__proto__' || key === 'constructor' || key === 'prototype') continue
+        const entries: ProviderModelOption[] = []
+        for (const item of v) {
+          if (!isObj(item)) continue
+          const m = str(item.model)
+          if (!m) continue
+          const effs = Array.isArray(item.efforts) ? item.efforts.map(str).filter(Boolean).map((e) => e.toLowerCase()) : []
+          entries.push({ model: m, efforts: effs })
+        }
+        if (entries.length) pmEntries.push([key, entries])
+      }
+      providerModels = Object.fromEntries(pmEntries)
+    }
+    const sessionModel = str(j.sessionModel)
+    const sessionEffort = str(j.sessionEffort).toLowerCase()
+    const statusWriter = str(j.statusWriter).toLowerCase()
     const failoverProvider = str(j.failoverProvider).toLowerCase()
     const failoverChain = Array.isArray(j.failoverChain) ? j.failoverChain.map(str).filter(Boolean).map((n) => n.toLowerCase()) : []
     const configDirs = [j.configDir, j.configDirArg].map(str).filter(Boolean)
@@ -262,6 +296,10 @@ export function parseHealth(stdout: string): Health | null {
       nextClaudeTry: num(j.nextClaudeTry),
       sessionsOnCustom: num(j.sessionsOnCustom),
       providers: lowerMap(j.providers, false),
+      ...(providerModels ? { providerModels } : {}),
+      ...(sessionModel ? { sessionModel } : {}),
+      ...(sessionEffort ? { sessionEffort } : {}),
+      ...(statusWriter ? { statusWriter } : {}),
       aliases: lowerMap(j.aliases, true),
       ...(failoverProvider ? { failoverProvider } : {}),
       failoverChain,
@@ -298,11 +336,14 @@ export function buildPanelData(h: Health | null, port: number, direct: boolean, 
     direct,
     port,
     session: h?.session ?? 'claude',
+    ...(h?.sessionModel ? { sessionModel: h.sessionModel } : {}),
+    ...(h?.sessionEffort ? { sessionEffort: h.sessionEffort } : {}),
     failoverProvider: h?.failoverProvider ?? null,
     failoverSince: h?.failoverSince ?? 0,
     nextClaudeTry: h?.nextClaudeTry ?? 0,
     sessionsOnCustom: h?.sessionsOnCustom ?? 0,
     providers: h?.providers ?? {},
+    ...(h?.providerModels ? { providerModels: h.providerModels } : {}),
     aliases: h?.aliases ?? {},
     failoverChain: h?.failoverChain ?? [],
     switches: h?.switches ?? null,
@@ -364,12 +405,18 @@ export function startFailedText(configDir: string, lang: 'zh' | 'en' = 'zh'): st
     : `轉發站沒有啟動，這個對話暫時直連 Claude；原因記在 ${configDir}/model-relay.log（或執行 /provider doctor）`
 }
 
+function pinnedShownAs(h: Health, name: string): string | undefined {
+  if (!has(h.providers, name)) return undefined
+  const model = h.sessionModel || h.providers[name]!
+  return h.sessionEffort ? `${model} · ${h.sessionEffort}` : model
+}
+
 export function statusText(h: Health | null, direct: boolean, lang: 'zh' | 'en' = 'zh'): string {
   if (!h) {
     if (lang === 'en') return direct ? 'Relay offline: connected directly to Claude' : 'Relay offline, restarting…'
     return direct ? '轉發站離線：主線暫時直連 Claude，model-relay 子代理無法使用' : '轉發站離線，正在重啟…'
   }
-  const pinned = h.session !== 'claude' && has(h.providers, h.session) ? h.providers[h.session] : undefined
+  const pinned = h.session !== 'claude' ? pinnedShownAs(h, h.session) : undefined
   if (pinned) return lang === 'en' ? `Main: ${pinned} (pinned for this window)` : `主線：${pinned}（這個視窗固定用它）`
   if (h.failoverSince) {
     const to = h.failoverProvider ? h.providers[h.failoverProvider] ?? h.failoverProvider : ''
@@ -379,8 +426,10 @@ export function statusText(h: Health | null, direct: boolean, lang: 'zh' | 'en' 
   return lang === 'en' ? 'Main: Claude' : '主線：Claude'
 }
 
-// The relay state of this session for statusline tools (coralline's relay segment), written by the hook to
-// <config dir>/model-relay-status/<session id> as one line "kind<TAB>label":
+export type StatusFields = [string, string] | [string, string, string]
+
+// The relay state of this session for statusline tools (coralline's relay segment), written to
+// <config dir>/model-relay-status/<session id> as one line "kind<TAB>label[<TAB>effort]":
 //   claude   <tab> claude     this session goes to Claude through the relay
 //   pinned   <tab> <model>    pinned to a provider (/provider, or a failover that pinned it)
 //   failover <tab> <model>    Claude's limit is reached; the next request goes to that model
@@ -388,10 +437,12 @@ export function statusText(h: Health | null, direct: boolean, lang: 'zh' | 'en' 
 //   offline  <tab> offline    no router of ours answers for this window
 //   direct   <tab> claude     no router of ours answers, so this window talks to Claude directly
 // foreign: the port answers for another config dir's router, which this window never counts as its own
-export function statusFields(h: Health | null, direct: boolean, foreign = false): [string, string] {
+export function statusFields(h: Health | null, direct: boolean, foreign = false): StatusFields {
   if (foreign || !h) return direct ? ['direct', 'claude'] : ['offline', 'offline']
-  const pinned = h.session !== 'claude' && has(h.providers, h.session) ? h.providers[h.session] : undefined
-  if (pinned) return ['pinned', pinned]
+  if (h.session !== 'claude' && has(h.providers, h.session)) {
+    const label = h.sessionModel || h.providers[h.session]!
+    return h.sessionEffort ? ['pinned', label, h.sessionEffort] : ['pinned', label]
+  }
   if (h.failoverSince) {
     const to = h.failoverProvider ? h.providers[h.failoverProvider] ?? h.failoverProvider : ''
     return to ? ['failover', to] : ['limit', 'claude']
@@ -399,12 +450,49 @@ export function statusFields(h: Health | null, direct: boolean, foreign = false)
   return ['claude', 'claude']
 }
 
-// The status file's path and line; null for a session id that is not a plain file name. Tabs and line breaks in a
+// The status file's path and line; null for a session id that is not a safe plain file name. Tabs and line breaks in a
 // model id would split the line, so they become spaces.
-export function statusFile(configDir: string, sid: string, fields: [string, string]): { path: string; line: string } | null {
-  if (!/^[A-Za-z0-9._-]+$/.test(sid) || sid === '.' || sid === '..') return null
+export function statusFile(configDir: string, sid: string, fields: StatusFields): { path: string; line: string } | null {
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(sid) || /\.(limits|tmp)$/i.test(sid)) return null
   const clean = (s: string) => s.replace(/[\t\r\n]+/g, ' ')
-  return { path: `${configDir}/model-relay-status/${sid}`, line: `${clean(fields[0])}\t${clean(fields[1])}\n` }
+  const extra = fields[2] ? clean(fields[2]).trim() : ''
+  const line = extra ? `${clean(fields[0])}\t${clean(fields[1])}\t${extra}\n` : `${clean(fields[0])}\t${clean(fields[1])}\n`
+  return { path: `${configDir}/model-relay-status/${sid}`, line }
+}
+
+function matchesModelOption(query: string, models: ProviderModelOption[] | undefined): boolean {
+  if (!models || models.length === 0) return false
+  const q = query.trim().toLowerCase()
+  if (!q) return false
+  const wire = (m: string) => m.replace(/\[[^\]]*\]$/, '').toLowerCase()
+  if (models.some((e) => e.model.toLowerCase() === q)) return true
+  const wireMatches = models.filter((e) => wire(e.model) === q)
+  if (wireMatches.length === 1) return true
+  if (wireMatches.length > 1) return false
+  const noPrefix = models.filter((e) => {
+    const w = wire(e.model)
+    const dash = w.indexOf('-')
+    return dash >= 0 && w.slice(dash + 1) === q
+  })
+  if (noPrefix.length === 1) return true
+  if (noPrefix.length > 1) return false
+  const sub = models.filter((e) => wire(e.model).includes(q) || e.model.toLowerCase().includes(q))
+  return sub.length === 1
+}
+
+// Parses optional [model] [effort] arguments after `/provider <name>`.
+export function parseProviderArgs(
+  parts: string[],
+  providerModels: ProviderModelOption[] | undefined,
+): { model?: string; effort?: string } {
+  if (parts.length === 0) return {}
+  if (parts.length >= 2) return { model: parts[0]!, effort: parts[1]! }
+  const a = parts[0]!.trim().toLowerCase()
+  const allowedEfforts = new Set((providerModels ?? []).flatMap((m) => m.efforts.map((e) => e.toLowerCase())))
+  if (a === 'auto' || (allowedEfforts.has(a) && !matchesModelOption(a, providerModels))) {
+    return { effort: a }
+  }
+  return { model: parts[0]! }
 }
 
 // ---- avatar pane ----
@@ -821,13 +909,19 @@ export function statText(st: ProviderStat | undefined, lang: 'zh' | 'en'): { tex
 }
 
 // What one switch came to, in one line: the status line and the panel already show the rest
-export function switchedText(target: string, model: string, lang: 'zh' | 'en' = 'zh'): string {
+export function switchedText(
+  target: string,
+  model: string,
+  lang: 'zh' | 'en' = 'zh',
+  effort?: string | null,
+): string {
   if (target === 'claude') {
     return lang === 'en'
       ? '✓ This window is back on Claude (the next turn rebuilds the prompt cache)'
       : '✓ 這個視窗切回 Claude（下一輪會重建一次快取）'
   }
-  return lang === 'en' ? `✓ This window now uses ${target} (${model})` : `✓ 這個視窗改用 ${target}（${model}）`
+  const detail = effort ? `${model}, effort: ${effort}` : model
+  return lang === 'en' ? `✓ This window now uses ${target} (${detail})` : `✓ 這個視窗改用 ${target}（${detail}）`
 }
 
 // One row per route, each written as the command that picks it
@@ -911,7 +1005,7 @@ export function helpText(providers: string[], lang: 'zh' | 'en' = 'zh'): string 
   const groups: [string, [string, string][]][] = [
     [en ? 'This window:' : '這個視窗：', [
       ['/provider', en ? "Open the panel to switch this window's model" : '開啟面板，切換這個視窗的模型'],
-      ['/provider <name> | claude', en ? 'Switch this window directly (e.g. /provider claude)' : '直接切換這個視窗（例：/provider claude）'],
+      ['/provider <name> [model] [effort] | claude', en ? 'Switch this window directly (e.g. /provider claude)' : '直接切換這個視窗（例：/provider claude）'],
       ['/provider status', en ? 'The same status as text' : '文字版狀態'],
     ]],
     [en ? 'Shared by every window:' : '所有視窗共用：', [

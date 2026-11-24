@@ -8,6 +8,7 @@ const fs = require('fs')
 const path = require('path')
 const net = require('net')
 const tls = require('tls')
+const crypto = require('crypto')
 const { pipeline } = require('stream')
 const L = require('./logic')
 const PKI = require('./pki')
@@ -64,11 +65,12 @@ const readCfg = () => {
 
 const cfgMissing = () => L.cfgMissingMessage(unresolved)
 
-let state = (() => {
+let { state, sessionPins } = (() => {
   try {
-    return L.parseState(JSON.parse(fs.readFileSync(STATE_FILE, 'utf8')))
+    const raw = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'))
+    return { state: L.capSticky(L.parseState(raw)), sessionPins: L.parseSessionPins(raw) }
   } catch {
-    return L.emptyState()
+    return { state: L.emptyState(), sessionPins: Object.create(null) }
   }
 })()
 
@@ -103,9 +105,11 @@ const log = (line) => {
 }
 
 const save = () => {
-  state = L.pruneSticky(state, Date.now())
+  const now = Date.now()
+  state = L.capSticky(L.pruneSticky(state, now))
+  sessionPins = L.pruneSessionPins(sessionPins, now)
   try {
-    fs.writeFileSync(STATE_FILE, JSON.stringify({ ...state, updatedAt: Date.now() }, null, 2) + '\n')
+    fs.writeFileSync(STATE_FILE, JSON.stringify({ ...state, sessionPins, updatedAt: now }, null, 2) + '\n')
   } catch {}
 }
 
@@ -116,8 +120,60 @@ const setState = (next, why) => {
 }
 setInterval(save, 600000).unref()
 
-// Each session's hook writes its status file and never deletes it (the plugin API has no delete); sweep ended ones
+// Each session's status file (model-relay-status/<session id>): written atomically by the router while online,
+// and swept once untouched for a week.
+const STATUS_CACHE_MAX = 256
+const writtenStatus = new Map() // sid -> { line, at }
+const sessionLastRoute = new Map() // sid -> { kind, label, effort, provider, at }
+
+function rememberRoute(sid, entry) {
+  if (!sid) return
+  sessionLastRoute.delete(sid)
+  if (sessionLastRoute.size >= STATUS_CACHE_MAX) sessionLastRoute.delete(sessionLastRoute.keys().next().value)
+  sessionLastRoute.set(sid, { ...entry, at: Date.now() })
+}
+
+function writeStatus(sid, kind, label, effort = null) {
+  if (!L.isSafeStatusSid(sid)) return
+  const line = L.formatStatusLine(kind, label, effort)
+  const now = Date.now()
+  const prev = writtenStatus.get(sid)
+  if (prev && prev.line === line && now - prev.at < 86400000) return
+  let fd
+  let tmp = ''
+  try {
+    fs.mkdirSync(STATUS_DIR, { recursive: true, mode: 0o700 })
+    if (!fs.lstatSync(STATUS_DIR).isDirectory()) return
+    tmp = path.join(STATUS_DIR, `.status.${process.pid}.${crypto.randomBytes(6).toString('hex')}.tmp`)
+    fd = fs.openSync(tmp, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | (fs.constants.O_NOFOLLOW || 0), 0o600)
+    fs.writeFileSync(fd, line, 'utf8')
+    fs.closeSync(fd)
+    fd = undefined
+    fs.renameSync(tmp, path.join(STATUS_DIR, sid))
+    tmp = ''
+    writtenStatus.delete(sid)
+    if (writtenStatus.size >= STATUS_CACHE_MAX) writtenStatus.delete(writtenStatus.keys().next().value)
+    writtenStatus.set(sid, { line, at: now })
+  } catch {
+    if (fd !== undefined) {
+      try {
+        fs.closeSync(fd)
+      } catch {}
+    }
+    if (tmp) {
+      try {
+        fs.unlinkSync(tmp)
+      } catch {}
+    }
+  }
+}
+
 const sweepStatus = () => {
+  try {
+    if (!fs.lstatSync(STATUS_DIR).isDirectory()) return
+  } catch {
+    return
+  }
   let names = []
   try {
     names = fs.readdirSync(STATUS_DIR)
@@ -144,8 +200,12 @@ const short = (sid) => (sid ? String(sid).slice(0, 8) : '-')
 const stick = (sid, providerName, why) => {
   if (!sid || !providerName) return
   const prev = state.sticky?.[sid]?.provider
-  state = L.setSticky(state, sid, providerName, Date.now())
-  if (prev !== providerName) setState(state, `session ${short(sid)} moved to ${providerName} (${why})`)
+  const now = Date.now()
+  state = L.capSticky(L.setSticky(state, sid, providerName, now))
+  if (prev !== providerName) {
+    sessionPins = L.setSessionPin(sessionPins, sid, 'claude', null, null, now)
+    setState(state, `session ${short(sid)} moved to ${providerName} (${why})`)
+  }
 }
 
 const logReq = (entry) => {
@@ -220,18 +280,31 @@ function toProvider(provider, req, res, body, rewrite, sid, attempt = 0, tried =
     return res.end(JSON.stringify({ type: 'error', error: { type: 'invalid_request_error', message: threadRefusal } }))
   }
   const t0 = Date.now()
+  const cfgNow = readCfg()
+  const pin = rewrite && sid ? L.getSessionPin(state, sessionPins, cfgNow, sid) : null
+  const isPinnedHere = Boolean(pin && pin.provider === provider.name)
+  const pinnedModel = isPinnedHere ? pin.model : null
+  const pinnedEffort = isPinnedHere ? pin.effort : null
   let out = body
   let restoreToolSearch = false
   if (body.length) {
     try {
       ;({ body: out, restoreToolSearch } = L.rewriteBody(body, {
-        model: rewrite ? provider.model : null,
+        model: rewrite ? (pinnedModel || provider.model) : null,
         defaultModel: provider.model,
+        effort: rewrite && isPinnedHere ? pinnedEffort : null,
         stripCacheControl: provider.stripCacheControl,
       }))
     } catch {
       if (rewrite) return apiError(res, 400, `could not rewrite request for provider "${provider.name}"`)
     }
+  }
+  if (rewrite && sid) {
+    const kind = isPinnedHere ? 'pinned' : (state.failoverSince ? 'failover' : 'pinned')
+    const label = pinnedModel || provider.model
+    const effort = pinnedEffort || L.extractRequestEffort(body)
+    rememberRoute(sid, { kind, label, effort, provider: provider.name })
+    writeStatus(sid, kind, label, effort)
   }
   const headers = P.authHeaders(provider, req.headers)
   // The answer is read to rename the search back, so it has to come uncompressed
@@ -311,6 +384,10 @@ function toClaude(cfg, req, res, body, trial, sid) {
   send(cfg.claudeUrl, req, res, body, { ...req.headers }, (ur) => {
     if (ur.statusCode !== 429) {
       if (trial && ur.statusCode < 400) setState(L.onClaudeOk(state), 'claude ok again: new sessions use Claude')
+      if (sid) {
+        rememberRoute(sid, { kind: 'claude', label: 'claude', effort: null, provider: 'claude' })
+        writeStatus(sid, 'claude', 'claude', null)
+      }
       res.writeHead(ur.statusCode, ur.headers)
       return relay(ur, res)
     }
@@ -339,8 +416,26 @@ function control(req, res, body) {
   if (u.pathname === '/__health') {
     const sid = u.searchParams.get('sid') || ''
     const providers = {}
+    const providerModels = {}
     if (cfg) {
-      for (const [k, p] of Object.entries(cfg.providers)) providers[k] = p.model
+      for (const [k, p] of Object.entries(cfg.providers)) {
+        providers[k] = p.model
+        providerModels[k] = Array.isArray(p.models) ? p.models : [{ model: p.model, efforts: Array.isArray(p.efforts) ? p.efforts : [] }]
+      }
+    }
+    const session = L.getSessionProvider(state, cfg, sid)
+    let sessionModel = null
+    let sessionEffort = null
+    if (session !== 'claude' && cfg?.providers?.[session]) {
+      const pin = L.getSessionPin(state, sessionPins, cfg, sid)
+      const lastRoute = sid ? sessionLastRoute.get(sid) : null
+      const lastMatches = lastRoute && lastRoute.provider === session
+      sessionModel = pin.provider === session && pin.model
+        ? pin.model
+        : (lastMatches ? lastRoute.label : cfg.providers[session].model)
+      sessionEffort = pin.provider === session && pin.effort
+        ? pin.effort
+        : (lastMatches ? (lastRoute.effort || null) : null)
     }
     return json(res, {
       ok: true,
@@ -357,29 +452,80 @@ function control(req, res, body) {
       aliases: cfg ? L.detectAliases(cfg) : {},
       config: cfg ? { failoverEnabled: cfg.failoverEnabled, retryEnabled: cfg.retry.enabled, proxyEnabled: cfg.proxy.enabled } : null,
       providers,
+      providerModels,
       unresolved,
       stats: providerStats,
       ping: pingStats,
       seenModels,
       sessionsOnCustom: Object.keys(state.sticky || {}).length,
-      session: L.getSessionProvider(state, cfg, sid),
+      session,
+      sessionModel,
+      sessionEffort,
+      statusWriter: 'router',
       proxy: { enabled: Boolean(cfg && cfg.proxy.enabled), certificate: Boolean(mitmServer()), ...proxyStats },
     })
   }
   if (u.pathname === '/__session' && req.method === 'POST') {
-    let sid = ''
-    let on = ''
+    let parsed
     try {
-      ;({ sid, on } = JSON.parse(body.toString('utf8')))
+      parsed = JSON.parse(body.toString('utf8'))
     } catch {}
-    on = typeof on === 'string' ? on.trim().toLowerCase() : ''
-    if (typeof sid !== 'string' || !sid || !on) return apiError(res, 400, 'need {sid, on: "<provider>" | "claude"} as strings')
+    if (!L.isObj(parsed)) return apiError(res, 400, 'need {sid, on: "<provider>" | "claude"} as strings')
+    const { sid, model, effort } = parsed
+    const rawOn = parsed.on
+    if (typeof sid !== 'string' || sid.length < 1 || sid.length > 128 || /[\s\x00-\x1f\x7f]/.test(sid)) {
+      return apiError(res, 400, 'need {sid, on: "<provider>" | "claude"} as strings')
+    }
+    if (typeof rawOn !== 'string' || /[\x00-\x1f\x7f]/.test(rawOn)) {
+      return apiError(res, 400, 'need {sid, on: "<provider>" | "claude"} as strings')
+    }
+    const on = rawOn.trim().toLowerCase()
+    if (!on) return apiError(res, 400, 'need {sid, on: "<provider>" | "claude"} as strings')
     if (on !== 'claude' && !cfg?.providers?.[on]) {
       const avail = cfg ? Object.keys(cfg.providers).join(', ') : 'none'
-      return apiError(res, 400, `unknown provider "${on}" (configured: ${avail})`)
+      return apiError(res, 400, `unknown provider (configured: ${avail})`)
     }
-    setState(L.setSticky(state, sid, on, Date.now()), `session ${short(sid)} set to ${on} by hand`)
-    return json(res, { ok: true, session: on })
+    const now = Date.now()
+    if (on === 'claude') {
+      if ((model !== undefined && model !== null && model !== '') || (effort !== undefined && effort !== null && effort !== '')) {
+        return apiError(res, 400, 'model and effort overrides are only valid for configured providers')
+      }
+      state = L.capSticky(L.setSticky(state, sid, on, now))
+      sessionPins = L.setSessionPin(sessionPins, sid, 'claude', null, null, now)
+      save()
+      log(`session ${short(sid)} set to ${on} by hand`)
+      sessionLastRoute.delete(sid)
+      writeStatus(sid, 'claude', 'claude', null)
+      return json(res, { ok: true, session: on })
+    }
+    const p = cfg.providers[on]
+    const curPin = L.getSessionPin(state, sessionPins, cfg, sid)
+    const sameProvider = curPin.provider === on
+    let modelEntry
+    if (model !== undefined && model !== null && model !== '') {
+      modelEntry = typeof model === 'string' ? L.resolveProviderModel(p, model) : null
+      if (!modelEntry) return apiError(res, 400, 'unknown model for this provider')
+    } else {
+      modelEntry = (sameProvider && curPin.model ? L.resolveProviderModel(p, curPin.model) : null)
+        || L.resolveProviderModel(p, p.model)
+        || { model: p.model, efforts: Array.isArray(p.efforts) ? p.efforts : [] }
+    }
+    let nextEffort = null
+    if (effort !== undefined) {
+      const resolvedEffort = L.resolveProviderEffort(p, modelEntry, effort)
+      if (!resolvedEffort) return apiError(res, 400, 'unsupported effort for this provider or model')
+      nextEffort = resolvedEffort.clear ? null : resolvedEffort.effort
+    } else if (sameProvider && curPin.effort) {
+      const kept = L.resolveProviderEffort(p, modelEntry, curPin.effort)
+      nextEffort = kept && !kept.clear ? kept.effort : null
+    }
+    state = L.capSticky(L.setSticky(state, sid, on, now))
+    sessionPins = L.setSessionPin(sessionPins, sid, on, modelEntry.model, nextEffort, now)
+    save()
+    log(`session ${short(sid)} set to ${on} (${modelEntry.model}${nextEffort ? `, effort=${nextEffort}` : ''}) by hand`)
+    sessionLastRoute.delete(sid)
+    writeStatus(sid, 'pinned', modelEntry.model, nextEffort)
+    return json(res, { ok: true, session: on, model: modelEntry.model, effort: nextEffort })
   }
   if (u.pathname === '/__probe' && req.method === 'POST') {
     setState({ ...state, nextClaudeTry: 0 }, 'manual probe requested: next new session will try Claude')

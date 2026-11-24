@@ -216,6 +216,8 @@ Configuration lives in `~/.claude/model-relay.json`. The directory defaults to `
 | `providers.<name>.baseUrl` | (from preset) | Anthropic-compatible upstream URL for this provider |
 | `providers.<name>.token` | (required) | Literal token or `"env:ENV_VAR_NAME"`. The variable is read from the router process's environment (inherited from the Claude Code session or setup command that started it), so one exported later is not seen until the router restarts |
 | `providers.<name>.model` | (required) | Target model ID when rewriting requests (suffixes like `[1m]` are stripped on wire) |
+| `providers.<name>.models` | `[model]` | Optional list of models for this provider: strings (inheriting `efforts`) or `{ "model": "...", "efforts": [...] }` objects (an explicit `"efforts": []` opts a model out). The primary `model` is always included; switching with `/provider <name> <model>` or the panel selects from this list without adding `matchModels` rules |
+| `providers.<name>.efforts` | `[]` | Optional provider-level reasoning effort values (for example `["low", "medium", "high"]`) allowed for `/provider <name> [model] [effort]` and the panel; forwarded as `output_config.effort` on pinned requests |
 | `providers.<name>.matchModels` | (from preset, else the model's first word) | Regex patterns matched against the incoming request `model`, in config order; the first match wins. A request for a provider's own `model` goes to that provider before any pattern is tried. A pattern match sends the model name on unchanged (a Claude name is replaced by the provider's `model`), so match the real model ID the upstream knows (see Model alias routing) |
 | `providers.<name>.stripCacheControl` | `false` | Recursively remove `cache_control` fields before forwarding |
 | `providers.<name>.authHeader` | (from preset, else `"bearer"`) | How to send credentials: `"bearer"`, `"x-api-key"`, or `"both"`. Of the built-in presets only `zai` uses `"both"`; the others use `"bearer"` |
@@ -224,7 +226,7 @@ Configuration lives in `~/.claude/model-relay.json`. The directory defaults to `
 
 ### Show the relay in your statusline
 
-Each window writes its relay state to `~/.claude/model-relay-status/<session id>` (the same config directory as above) whenever it changes, as one line `kind<TAB>label`. The session id is the `session_id` Claude Code passes to a `statusLine` command, so a statusline reads its own window's file directly. The router deletes files untouched for a week.
+Each window's relay state is written to `~/.claude/model-relay-status/<session id>` (the same config directory as above) whenever it changes, as one line `kind<TAB>label` or `kind<TAB>label<TAB>effort` (with an optional 3rd TAB field when an effort override or request effort is active). The router writes this file atomically while online; the hook falls back to writing it when the router is offline. The session id is the `session_id` Claude Code passes to a `statusLine` command, so a statusline reads its own window's file directly. The router deletes files untouched for a week.
 
 | `kind` | `label` | Meaning |
 |---|---|---|
@@ -259,7 +261,7 @@ This feature is experimental: it may change or go away, and it is left out of `/
 | Command | Description |
 |---|---|
 | `/provider` | Open the panel above the prompt to pick this window's model |
-| `/provider <name>` · `/provider claude` | Switch this window without the panel, answered in one line (e.g. `/provider backup`); back to Claude, the next turn rebuilds the prompt cache |
+| `/provider <name> [model] [effort]` · `/provider claude` | Switch this window without the panel, answered in one line (e.g. `/provider backup`, `/provider backup <model> high`, or `/provider backup auto` to clear effort); back to Claude, the next turn rebuilds the prompt cache |
 | `/provider status` | The status as text: where this window goes, the switches every window shares, and anything to fix |
 | `/provider help` | Every command, grouped by what it reaches: this window, every window, setup and checks |
 | `/provider setup [goal]` | Let Claude walk you through setup with the setup tool; keys stay out of the chat |

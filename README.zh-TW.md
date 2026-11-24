@@ -216,6 +216,8 @@ node tools/setup.mjs rc
 | `providers.<name>.baseUrl` | （由 preset 帶入） | 該供應商相容 Anthropic 格式的上游網址 |
 | `providers.<name>.token` | （必填） | API 金鑰字串，或 `"env:ENV_VAR_NAME"` 從環境變數讀取。變數是從轉發站程序的環境讀取（繼承自啟動它的 Claude Code 對話或 setup 指令），所以之後才匯出的變數要等轉發站重新啟動才讀得到 |
 | `providers.<name>.model` | （必填） | 轉發時改寫的目標模型 ID（如 `[1m]` 等尾綴會在送出時自動剝除） |
+| `providers.<name>.models` | `[model]` | 選填的供應商模型清單：可寫字串（繼承 `efforts`）或 `{ "model": "...", "efforts": [...] }` 物件（明確寫 `"efforts": []` 可停用該模型的 effort 覆寫）。主 `model` 一定會包含在內；透過 `/provider <name> <model>` 或面板切換時會從此清單挑選，不會自動增加 `matchModels` 規則 |
+| `providers.<name>.efforts` | `[]` | 選填的供應商層級推理強度清單（例如 `["low", "medium", "high"]`），供 `/provider <name> [model] [effort]` 與面板選用；固定視窗請求送出時會寫入 `output_config.effort` |
 | `providers.<name>.matchModels` | （由 preset 帶入，否則取模型名稱的第一段） | 比對請求 `model` 欄位的正規表示式陣列，依設定檔順序比對，第一個符合的勝出。指名某個供應商自己 `model` 的請求，會在比對任何正規表示式之前就送到那個供應商。靠正規表示式符合的請求，模型名稱原樣送出（Claude 的名稱則會換成該供應商的 `model`），所以要比對上游認得的真實模型 ID（見「模型別名分流」） |
 | `providers.<name>.stripCacheControl` | `false` | 是否在送出前遞迴移除所有 `cache_control` 欄位 |
 | `providers.<name>.authHeader` | （由 preset 帶入，否則 `"bearer"`） | 金鑰標頭傳遞方式：`"bearer"`、`"x-api-key"` 或 `"both"`。內建 preset 只有 `zai` 用 `"both"`，其餘都用 `"bearer"` |
@@ -224,7 +226,7 @@ node tools/setup.mjs rc
 
 ### 在自己的 statusline 顯示轉發站狀態
 
-每個視窗會在狀態改變時，把轉發站狀態寫進 `~/.claude/model-relay-status/<session id>`（設定目錄同上），內容是一行 `kind<TAB>label`。session id 就是 Claude Code 傳給 `statusLine` 指令的 `session_id`，所以 statusline 可以直接讀自己視窗的檔案。超過一週沒更新的檔案由轉發站刪除。
+每個視窗的轉發站狀態會在改變時寫進 `~/.claude/model-relay-status/<session id>`（設定目錄同上），內容是一行 `kind<TAB>label` 或 `kind<TAB>label<TAB>effort`（當啟用 effort 覆寫或請求帶有 effort 時附上第 3 個 TAB 欄位）。轉發站在線時由轉發站以原子方式單一寫入，離線時則由外掛接手寫入。session id 就是 Claude Code 傳給 `statusLine` 指令的 `session_id`，所以 statusline 可以直接讀自己視窗的檔案。超過一週沒更新的檔案由轉發站刪除。
 
 | `kind` | `label` | 意思 |
 |---|---|---|
@@ -259,7 +261,7 @@ node tools/setup.mjs rc
 | 指令 | 說明 |
 |---|---|
 | `/provider` | 在輸入框上方開啟面板，選這個視窗用哪個模型 |
-| `/provider <name>` · `/provider claude` | 不開面板直接切換這個視窗，回覆只有一行（例如 `/provider backup`）；切回 Claude 時，下一輪會重建整段對話快取 |
+| `/provider <name> [model] [effort]` · `/provider claude` | 不開面板直接切換這個視窗，回覆只有一行（例如 `/provider backup`、`/provider backup <model> high`，或 `/provider backup auto` 清除 effort 覆寫）；切回 Claude 時，下一輪會重建整段對話快取 |
 | `/provider status` | 用文字看狀態：這個視窗走哪裡、所有視窗共用的開關、需要處理的問題 |
 | `/provider help` | 列出所有指令，依影響範圍分組：這個視窗、所有視窗、設定與檢查 |
 | `/provider setup [goal]` | 讓 Claude 用設定工具帶你完成設定，金鑰不會進對話 |
