@@ -460,24 +460,29 @@ export function statusFile(configDir: string, sid: string, fields: StatusFields)
   return { path: `${configDir}/model-relay-status/${sid}`, line }
 }
 
-function matchesModelOption(query: string, models: ProviderModelOption[] | undefined): boolean {
-  if (!models || models.length === 0) return false
+export function resolveModelOption(query: string, models: ProviderModelOption[] | undefined): string | null {
+  if (!models || models.length === 0) return null
   const q = query.trim().toLowerCase()
-  if (!q) return false
+  if (!q) return null
   const wire = (m: string) => m.replace(/\[[^\]]*\]$/, '').toLowerCase()
-  if (models.some((e) => e.model.toLowerCase() === q)) return true
+  const exact = models.find((e) => e.model.toLowerCase() === q)
+  if (exact) return exact.model
   const wireMatches = models.filter((e) => wire(e.model) === q)
-  if (wireMatches.length === 1) return true
-  if (wireMatches.length > 1) return false
+  if (wireMatches.length === 1) return wireMatches[0]!.model
+  if (wireMatches.length > 1) return null
   const noPrefix = models.filter((e) => {
     const w = wire(e.model)
     const dash = w.indexOf('-')
     return dash >= 0 && w.slice(dash + 1) === q
   })
-  if (noPrefix.length === 1) return true
-  if (noPrefix.length > 1) return false
+  if (noPrefix.length === 1) return noPrefix[0]!.model
+  if (noPrefix.length > 1) return null
   const sub = models.filter((e) => wire(e.model).includes(q) || e.model.toLowerCase().includes(q))
-  return sub.length === 1
+  return sub.length === 1 ? sub[0]!.model : null
+}
+
+function matchesModelOption(query: string, models: ProviderModelOption[] | undefined): boolean {
+  return resolveModelOption(query, models) !== null
 }
 
 // Parses optional [model] [effort] arguments after `/provider <name>`.
@@ -1047,24 +1052,45 @@ const DEFAULT_AGENT_PROMPT =
 // Builds one `$.agent.register` spec per provider the router serves. `tools` is omitted so the subagent inherits every
 // tool the parent has (identical to the built-in general-purpose Agent), while `model` is set to the provider's model ID.
 // `options` holds each provider's "agent" object from the config: what it sets replaces these defaults as written.
-export function providerAgentSpecs(providers: Record<string, string>, options: Record<string, AgentOptions> = {}): ProviderAgentSpec[] {
-  return Object.entries(providers).map(([name, model]) => ({
-    description: `General-purpose agent routed to ${name} (${model}) via model-relay. Same full toolset as the default Agent tool.`,
-    prompt: DEFAULT_AGENT_PROMPT,
-    ...(has(options, name) ? options[name] : {}),
-    name,
-    model,
-  }))
+export function providerAgentSpecs(
+  providers: Record<string, string>,
+  options: Record<string, AgentOptions> = {},
+  providerModels?: Record<string, ProviderModelOption[]>,
+): ProviderAgentSpec[] {
+  return Object.entries(providers).map(([name, model]) => {
+    const opts = providerModels && has(providerModels, name) ? providerModels[name]! : []
+    const extra = opts.length > 1
+      ? ` Available models (pass via model param): ${opts.map((m) => m.model).join(', ')}.`
+      : ''
+    return {
+      description: `General-purpose agent routed to ${name} (${model}) via model-relay. Same full toolset as the default Agent tool.${extra}`,
+      prompt: DEFAULT_AGENT_PROMPT,
+      ...(has(options, name) ? options[name] : {}),
+      name,
+      model,
+    }
+  })
 }
 
 // The provider a `model-relay:<name>` subagent type names, with its model; null for any other type. When the parent calls
-// `Agent({ subagent_type: "model-relay:<name>", model: "sonnet" })`, the explicit `model` would otherwise override the
-// agent definition's, so `on('agent.spawn')` locks it back to the provider's model.
-export function relayAgent(subagentType: string, providers: Record<string, string>): { name: string; model: string } | null {
+// `Agent({ subagent_type: "model-relay:<name>", model: "sonnet" })`, a foreign model is locked back to the provider's
+// default model; if `requestedModel` uniquely matches an entry in that provider's configured `models` catalog, that
+// canonical model id is honored instead.
+export function relayAgent(
+  subagentType: string,
+  providers: Record<string, string>,
+  requestedModel?: string,
+  providerModels?: Record<string, ProviderModelOption[]>,
+): { name: string; model: string } | null {
   const m = /^model-relay:([a-z0-9_-]+)$/i.exec((subagentType || '').trim())
   if (!m) return null
   const name = m[1]!.toLowerCase()
-  return has(providers, name) ? { name, model: providers[name]! } : null
+  if (!has(providers, name)) return null
+  const opts = providerModels && has(providerModels, name) ? providerModels[name] : undefined
+  const picked = typeof requestedModel === 'string' && requestedModel.trim()
+    ? resolveModelOption(requestedModel, opts)
+    : null
+  return { name, model: picked ?? providers[name]! }
 }
 
 // A model id as it travels: without a "[1m]"-style suffix, lower case (the router's seenModels uses the same key)

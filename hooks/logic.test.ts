@@ -230,6 +230,23 @@ test('switches are changed through the setup CLI, and each provider gets a model
   assert(relayAgent('model-relay:BBB', providers)?.model === 'bbb-1', 'locks model-relay:<name> to its model')
   assert(relayAgent('Explore', providers) === null && relayAgent('model-relay:ghost', providers) === null, 'other types and unknown names untouched')
   assert(relayAgent('model-relay:constructor', providers) === null && !has(providers, 'toString'), 'no prototype names')
+
+  const catalog = {
+    aaa: [
+      { model: 'aaa-9[1m]', efforts: ['low', 'high'] },
+      { model: 'aaa-neon[1m]', efforts: ['low', 'xhigh'] },
+      { model: 'aaa-argon[1m]', efforts: ['low', 'high'] },
+    ],
+  }
+  assert(relayAgent('model-relay:aaa', providers, 'aaa-neon[1m]', catalog)?.model === 'aaa-neon[1m]', 'honors exact model from provider catalog')
+  assert(relayAgent('model-relay:aaa', providers, 'neon', catalog)?.model === 'aaa-neon[1m]', 'honors unique short name from provider catalog')
+  assert(relayAgent('model-relay:aaa', providers, 'sonnet', catalog)?.model === 'aaa-9[1m]', 'locks foreign model back to provider default')
+  assert(relayAgent('model-relay:aaa', providers, 'aaa-', catalog)?.model === 'aaa-9[1m]', 'locks ambiguous model query back to provider default')
+  assert(relayAgent('model-relay:bbb', providers, 'neon', catalog)?.model === 'bbb-1', 'provider without catalog stays on its default')
+  const multiSpecs = providerAgentSpecs(providers, {}, catalog)
+  assert(multiSpecs[0]!.description.includes('Available models (pass via model param): aaa-9[1m], aaa-neon[1m], aaa-argon[1m].'), 'lists catalog models in default agent description')
+  assert(!multiSpecs[1]!.description.includes('Available models'), 'single-model provider description unchanged')
+  assert(providerAgentSpecs(providers, opts, catalog)[0]!.description === 'Hard reviews.', 'explicit config description still wins')
 })
 
 test('/provider doctor only looks until the user types --fix; init still wires settings.json', () => {

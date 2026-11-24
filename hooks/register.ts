@@ -1,6 +1,6 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, UiOpenResult } from 'claude-code'
-import type { AvatarEntry, AvatarView, PanelNote, PanelUi } from '../types'
+import type { AvatarEntry, AvatarView, PanelNote, PanelUi, ProviderModelOption } from '../types'
 import {
   AVATAR_EMPTY,
   AVATAR_START,
@@ -91,6 +91,7 @@ let staleBusy = false // the router runs older code but was answering a request 
 let outdatedTold = false // the toast about an older config, once per session
 // The providers our own router last reported; kept through an outage so a model-relay:<name> spawn still gets its model
 let knownProviders: Record<string, string> = {}
+let knownProviderModels: Record<string, ProviderModelOption[]> = {}
 // model-relay:<name> subagents started and not finished yet, by agentId: checked against the router when their turn ends
 const pending = new Map<string, { name: string; model: string; since: number }>()
 let avatarEntries: Record<string, AvatarEntry> = {} // the config's "avatars", read each tick
@@ -115,16 +116,21 @@ async function myVersion($: EngineInterface): Promise<string> {
 }
 
 // One model-relay:<name> agent per provider, and the provider names in /provider's hint; redone when the router's list changes
-async function syncProviders($: EngineInterface, providers: Record<string, string>): Promise<void> {
+async function syncProviders(
+  $: EngineInterface,
+  providers: Record<string, string>,
+  providerModels: Record<string, ProviderModelOption[]> = {},
+): Promise<void> {
   knownProviders = providers
+  knownProviderModels = providerModels
   let options: ReturnType<typeof providerAgentOptions> = {}
   try {
     options = providerAgentOptions(JSON.parse(await $.fs.read(`${await configDir($)}/${CONFIG_NAME}`)))
   } catch {}
-  const specs = providerAgentSpecs(providers, options)
+  const specs = providerAgentSpecs(providers, options, knownProviderModels)
   const sig = JSON.stringify(specs)
   if (sig === registeredSig) return
-  const plain = providerAgentSpecs(providers)
+  const plain = providerAgentSpecs(providers, {}, knownProviderModels)
   for (const [i, spec] of specs.entries()) {
     const ok = await $.agent.register(spec).then(() => true, () => false)
     // Claude Code refused this provider's "agent" fields: keep the agent with the defaults rather than lose it
@@ -345,7 +351,7 @@ async function openPanel($: EngineInterface, cfg: LocalCfg, h: Health | null, la
 // Our router answered: it is the one source of what providers exist
 async function ours($: EngineInterface, cfg: LocalCfg, h: Health, lang: 'zh' | 'en'): Promise<void> {
   startFailed = false
-  await syncProviders($, h.providers)
+  await syncProviders($, h.providers, h.providerModels)
   await syncPanelData($, cfg, h, lang)
   followAvatar($, h)
 }
@@ -565,7 +571,7 @@ export const register: Register = (on) => {
 
   on('agent.spawn', async ($, e, next) => {
     if (e.fork || e.resume) return next(e)
-    const relay = relayAgent(e.subagentType, knownProviders)
+    const relay = relayAgent(e.subagentType, knownProviders, e.model, knownProviderModels)
     if (!relay) return next(e)
     const since = Date.now()
     const r = await next({ ...e, model: relay.model })
