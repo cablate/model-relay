@@ -1049,19 +1049,74 @@ export interface ProviderAgentSpec extends AgentOptions {
 const DEFAULT_AGENT_PROMPT =
   "You are an agent for Claude Code, Anthropic's official CLI for Claude. Given the user's message, use the available tools to complete the task fully and report your findings and changes clearly and concisely."
 
-// Builds one `$.agent.register` spec per provider the router serves. `tools` is omitted so the subagent inherits every
-// tool the parent has (identical to the built-in general-purpose Agent), while `model` is set to the provider's model ID.
-// `options` holds each provider's "agent" object from the config: what it sets replaces these defaults as written.
+function cleanModelSlug(model: string): string {
+  return wireKey(model).replace(/[^a-z0-9_-]+/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '')
+}
+
+function modelSlugs(models: ProviderModelOption[]): string[] {
+  const wires = models.map((m) => cleanModelSlug(m.model))
+  const segs = wires.map((w) => w.split('-').filter(Boolean))
+  let prefixLen = 0
+  if (segs.length > 1) {
+    const minLen = Math.min(...segs.map((s) => s.length))
+    while (prefixLen < minLen - 1 && segs.every((s) => s[prefixLen] === segs[0]![prefixLen])) {
+      prefixLen++
+    }
+  }
+  const lastTokens = segs.map((s) => s[s.length - 1] ?? '')
+  const lastCounts = new Map<string, number>()
+  for (const t of lastTokens) lastCounts.set(t, (lastCounts.get(t) ?? 0) + 1)
+
+  const raw = wires.map((w, i) => {
+    const last = lastTokens[i]!
+    if (last && !/^\d+$/.test(last) && lastCounts.get(last) === 1) return last
+    let start = prefixLen
+    while (start > 0 && /^\d+$/.test(segs[i]!.slice(start).join('-'))) start--
+    const trimmed = segs[i]!.slice(start).join('-')
+    return trimmed || w
+  })
+  const rawCounts = new Map<string, number>()
+  for (const r of raw) rawCounts.set(r, (rawCounts.get(r) ?? 0) + 1)
+  return raw.map((r, i) => (r && rawCounts.get(r) === 1 ? r : wires[i]!))
+}
+
+function providerModelAgents(
+  providers: Record<string, string>,
+  providerModels?: Record<string, ProviderModelOption[]>,
+): Array<{ agentName: string; providerName: string; model: string }> {
+  if (!providerModels) return []
+  const used = new Set(Object.keys(providers).map((k) => k.toLowerCase()))
+  const out: Array<{ agentName: string; providerName: string; model: string }> = []
+  for (const name of Object.keys(providers)) {
+    const opts = has(providerModels, name) ? providerModels[name]! : []
+    if (opts.length <= 1) continue
+    const slugs = modelSlugs(opts)
+    for (let i = 0; i < opts.length; i++) {
+      const slug = slugs[i]
+      if (!slug) continue
+      const agentName = slug.toLowerCase().startsWith(`${name.toLowerCase()}-`) ? slug : `${name}-${slug}`
+      const key = agentName.toLowerCase()
+      if (used.has(key)) continue
+      used.add(key)
+      out.push({ agentName, providerName: name, model: opts[i]!.model })
+    }
+  }
+  return out
+}
+
+// Builds one `$.agent.register` spec per provider the router serves, plus one `model-relay:<provider>-<slug>` spec per
+// configured model when a provider declares multiple `models` (so callers can select a catalog model via `subagent_type`
+// without hitting Claude Code's `Agent` tool `model` enum). `tools` is omitted so each subagent inherits every tool the
+// parent has. `options` holds each provider's "agent" object from the config: what it sets replaces defaults as written.
 export function providerAgentSpecs(
   providers: Record<string, string>,
   options: Record<string, AgentOptions> = {},
   providerModels?: Record<string, ProviderModelOption[]>,
 ): ProviderAgentSpec[] {
-  return Object.entries(providers).map(([name, model]) => {
-    const opts = providerModels && has(providerModels, name) ? providerModels[name]! : []
-    const extra = opts.length > 1
-      ? ` Available models (pass via model param): ${opts.map((m) => m.model).join(', ')}.`
-      : ''
+  const modelAgents = providerModelAgents(providers, providerModels)
+  const specs: ProviderAgentSpec[] = Object.entries(providers).map(([name, model]) => {
+    const siblings = modelAgents.filter((a) => a.providerName === name).map((a) => `model-relay:${a.agentName}`)
+    const extra = siblings.length > 0 ? ` Model-specific subagents: ${siblings.join(', ')}.` : ''
     return {
       description: `General-purpose agent routed to ${name} (${model}) via model-relay. Same full toolset as the default Agent tool.${extra}`,
       prompt: DEFAULT_AGENT_PROMPT,
@@ -1070,12 +1125,21 @@ export function providerAgentSpecs(
       model,
     }
   })
+  for (const { agentName, providerName, model } of modelAgents) {
+    specs.push({
+      description: `General-purpose agent routed to ${providerName} (${model}) via model-relay. Same full toolset as the default Agent tool.`,
+      prompt: DEFAULT_AGENT_PROMPT,
+      ...(has(options, providerName) ? options[providerName] : {}),
+      name: agentName,
+      model,
+    })
+  }
+  return specs
 }
 
-// The provider a `model-relay:<name>` subagent type names, with its model; null for any other type. When the parent calls
-// `Agent({ subagent_type: "model-relay:<name>", model: "sonnet" })`, a foreign model is locked back to the provider's
-// default model; if `requestedModel` uniquely matches an entry in that provider's configured `models` catalog, that
-// canonical model id is honored instead.
+// The provider (or model-specific sibling agent) a `model-relay:<name>` subagent type names, with its model; null for
+// any other type. Foreign `requestedModel` values (e.g. "sonnet") are locked back to the agent's model; for a base
+// provider agent, a `requestedModel` that uniquely matches its `providerModels` catalog is honored.
 export function relayAgent(
   subagentType: string,
   providers: Record<string, string>,
@@ -1085,12 +1149,15 @@ export function relayAgent(
   const m = /^model-relay:([a-z0-9_-]+)$/i.exec((subagentType || '').trim())
   if (!m) return null
   const name = m[1]!.toLowerCase()
-  if (!has(providers, name)) return null
-  const opts = providerModels && has(providerModels, name) ? providerModels[name] : undefined
-  const picked = typeof requestedModel === 'string' && requestedModel.trim()
-    ? resolveModelOption(requestedModel, opts)
-    : null
-  return { name, model: picked ?? providers[name]! }
+  if (has(providers, name)) {
+    const opts = providerModels && has(providerModels, name) ? providerModels[name] : undefined
+    const picked = typeof requestedModel === 'string' && requestedModel.trim()
+      ? resolveModelOption(requestedModel, opts)
+      : null
+    return { name, model: picked ?? providers[name]! }
+  }
+  const sub = providerModelAgents(providers, providerModels).find((a) => a.agentName.toLowerCase() === name)
+  return sub ? { name: sub.agentName, model: sub.model } : null
 }
 
 // A model id as it travels: without a "[1m]"-style suffix, lower case (the router's seenModels uses the same key)

@@ -134,7 +134,7 @@ async function syncProviders(
   for (const [i, spec] of specs.entries()) {
     const ok = await $.agent.register(spec).then(() => true, () => false)
     // Claude Code refused this provider's "agent" fields: keep the agent with the defaults rather than lose it
-    if (!ok && has(options, spec.name)) {
+    if (!ok && JSON.stringify(spec) !== JSON.stringify(plain[i])) {
       await $.agent.register(plain[i]!).catch(() => undefined)
       const lang = await detectLang($)
       $.ui.toast(lang === 'en'

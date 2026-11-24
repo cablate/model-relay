@@ -243,10 +243,28 @@ test('switches are changed through the setup CLI, and each provider gets a model
   assert(relayAgent('model-relay:aaa', providers, 'sonnet', catalog)?.model === 'aaa-9[1m]', 'locks foreign model back to provider default')
   assert(relayAgent('model-relay:aaa', providers, 'aaa-', catalog)?.model === 'aaa-9[1m]', 'locks ambiguous model query back to provider default')
   assert(relayAgent('model-relay:bbb', providers, 'neon', catalog)?.model === 'bbb-1', 'provider without catalog stays on its default')
+  assert(relayAgent('model-relay:aaa-neon', providers, 'sonnet', catalog)?.model === 'aaa-neon[1m]', 'per-model subagent locks to its catalog model even if sonnet is passed')
+  assert(relayAgent('model-relay:aaa-argon', providers, undefined, catalog)?.model === 'aaa-argon[1m]', 'per-model subagent resolves without model param')
   const multiSpecs = providerAgentSpecs(providers, {}, catalog)
-  assert(multiSpecs[0]!.description.includes('Available models (pass via model param): aaa-9[1m], aaa-neon[1m], aaa-argon[1m].'), 'lists catalog models in default agent description')
-  assert(!multiSpecs[1]!.description.includes('Available models'), 'single-model provider description unchanged')
+  assert(multiSpecs.map((s) => s.name).join(',') === 'aaa,bbb,aaa-9,aaa-neon,aaa-argon', 'registers per-model sibling agents for multi-model providers')
+  assert(multiSpecs[0]!.description.includes('Model-specific subagents: model-relay:aaa-9, model-relay:aaa-neon, model-relay:aaa-argon.'), 'lists sibling subagent types in base agent description')
+  assert(!multiSpecs[1]!.description.includes('Model-specific subagents'), 'single-model provider description unchanged')
   assert(providerAgentSpecs(providers, opts, catalog)[0]!.description === 'Hard reviews.', 'explicit config description still wins')
+  const agySpecs = providerAgentSpecs({ agy: 'acp-gemini-4-hydrogen[1m]' }, {}, {
+    agy: [
+      { model: 'acp-gemini-4-neon[1m]', efforts: ['low', 'medium', 'high', 'xhigh'] },
+      { model: 'acp-gemini-4-hydrogen[1m]', efforts: ['low', 'medium', 'high', 'xhigh'] },
+      { model: 'acp-gemini-4-carbon[1m]', efforts: ['low', 'medium', 'high'] },
+      { model: 'acp-gemini-4-argon[1m]', efforts: ['low', 'medium', 'high'] },
+      { model: 'acp-gemini-3.8-flash[1m]', efforts: ['low', 'medium', 'high'] },
+    ],
+  })
+  assert(agySpecs.map((s) => s.name).join(',') === 'agy,agy-neon,agy-hydrogen,agy-carbon,agy-argon,agy-flash', 'clean non-numeric slugs for agy catalog')
+  assert(agySpecs.find((s) => s.name === 'agy-carbon')?.model === 'acp-gemini-4-carbon[1m]', 'agy-carbon targets acp-gemini-4-carbon[1m]')
+  const numSpecs = providerAgentSpecs({ oai: 'gpt-5-2', 'oai-5-4': 'existing' }, {}, {
+    oai: [{ model: 'gpt-5-2', efforts: [] }, { model: 'gpt-5-4', efforts: [] }],
+  })
+  assert(numSpecs.map((s) => s.name).join(',') === 'oai,oai-5-4,oai-5-2', 'numeric tail keeps prefix-trimmed slug and skips colliding provider names')
 })
 
 test('/provider doctor only looks until the user types --fix; init still wires settings.json', () => {
