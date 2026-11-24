@@ -115,6 +115,27 @@ claude plugin install model-relay@model-relay
 
 內建 `zai`、`deepseek`、`kimi`、`minimax`、`openrouter` 預設集，會帶入該服務的網址與需要的相容參數。`model` 一律由你決定（模型 ID 會過期），再填上 `token`（或 `"env:VAR_NAME"`）。`node tools/setup.mjs presets` 會列出全部。針對跑在 `127.0.0.1` 的本地 Gateway，可設定 `launch: { command, args }`，在連接埠未開啟時自動由轉發站於背景啟動。
 
+### 需要專屬模型前綴的本地 Gateway（範例：透過官方 ACP server 使用 Gemini）
+
+請求會交給「自己的 `model` 與請求 ID 完全相同」的供應商；只有當請求的 ID 不是任何供應商自己的 `model` 時，才依設定檔順序比對 `matchModels`。所以本地 Gateway 若和其他供應商提供相同的模型 ID（例如 Gemini 同時走雲端代理與本機），就需要專屬前綴：兩個供應商都把 `model` 設成 `gemini-4-hydrogen-medium` 時，設定檔裡排在前面的會拿走它；其他 Gemini ID 則交給排在前面的比對規則（例如 `^gemini-4`）。請給 Gateway 專屬的模型前綴與比對規則，再由 Gateway 自己去掉前綴。[acp-gateway](https://github.com/Nanako0129/acp-gateway) 就是這類 Gateway：它在 `127.0.0.1` 上提供 `/v1/messages`，背後驅動 Google 官方的 Antigravity ACP server，讓 Claude Code 的 subagent 可以跑在 Gemini 上：
+
+```json
+"agy": {
+  "baseUrl": "http://127.0.0.1:8960",
+  "token": "acp-gateway-local",
+  "model": "acp-gemini-4-hydrogen-medium[1m]",
+  "matchModels": ["^acp-gemini-"],
+  "authHeader": "bearer",
+  "stripCacheControl": true,
+  "retry": false,
+  "fallback": false
+}
+```
+
+- `retry: false` 與 `fallback: false`：避免轉發站在遇到 429／5xx／529 時自動重送，或靜默切換到其他供應商。Gateway 會回 `x-should-retry: false` 給 Claude Code 本身，但轉發站不會讀這個標頭。
+- `token`：這個 Gateway 只監聽 loopback，不需要密鑰，填的值只是佔位。
+- 想讓轉發站在連接埠未開時自動拉起它：先把套件裝進 Python 3.11 以上的直譯器（`python3.11 -m pip install git+https://github.com/Nanako0129/acp-gateway`），再加上 `"launch": { "command": "python3.11", "args": ["-m", "acp_gateway.relay"] }`。
+
 ### 模型別名分流（把 `haiku`／`sonnet`／`opus` 指向指定供應商）
 
 `model-relay` 把三種路由層級完全拆開，互不混用：

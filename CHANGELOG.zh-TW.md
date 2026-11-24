@@ -6,6 +6,10 @@
 
 ## [未發布]
 
+### 新增
+
+- README：說明需要專屬模型前綴的本地 Gateway 怎麼接（`matchModels`、`retry: false`、`fallback: false`），以 acp-gateway 為例。
+
 ## [0.7.5] - 2026-10-24
 
 切到供應商的視窗，又能叫用對話中途重新連上的 MCP 工具；另有實驗性的面板，可以顯示你正在對話的模型頭像。

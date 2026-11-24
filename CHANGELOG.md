@@ -6,6 +6,10 @@ All notable changes to `model-relay` are documented in this file. Format follows
 
 ## [Unreleased]
 
+### Added
+
+- README: how to wire a local gateway that needs its own model prefix (`matchModels`, `retry: false`, `fallback: false`), with acp-gateway as the example.
+
 ## [0.7.5] - 2026-10-24
 
 A window switched to a provider can call MCP tools that reconnected mid-session again, and an experimental pane can show the picture of the model you are talking to.
