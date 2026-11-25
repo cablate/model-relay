@@ -197,6 +197,7 @@ export function startArgv(cfg: LocalCfg, script: string, configDir: string, isWi
 
 export interface Health {
   session: string // 'claude' or a configured provider key
+  sessionModel?: string // optional active session model reported by newer routers
   failoverSince: number
   nextClaudeTry: number
   sessionsOnCustom?: number
@@ -258,6 +259,7 @@ export function parseHealth(stdout: string): Health | null {
       : []
     return {
       session: str(j.session).toLowerCase() || 'claude',
+      ...(str(j.sessionModel) ? { sessionModel: str(j.sessionModel) } : {}),
       failoverSince: num(j.failoverSince),
       nextClaudeTry: num(j.nextClaudeTry),
       sessionsOnCustom: num(j.sessionsOnCustom),
@@ -998,4 +1000,160 @@ export function missedRelayText(name: string, wanted: string, lang: 'zh' | 'en')
   return lang === 'en'
     ? `The model-relay:${name} subagent finished, but no request for ${wanted} reached the relay, so it did not run on ${name}. Run /provider doctor (a Bedrock/Vertex setting or another ANTHROPIC_BASE_URL can cause this)`
     : `model-relay:${name} 子代理跑完了，但轉發站沒收到 ${wanted} 的請求，所以它沒有走 ${name}。執行 /provider doctor 檢查（Bedrock／Vertex 設定或別的 ANTHROPIC_BASE_URL 都可能造成）`
+}
+
+// ---- subagent tierModels mapping ----
+
+export type ClaudeTier = 'haiku' | 'sonnet' | 'opus' | 'fable'
+const CLAUDE_TIERS: readonly ClaudeTier[] = ['haiku', 'sonnet', 'opus', 'fable']
+const isClaudeTier = (s: string): s is ClaudeTier => (CLAUDE_TIERS as readonly string[]).includes(s)
+const AGENT_SEG_RE = /^[a-z0-9][a-z0-9._-]*$/i
+
+// Reads providers.<name>.tierModels from model-relay.json (own keys only, lowercased provider name, trimmed non-empty
+// strings for haiku|sonnet|opus|fable only).
+export function providerTierModels(raw: unknown): Record<string, Partial<Record<ClaudeTier, string>>> {
+  const providers = (raw as { providers?: unknown } | null)?.providers
+  if (!isObj(providers)) return {}
+  const entries: [string, Partial<Record<ClaudeTier, string>>][] = []
+  for (const [rawName, p] of Object.entries(providers)) {
+    const name = rawName.trim().toLowerCase()
+    if (!name || name === '__proto__' || name === 'constructor' || name === 'prototype') continue
+    const tm = isObj(p) ? p.tierModels : undefined
+    if (!isObj(tm)) continue
+    const kept: Partial<Record<ClaudeTier, string>> = {}
+    for (const [rawTier, val] of Object.entries(tm)) {
+      const tier = rawTier.trim().toLowerCase()
+      if (!isClaudeTier(tier)) continue
+      if (typeof val === 'string' && val.trim()) kept[tier] = val.trim()
+    }
+    if (Object.keys(kept).length) entries.push([name, kept])
+  }
+  return Object.fromEntries(entries)
+}
+
+export function normalizeClaudeTier(model: string | undefined | null): ClaudeTier | null {
+  if (typeof model !== 'string') return null
+  const m = model.trim().replace(/\[[^\]]*\]$/, '').toLowerCase()
+  if (!m) return null
+  for (const tier of CLAUDE_TIERS) {
+    if (m === tier || m.startsWith(`claude-${tier}`)) return tier
+  }
+  return null
+}
+
+// Extracts the `model:` value from leading YAML frontmatter, stripping optional surrounding quotes and inline `#` comments.
+export function extractAgentFrontmatterModel(md: string): string | null {
+  if (typeof md !== 'string') return null
+  const match = /^\uFEFF?---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/.exec(md)
+  if (!match) return null
+  for (const line of match[1]!.split(/\r?\n/)) {
+    const m = /^model\s*:\s*(.*)$/i.exec(line)
+    if (!m) continue
+    const raw = m[1]!.trim()
+    const quoted = /^(['"])(.*?)\1(?:\s*#.*)?$/.exec(raw)
+    const val = (quoted ? quoted[2]! : raw.replace(/\s*#.*$/, '')).trim()
+    return val || null
+  }
+  return null
+}
+
+const normFsPath = (p: string): string => {
+  const s = p.trim().replace(/\\/g, '/')
+  return s === '/' ? '/' : s.replace(/\/+$/, '')
+}
+
+const isPathPrefix = (prefix: string, target: string): boolean => {
+  if (!prefix || !target) return false
+  if (prefix === '/') return target.startsWith('/')
+  return target === prefix || target.startsWith(`${prefix}/`)
+}
+
+// Collects installPath entries for `pluginName` (case-insensitive prefix before `@`) from installed_plugins.json:
+// matching project-scoped entries (longest projectPath prefix first), then user-scoped, then remaining entries.
+export function pluginInstallPaths(installedRaw: unknown, pluginName: string, cwd?: string): string[] {
+  const plugins = (installedRaw as { plugins?: unknown } | null)?.plugins
+  const target = typeof pluginName === 'string' ? pluginName.trim().toLowerCase() : ''
+  if (!target || !isObj(plugins)) return []
+
+  const normCwd = typeof cwd === 'string' && cwd.trim() ? normFsPath(cwd) : ''
+  const projectMatches: Array<{ path: string; len: number }> = []
+  const userPaths: string[] = []
+  const otherPaths: string[] = []
+
+  for (const [key, entries] of Object.entries(plugins)) {
+    const at = key.indexOf('@')
+    const name = (at >= 0 ? key.slice(0, at) : key).trim().toLowerCase()
+    if (name !== target || !Array.isArray(entries)) continue
+    for (const entry of entries) {
+      if (!isObj(entry) || typeof entry.installPath !== 'string') continue
+      const installPath = entry.installPath.trim()
+      if (!installPath) continue
+      const scope = typeof entry.scope === 'string' ? entry.scope.trim().toLowerCase() : ''
+      const projectPath = typeof entry.projectPath === 'string' ? normFsPath(entry.projectPath) : ''
+      if (scope === 'project' && normCwd && projectPath && isPathPrefix(projectPath, normCwd)) {
+        projectMatches.push({ path: installPath, len: projectPath.length })
+      } else if (scope === 'user') {
+        userPaths.push(installPath)
+      } else {
+        otherPaths.push(installPath)
+      }
+    }
+  }
+
+  projectMatches.sort((a, b) => b.len - a.len)
+  const seen = new Set<string>()
+  const out: string[] = []
+  for (const p of [...projectMatches.map((m) => m.path), ...userPaths, ...otherPaths]) {
+    if (!seen.has(p)) {
+      seen.add(p)
+      out.push(p)
+    }
+  }
+  return out
+}
+
+export function parseSubagentRef(
+  subagentType: string,
+): { kind: 'plugin'; plugin: string; agent: string } | { kind: 'local'; agent: string } | null {
+  const s = typeof subagentType === 'string' ? subagentType.trim() : ''
+  if (!s || s.includes('..') || s.includes('/') || s.includes('\\')) return null
+  if (!s.includes(':')) {
+    return AGENT_SEG_RE.test(s) ? { kind: 'local', agent: s } : null
+  }
+  const parts = s.split(':')
+  if (parts.length !== 2) return null
+  const [plugin, agent] = parts as [string, string]
+  if (plugin.toLowerCase() === 'model-relay') return null
+  if (!AGENT_SEG_RE.test(plugin) || !AGENT_SEG_RE.test(agent)) return null
+  return { kind: 'plugin', plugin, agent }
+}
+
+export function resolveTierModel(opts: {
+  activeProvider: string | null
+  activeModel: string | null
+  tierModels: Record<string, Partial<Record<ClaudeTier, string>>>
+  subagentType: string
+  explicitModel?: string
+  frontmatterModel?: string | null
+}): string | null {
+  const provider = opts.activeProvider ? opts.activeProvider.trim().toLowerCase() : ''
+  if (!provider || provider === 'claude' || !has(opts.tierModels, provider)) return null
+  const sub = (opts.subagentType || '').trim()
+  if (/^model-relay:/i.test(sub)) return null
+
+  const explicit = typeof opts.explicitModel === 'string' ? opts.explicitModel.trim() : ''
+  const explicitTier = explicit ? normalizeClaudeTier(explicit) : null
+  if (explicit && !explicitTier && explicit.toLowerCase() !== 'inherit') return null
+
+  const tier =
+    explicitTier ??
+    normalizeClaudeTier(opts.frontmatterModel) ??
+    (sub.toLowerCase() === 'explore' ? 'haiku' : null)
+  if (!tier) return null
+
+  const providerTiers = opts.tierModels[provider]!
+  const mapped = has(providerTiers as Record<string, unknown>, tier) ? providerTiers[tier] : undefined
+  if (!mapped) return null
+  if (mapped.toLowerCase() === 'inherit') return opts.activeModel || null
+  return mapped
 }

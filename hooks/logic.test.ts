@@ -20,6 +20,7 @@ import {
   bytesToBase64,
   compareVersions,
   elsewhereText,
+  extractAgentFrontmatterModel,
   fit,
   foreignConfigDir,
   foreignStatusText,
@@ -28,20 +29,25 @@ import {
   healthArgv,
   healthHints,
   helpText,
+  normalizeClaudeTier,
   outdatedText,
   parseAvatars,
   parseHealth,
   parseLocal,
+  parseSubagentRef,
   pingArgv,
   pingReport,
   pingText,
+  pluginInstallPaths,
   probeArgv,
   providerAgentSpecs,
   providerAgentOptions,
   providerReport,
+  providerTierModels,
   rasterCells,
   reachedRelay,
   relayAgent,
+  resolveTierModel,
   routerIsStale,
   routerScript,
   routerUrl,
@@ -465,4 +471,99 @@ test('base64 matches the standard encoding both ways, padding included', () => {
     assert(base64ToBytes(bytesToBase64(bytes)).join() === bytes.join(), `${n} bytes survive the round trip`)
   }
   assert(base64ToBytes('TWE=').join() === '77,97' && base64ToBytes('TQ').join() === '77', 'padded or not')
+})
+
+test('tierModels: providerTierModels, normalizeClaudeTier, extractAgentFrontmatterModel, pluginInstallPaths, parseSubagentRef, resolveTierModel', () => {
+  // parseHealth preserves optional sessionModel when present and omits it when absent
+  assert(parseHealth('{"ok":true,"session":"backup"}')!.sessionModel === undefined, 'absent sessionModel omitted')
+  assert(parseHealth('{"ok":true,"session":"backup","sessionModel":"main-model[1m]"}')!.sessionModel === 'main-model[1m]', 'optional sessionModel preserved')
+
+  // providerTierModels: own keys only, lowercased provider & tier, trimmed non-empty string values
+  const tm = providerTierModels({
+    providers: {
+      ' Backup ': {
+        tierModels: {
+          Haiku: ' fast-model[1m] ',
+          SONNET: 'fast-model[1m]',
+          opus: 'inherit',
+          fable: '  ',
+          unknownTier: 'foo',
+          numeric: 123,
+        },
+      },
+      other: { tierModels: 'bad' },
+      __proto__: { tierModels: { haiku: 'evil' } },
+    },
+  })
+  assert(JSON.stringify(tm) === '{"backup":{"haiku":"fast-model[1m]","sonnet":"fast-model[1m]","opus":"inherit"}}', JSON.stringify(tm))
+  assert(!has(tm as Record<string, unknown>, '__proto__'), 'ignores prototype key')
+  assert(JSON.stringify(providerTierModels(null)) === '{}' && JSON.stringify(providerTierModels({ providers: [] })) === '{}', 'non-object inputs')
+
+  // normalizeClaudeTier
+  assert(normalizeClaudeTier('haiku') === 'haiku' && normalizeClaudeTier(' HAIKU ') === 'haiku' && normalizeClaudeTier('claude-haiku-4-5-20251001') === 'haiku', 'haiku')
+  assert(normalizeClaudeTier('sonnet') === 'sonnet' && normalizeClaudeTier('claude-sonnet-4-6[1m]') === 'sonnet', 'sonnet')
+  assert(normalizeClaudeTier('opus') === 'opus' && normalizeClaudeTier('Claude-Opus-4-6') === 'opus', 'opus')
+  assert(normalizeClaudeTier('fable') === 'fable' && normalizeClaudeTier('claude-fable-1') === 'fable', 'fable')
+  assert(normalizeClaudeTier('inherit') === null && normalizeClaudeTier('main-model[1m]') === null && normalizeClaudeTier('') === null && normalizeClaudeTier(undefined) === null, 'non-tier')
+
+  // extractAgentFrontmatterModel
+  assert(extractAgentFrontmatterModel('---\nname: scout\nmodel: haiku\neffort: low\n---\nPrompt') === 'haiku', 'plain model')
+  assert(extractAgentFrontmatterModel('---\r\nmodel: "claude-sonnet-4-6" # inline comment\r\n---\r\n') === 'claude-sonnet-4-6', 'double quoted + comment + CRLF')
+  assert(extractAgentFrontmatterModel("---\nmodel: 'opus'\n---") === 'opus', 'single quoted at EOF')
+  assert(extractAgentFrontmatterModel('---\nmodel: haiku # fast\n---\n') === 'haiku', 'unquoted + inline comment')
+  assert(extractAgentFrontmatterModel('---\nmodel:   # empty\n---\n') === null, 'empty value with comment')
+  assert(extractAgentFrontmatterModel('---\nname: scout\n---\nmodel: haiku\n') === null, 'ignores model outside frontmatter')
+  assert(extractAgentFrontmatterModel('no frontmatter') === null, 'no frontmatter')
+
+  // pluginInstallPaths: matching project (longest prefix first) -> user -> remaining, deduplicated
+  const installed = {
+    version: 2,
+    plugins: {
+      'pilotfish@pilotfish': [
+        { scope: 'user', installPath: '/u/pilotfish/1.0' },
+        { scope: 'project', projectPath: '/work', installPath: '/p/pilotfish/root' },
+        { scope: 'project', projectPath: '/work/app', installPath: '/p/pilotfish/app' },
+        { scope: 'project', projectPath: '/work/app-other', installPath: '/p/pilotfish/other' },
+        { scope: 'project', projectPath: '/work/app', installPath: '/p/pilotfish/app' }, // duplicate
+        { scope: 'local', installPath: '' },
+        { scope: 'local', installPath: '/l/pilotfish' },
+      ],
+    },
+  }
+  assert(
+    JSON.stringify(pluginInstallPaths(installed, 'PILOTFISH', '/work/app/sub')) ===
+      '["/p/pilotfish/app","/p/pilotfish/root","/u/pilotfish/1.0","/p/pilotfish/other","/l/pilotfish"]',
+    JSON.stringify(pluginInstallPaths(installed, 'PILOTFISH', '/work/app/sub')),
+  )
+  assert(JSON.stringify(pluginInstallPaths(installed, 'unknown', '/work')) === '[]', 'unknown plugin')
+
+  // parseSubagentRef: plugin vs local vs path traversal & model-relay rejection
+  assert(JSON.stringify(parseSubagentRef('pilotfish:scout')) === '{"kind":"plugin","plugin":"pilotfish","agent":"scout"}', 'plugin ref')
+  assert(JSON.stringify(parseSubagentRef('Explore')) === '{"kind":"local","agent":"Explore"}', 'local ref')
+  for (const bad of ['', '   ', 'model-relay:backup', 'Model-Relay:other', '../evil', 'a/b', 'a\\b', 'pilotfish:../x', 'pilotfish:a..b', 'a:b:c', ':scout', 'pilotfish:']) {
+    assert(parseSubagentRef(bad) === null, `reject ${bad}`)
+  }
+
+  // resolveTierModel
+  const baseOpts = {
+    activeProvider: 'backup',
+    activeModel: 'main-model[1m]',
+    tierModels: tm,
+    subagentType: 'pilotfish:scout',
+    frontmatterModel: 'haiku',
+  }
+  assert(resolveTierModel({ ...baseOpts, activeProvider: null }) === null, 'no active provider')
+  assert(resolveTierModel({ ...baseOpts, activeProvider: 'claude' }) === null, 'normal claude session untouched')
+  assert(resolveTierModel({ ...baseOpts, activeProvider: 'other' }) === null, 'provider without tierModels untouched')
+  assert(resolveTierModel({ ...baseOpts, subagentType: 'model-relay:other', frontmatterModel: 'sonnet' }) === null, 'model-relay:* untouched')
+  assert(resolveTierModel(baseOpts) === 'fast-model[1m]', 'haiku -> fast-model')
+  assert(resolveTierModel({ ...baseOpts, subagentType: 'pilotfish:executor', frontmatterModel: 'sonnet' }) === 'fast-model[1m]', 'sonnet -> fast-model')
+  assert(resolveTierModel({ ...baseOpts, subagentType: 'pilotfish:verifier', frontmatterModel: 'opus' }) === 'main-model[1m]', 'opus -> inherit resolves to active main-model')
+  assert(resolveTierModel({ ...baseOpts, activeModel: 'alt-model[1m]', subagentType: 'pilotfish:verifier', frontmatterModel: 'opus' }) === 'alt-model[1m]', 'opus -> inherit resolves to active alt-model')
+  assert(resolveTierModel({ ...baseOpts, activeModel: null, subagentType: 'pilotfish:verifier', frontmatterModel: 'opus' }) === null, 'inherit with no active model returns null')
+  assert(resolveTierModel({ ...baseOpts, subagentType: 'Explore', frontmatterModel: null }) === 'fast-model[1m]', 'built-in Explore defaults to haiku')
+  assert(resolveTierModel({ ...baseOpts, subagentType: 'Explore', explicitModel: 'opus', frontmatterModel: 'haiku' }) === 'main-model[1m]', 'explicit Claude tier overrides frontmatter')
+  assert(resolveTierModel({ ...baseOpts, subagentType: 'Explore', explicitModel: 'alt-model[1m]' }) === null, 'explicit non-Claude model untouched')
+  assert(resolveTierModel({ ...baseOpts, subagentType: 'general-purpose', frontmatterModel: null }) === null, 'unknown tier untouched')
+  assert(resolveTierModel({ ...baseOpts, subagentType: 'fable-agent', frontmatterModel: 'claude-fable-1' }) === null, 'unconfigured tier returns null')
 })

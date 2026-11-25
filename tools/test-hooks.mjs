@@ -12,5 +12,6 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const loader = pathToFileURL(path.join(root, 'tools', 'hooks-loader.mjs')).href
 const hook = `data:text/javascript,import { register } from "node:module"; register(${JSON.stringify(loader)})`
 const tests = fs.readdirSync(path.join(root, 'hooks')).filter((f) => f.endsWith('.test.ts')).map((f) => path.join('hooks', f))
+tests.push(path.join('tools', 'hooks-host.mjs'))
 
 execFileSync(process.execPath, ['--experimental-strip-types', '--disable-warning=ExperimentalWarning', '--import', hook, '--test', ...tests], { cwd: root, stdio: 'inherit' })
