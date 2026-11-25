@@ -160,6 +160,21 @@ A change to `agent` applies from your next message, without restarting Claude Co
 
 Claude Code can still run such a subagent on another model without saying so (a model missing from `availableModels` is swapped, with a line only in its debug log). The plugin checks twice: when the subagent starts, against the model Claude Code reports it started on, and when it finishes, against the models the router actually received. Either mismatch shows a notice that points to `/provider doctor`.
 
+When a window is pinned to a provider (`/provider <name>`), `providers.<name>.tierModels` can also remap Claude subagent tiers (`haiku`, `sonnet`, `opus`, `fable`) from the spawned agent's explicit tier or frontmatter `model:` (with built-in `Explore` defaulting to `haiku`) to specific model IDs—or `"inherit"` for the active session model. Normal `claude` sessions, `model-relay:<name>` subagents, explicit non-Claude models, and `fork`/`resume` spawns are left untouched:
+
+```json
+"providers": {
+  "backup": {
+    "model": "your-main-model",
+    "tierModels": {
+      "haiku": "your-fast-model",
+      "sonnet": "your-fast-model",
+      "opus": "inherit"
+    }
+  }
+}
+```
+
 ### Edit the config from the command line
 
 `add`, `set`, `providers`, `remove` and `migrate` change the file without hand-editing JSON. Every edit keeps a `.model-relay-backup` copy next to the file, tokens are never printed, and the running router picks the change up on its next request. On an older config (see `format` under Configuration), `add`, `set`, `providers`, `remove`, `alias`, `init`, `restart`, `rc` and `proxy enable` refuse and tell you to run `migrate` first; `migrate` is the only command that understands it. `doctor` also warns about an older config, a failover name that matches no provider, two providers that name the same model (the first one in the file gets it), an `availableModels` list in `~/.claude/settings.json` that leaves a provider's model out, and a running router older than the plugin.
@@ -221,6 +236,7 @@ Configuration lives in `~/.claude/model-relay.json`. The directory defaults to `
 | `providers.<name>.authHeader` | (from preset, else `"bearer"`) | How to send credentials: `"bearer"`, `"x-api-key"`, or `"both"`. Of the built-in presets only `zai` uses `"both"`; the others use `"bearer"` |
 | `providers.<name>.launch` | `null` | `{ "command": "...", "args": [...] }` to auto-spawn if localhost port is closed |
 | `providers.<name>.agent` | `null` | Fields for this provider's `model-relay:<name>` subagent, as in an agent file: `description`, `prompt`, `tools`, `disallowedTools`, `skills`, `effort`, `permissionMode`, `maxTurns`, `autoCompactWindow`, `initialPrompt`, `memory`, `isolation`, `background`, `omitClaudeMd`, `mcpServers`, `hooks`. A field of the wrong shape is ignored; if Claude Code refuses the whole set, the subagent keeps the defaults and a notice says so |
+| `providers.<name>.tierModels` | `null` | Per-tier model map (`haiku`, `sonnet`, `opus`, `fable`) applied to subagents spawned while this window is pinned to `<name>`. Values are model IDs or `"inherit"` (the active session model); `claude` sessions, `model-relay:*`, explicit non-Claude models, and `fork`/`resume` are untouched |
 
 ### Show the relay in your statusline
 

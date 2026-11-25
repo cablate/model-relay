@@ -18,6 +18,7 @@ import {
   base64ToBytes,
   buildPanelData,
   elsewhereText,
+  extractAgentFrontmatterModel,
   foreignConfigDir,
   foreignStatusText,
   has,
@@ -28,15 +29,19 @@ import {
   outdatedText,
   parseHealth,
   parseLocal,
+  parseSubagentRef,
   pingArgv,
   pingReport,
+  pluginInstallPaths,
   probeArgv,
   providerAgentSpecs,
   providerAgentOptions,
   providerReport,
+  providerTierModels,
   rasterCells,
   reachedRelay,
   relayAgent,
+  resolveTierModel,
   routerIsStale,
   routerScript,
   routerUrl,
@@ -56,6 +61,7 @@ import {
   toggleArgv,
   type AvatarAim,
   type AvatarWant,
+  type ClaudeTier,
   type Health,
   type LocalCfg,
 } from './logic'
@@ -89,6 +95,11 @@ let staleBusy = false // the router runs older code but was answering a request 
 let outdatedTold = false // the toast about an older config, once per session
 // The providers our own router last reported; kept through an outage so a model-relay:<name> spawn still gets its model
 let knownProviders: Record<string, string> = {}
+let currentSessionProvider: string | null = null
+let currentSessionModel: string | null = null
+let knownTierModels: Record<string, Partial<Record<ClaudeTier, string>>> = {}
+const agentFrontmatterCache = new Map<string, string | null>()
+const AGENT_FRONTMATTER_CACHE_SIZE = 128
 // model-relay:<name> subagents started and not finished yet, by agentId: checked against the router when their turn ends
 const pending = new Map<string, { name: string; model: string; since: number }>()
 let avatarEntries: Record<string, AvatarEntry> = {} // the config's "avatars", read each tick
@@ -117,8 +128,12 @@ async function syncProviders($: EngineInterface, providers: Record<string, strin
   knownProviders = providers
   let options: ReturnType<typeof providerAgentOptions> = {}
   try {
-    options = providerAgentOptions(JSON.parse(await $.fs.read(`${await configDir($)}/${CONFIG_NAME}`)))
-  } catch {}
+    const rawCfg = JSON.parse(await $.fs.read(`${await configDir($)}/${CONFIG_NAME}`)) as unknown
+    options = providerAgentOptions(rawCfg)
+    knownTierModels = providerTierModels(rawCfg)
+  } catch {
+    knownTierModels = {}
+  }
   const specs = providerAgentSpecs(providers, options)
   const sig = JSON.stringify(specs)
   if (sig === registeredSig) return
@@ -327,10 +342,67 @@ async function openPanel($: EngineInterface, cfg: LocalCfg, h: Health | null, la
   await update($, panelUi, ({ note: _n, ...u }) => ({ ...u, open: true, confirmingClaude: false, confirmingProxy: false, showSettings: false }))
 }
 
+function rememberSession(h: Health | null, fallbackProvider?: string, fallbackModel?: string): void {
+  const provider = (h?.session || fallbackProvider || '').trim().toLowerCase() || null
+  currentSessionProvider = provider
+  currentSessionModel =
+    (h as { sessionModel?: string } | null)?.sessionModel ||
+    fallbackModel ||
+    (provider && h && has(h.providers, provider) ? h.providers[provider]! : null) ||
+    (provider && has(knownProviders, provider) ? knownProviders[provider]! : null) ||
+    null
+}
+
+function setFrontmatterCache(key: string, val: string | null): void {
+  if (agentFrontmatterCache.has(key)) agentFrontmatterCache.delete(key)
+  agentFrontmatterCache.set(key, val)
+  if (agentFrontmatterCache.size > AGENT_FRONTMATTER_CACHE_SIZE) {
+    agentFrontmatterCache.delete(agentFrontmatterCache.keys().next().value!)
+  }
+}
+
+async function lookupAgentFrontmatterModel($: EngineInterface, subagentType: string, cwd?: string): Promise<string | null> {
+  const ref = parseSubagentRef(subagentType)
+  if (!ref) return null
+  const cacheKey = `${cwd || ''}\0${subagentType.trim().toLowerCase()}`
+  if (agentFrontmatterCache.has(cacheKey)) return agentFrontmatterCache.get(cacheKey) ?? null
+
+  let found: string | null = null
+  try {
+    const cfgDir = await configDir($)
+    if (ref.kind === 'plugin') {
+      const installedRaw = JSON.parse(await $.fs.read(`${cfgDir}/plugins/installed_plugins.json`)) as unknown
+      for (const installPath of pluginInstallPaths(installedRaw, ref.plugin, cwd)) {
+        try {
+          const md = await $.fs.read(`${installPath.replace(/\\/g, '/').replace(/\/+$/, '')}/agents/${ref.agent}.md`)
+          found = extractAgentFrontmatterModel(md)
+          break
+        } catch {}
+      }
+    } else {
+      const normCwd = cwd ? cwd.replace(/\\/g, '/').replace(/\/+$/, '') : ''
+      const candidates = [
+        ...(normCwd ? [`${normCwd}/.claude/agents/${ref.agent}.md`] : []),
+        `${cfgDir}/agents/${ref.agent}.md`,
+      ]
+      for (const file of candidates) {
+        try {
+          const md = await $.fs.read(file)
+          found = extractAgentFrontmatterModel(md)
+          break
+        } catch {}
+      }
+    }
+  } catch {}
+  setFrontmatterCache(cacheKey, found)
+  return found
+}
+
 // Our router answered: it is the one source of what providers exist
 async function ours($: EngineInterface, cfg: LocalCfg, h: Health, lang: 'zh' | 'en'): Promise<void> {
   startFailed = false
   await syncProviders($, h.providers)
+  rememberSession(h)
   await syncPanelData($, cfg, h, lang)
   followAvatar($, h)
 }
@@ -463,6 +535,7 @@ function panelActions($: EngineInterface): PanelActions {
           return bad(lang === 'en' ? 'Relay did not respond; nothing changed.' : '轉發站沒有回應，沒有改變。')
         }
         const h = await health($, cfg)
+        rememberSession(h, target)
         await close()
         $.ui.toast(switchedText(target, h && has(h.providers, target) ? h.providers[target]! : target, lang))
         return undefined
@@ -542,13 +615,30 @@ export const register: Register = (on) => {
   on('agent.spawn', async ($, e, next) => {
     if (e.fork || e.resume) return next(e)
     const relay = relayAgent(e.subagentType, knownProviders)
-    if (!relay) return next(e)
+    let tiered: string | null = null
+    if (!relay && currentSessionProvider && currentSessionProvider !== 'claude' && has(knownTierModels, currentSessionProvider)) {
+      try {
+        const frontmatterModel = e.model ? null : await lookupAgentFrontmatterModel($, e.subagentType, e.cwd)
+        tiered = resolveTierModel({
+          activeProvider: currentSessionProvider,
+          activeModel: currentSessionModel || (has(knownProviders, currentSessionProvider) ? knownProviders[currentSessionProvider]! : null),
+          tierModels: knownTierModels,
+          subagentType: e.subagentType,
+          explicitModel: e.model,
+          frontmatterModel,
+        })
+      } catch {
+        tiered = null
+      }
+    }
+    const target = relay ?? (tiered ? { name: currentSessionProvider!, model: tiered } : null)
+    if (!target) return next(e)
     const since = Date.now()
-    const r = await next({ ...e, model: relay.model })
+    const r = await next({ ...e, model: target.model })
     try {
-      if (spawnedElsewhere(relay.model, r.model)) $.ui.toast(elsewhereText(relay.name, relay.model, r.model ?? '', await detectLang($)))
+      if (spawnedElsewhere(target.model, r.model)) $.ui.toast(elsewhereText(target.name, target.model, r.model ?? '', await detectLang($)))
       else if (r.agentId) {
-        pending.set(r.agentId, { ...relay, since })
+        pending.set(r.agentId, { ...target, since })
         if (pending.size > 50) pending.delete(pending.keys().next().value!)
       }
     } catch {}
@@ -694,6 +784,7 @@ export const register: Register = (on) => {
         return { text: lang === 'en' ? 'Relay did not respond; nothing changed.' : '轉發站沒有回應，沒有改變。' }
       }
       const h = await health($, cfg)
+      rememberSession(h, arg)
       if (h) {
         await showStatus($, statusText(h, false, lang), statusFields(h, false))
         followAvatar($, h)

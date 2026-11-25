@@ -160,6 +160,21 @@ node tools/setup.mjs alias subagent sonnet       # 在 settings.json 設定 CLAU
 
 Claude Code 仍可能不聲不響地讓這種子代理跑在別的模型上（不在 `availableModels` 裡的模型會被換掉，只在它的除錯日誌留一行）。外掛會檢查兩次：子代理啟動時，比對 Claude Code 回報它實際用的模型；子代理結束時，比對轉發站真正收到的模型。任何一次不一致都會跳出提示，並指向 `/provider doctor`。
 
+當視窗切換到某個供應商（`/provider <name>`）時，`providers.<name>.tierModels` 也可以把子代理原本的 Claude 層級（`haiku`、`sonnet`、`opus`、`fable`，依派發時指定的層級或代理定義檔 frontmatter 的 `model:` 判斷；內建 `Explore` 預設為 `haiku`）改映射到指定的模型 ID，或寫成 `"inherit"` 沿用目前對話模型。正常 `claude` 對話、`model-relay:<name>` 子代理、明確指定的非 Claude 模型與 `fork`／`resume` 都不受影響：
+
+```json
+"providers": {
+  "backup": {
+    "model": "your-main-model",
+    "tierModels": {
+      "haiku": "your-fast-model",
+      "sonnet": "your-fast-model",
+      "opus": "inherit"
+    }
+  }
+}
+```
+
 ### 用指令改設定，不必手改 JSON
 
 `add`、`set`、`providers`、`remove` 與 `migrate` 可以不手改 JSON 就修改設定檔。每次修改都會在檔案旁留一份 `.model-relay-backup` 備份，token 一律不會印出，執行中的轉發站在下一個請求就會讀到新設定。遇到舊設定（見「設定」一節的 `format`），`add`、`set`、`providers`、`remove`、`alias`、`init`、`restart`、`rc` 與 `proxy enable` 會拒絕並請你先執行 `migrate`；`migrate` 是唯一看得懂舊設定的指令。`doctor` 也會提醒：舊設定、備援名單裡不存在的供應商、兩個供應商設了同一個模型（設定檔裡排前面的那個會拿到）、`~/.claude/settings.json` 裡漏列供應商模型的 `availableModels`，以及比外掛舊的轉發站。
@@ -221,6 +236,7 @@ node tools/setup.mjs rc
 | `providers.<name>.authHeader` | （由 preset 帶入，否則 `"bearer"`） | 金鑰標頭傳遞方式：`"bearer"`、`"x-api-key"` 或 `"both"`。內建 preset 只有 `zai` 用 `"both"`，其餘都用 `"bearer"` |
 | `providers.<name>.launch` | `null` | `{ "command": "...", "args": [...] }`，當本機連接埠未開時自動拉起程序 |
 | `providers.<name>.agent` | `null` | 這個供應商的 `model-relay:<name>` 子代理欄位，同 agent 定義檔：`description`、`prompt`、`tools`、`disallowedTools`、`skills`、`effort`、`permissionMode`、`maxTurns`、`autoCompactWindow`、`initialPrompt`、`memory`、`isolation`、`background`、`omitClaudeMd`、`mcpServers`、`hooks`。格式不對的欄位會被略過；Claude Code 整組不接受時，子代理先用預設值並跳出提示 |
+| `providers.<name>.tierModels` | `null` | 這個視窗切換到 `<name>` 時套用到子代理的層級模型對應（`haiku`、`sonnet`、`opus`、`fable`）。值為模型 ID 或 `"inherit"`（使用目前對話模型）；正常 `claude` 對話、`model-relay:*`、明確指定的非 Claude 模型與 `fork`／`resume` 不受影響 |
 
 ### 在自己的 statusline 顯示轉發站狀態
 
